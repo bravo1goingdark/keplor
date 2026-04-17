@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { base } from '$app/paths';
   import { page } from '$app/state';
 
   let scrolled = $state(false);
@@ -17,18 +18,18 @@
   class:border-line={scrolled}
 >
   <div class="max-w-[1280px] mx-auto px-6 md:px-20 h-16 flex items-center justify-between">
-    <a href="/" class="font-serif text-[17px]">keplor</a>
+    <a href="{base}/" class="font-serif text-[17px]">keplor</a>
     <div class="flex items-center gap-8 text-[15px]">
       <a
-        href="/docs"
-        class="transition-colors {page.url.pathname.startsWith('/docs') ? 'text-ink' : 'text-ink-muted hover:text-ink'}"
+        href="{base}/docs"
+        class="transition-colors {page.url.pathname.startsWith(`${base}/docs`) ? 'text-ink' : 'text-ink-muted hover:text-ink'}"
       >
         Docs
       </a>
       <a href="https://github.com/bravo1goingdark/keplor" target="_blank" rel="noopener" class="text-ink-muted hover:text-ink transition-colors">
         GitHub
       </a>
-      <a href="/docs/quickstart" class="px-[22px] py-[12px] bg-accent text-accent-ink text-[15px] font-medium rounded-[6px] hover:-translate-y-px transition-transform">
+      <a href="{base}/docs/quickstart" class="px-[22px] py-[12px] bg-accent text-accent-ink text-[15px] font-medium rounded-[6px] hover:-translate-y-px transition-transform">
         Get started
       </a>
     </div>

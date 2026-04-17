@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { base } from '$app/paths';
   import CodeBlock from '$lib/components/CodeBlock.svelte';
 
   let activeTab = $state('curl');
@@ -62,10 +63,10 @@ resp = requests.post(
       </p>
 
       <div class="flex items-center gap-6 animate-in-delay-2">
-        <a href="/docs/quickstart" class="px-[22px] py-[12px] bg-accent text-accent-ink text-[15px] font-medium rounded-[6px] hover:-translate-y-px transition-transform">
+        <a href="{base}/docs/quickstart" class="px-[22px] py-[12px] bg-accent text-accent-ink text-[15px] font-medium rounded-[6px] hover:-translate-y-px transition-transform">
           Get started
         </a>
-        <a href="/docs/api-reference" class="text-[15px] text-ink-muted hover:text-ink transition-colors group">
+        <a href="{base}/docs/api-reference" class="text-[15px] text-ink-muted hover:text-ink transition-colors group">
           See the API <span class="inline-block transition-transform group-hover:translate-x-0.5">&rarr;</span>
         </a>
       </div>
@@ -168,7 +169,7 @@ resp = requests.post(
       Five commands from clone to your first captured event.
       No account, no API key, no credit card.
     </p>
-    <a href="/docs/quickstart" class="px-[22px] py-[12px] bg-accent text-accent-ink text-[15px] font-medium rounded-[6px] hover:-translate-y-px transition-transform inline-block">
+    <a href="{base}/docs/quickstart" class="px-[22px] py-[12px] bg-accent text-accent-ink text-[15px] font-medium rounded-[6px] hover:-translate-y-px transition-transform inline-block">
       Read the quickstart
     </a>
   </div>

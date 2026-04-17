@@ -1,3 +1,7 @@
+<script lang="ts">
+  import { base } from '$app/paths';
+</script>
+
 <svelte:head>
   <title>Documentation - Keplor</title>
 </svelte:head>
@@ -7,10 +11,10 @@
 
 <div class="grid sm:grid-cols-2 gap-4 mb-16">
   {#each [
-    { href: '/docs/quickstart', title: 'Quickstart', desc: 'Install and send your first event.' },
-    { href: '/docs/api-reference', title: 'API Reference', desc: 'Endpoints, schemas, and errors.' },
-    { href: '/docs/configuration', title: 'Configuration', desc: 'TOML config and env vars.' },
-    { href: '/docs/cli', title: 'CLI', desc: 'Server, query, stats, and gc.' },
+    { href: `${base}/docs/quickstart`, title: 'Quickstart', desc: 'Install and send your first event.' },
+    { href: `${base}/docs/api-reference`, title: 'API Reference', desc: 'Endpoints, schemas, and errors.' },
+    { href: `${base}/docs/configuration`, title: 'Configuration', desc: 'TOML config and env vars.' },
+    { href: `${base}/docs/cli`, title: 'CLI', desc: 'Server, query, stats, and gc.' },
   ] as { href, title, desc }}
     <a {href} class="block p-6 bg-bg-alt rounded-[4px] border border-line hover:border-ink-muted/30 transition-colors no-underline">
       <h3 class="text-[15px] font-medium mb-1 text-ink">{title}</h3>

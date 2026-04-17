@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { base } from '$app/paths';
   import Pre from '$lib/components/Pre.svelte';
 
   const healthResp = `$ curl http://localhost:8080/health
@@ -75,7 +76,7 @@ $ cp target/release/keplor /usr/local/bin/" />
 
 <h2>Next steps</h2>
 <p>
-  <a href="/docs/api-reference">API Reference</a> &mdash; full endpoint docs.<br />
-  <a href="/docs/configuration">Configuration</a> &mdash; auth, storage, tuning.<br />
-  <a href="/docs/cli">CLI Reference</a> &mdash; all commands.
+  <a href="{base}/docs/api-reference">API Reference</a> &mdash; full endpoint docs.<br />
+  <a href="{base}/docs/configuration">Configuration</a> &mdash; auth, storage, tuning.<br />
+  <a href="{base}/docs/cli">CLI Reference</a> &mdash; all commands.
 </p>

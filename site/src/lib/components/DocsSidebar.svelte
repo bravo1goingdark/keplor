@@ -1,12 +1,13 @@
 <script lang="ts">
+  import { base } from '$app/paths';
   import { page } from '$app/state';
 
   const nav = [
-    { href: '/docs', label: 'Overview' },
-    { href: '/docs/quickstart', label: 'Quickstart' },
-    { href: '/docs/api-reference', label: 'API Reference' },
-    { href: '/docs/configuration', label: 'Configuration' },
-    { href: '/docs/cli', label: 'CLI' },
+    { href: `${base}/docs`, label: 'Overview' },
+    { href: `${base}/docs/quickstart`, label: 'Quickstart' },
+    { href: `${base}/docs/api-reference`, label: 'API Reference' },
+    { href: `${base}/docs/configuration`, label: 'Configuration' },
+    { href: `${base}/docs/cli`, label: 'CLI' },
   ];
 </script>
 

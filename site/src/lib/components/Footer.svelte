@@ -1,19 +1,23 @@
+<script lang="ts">
+  import { base } from '$app/paths';
+</script>
+
 <footer class="border-t border-line">
   <div class="max-w-[1280px] mx-auto px-6 md:px-20 py-16">
     <div class="grid grid-cols-2 md:grid-cols-4 gap-10 mb-20">
       <div>
         <p class="text-[12px] uppercase tracking-[0.12em] text-ink-muted mb-4">Product</p>
         <div class="space-y-2.5 text-[14px]">
-          <a href="/docs/quickstart" class="block text-ink-muted hover:text-ink transition-colors">Quickstart</a>
-          <a href="/docs/api-reference" class="block text-ink-muted hover:text-ink transition-colors">API</a>
-          <a href="/docs/configuration" class="block text-ink-muted hover:text-ink transition-colors">Configuration</a>
+          <a href="{base}/docs/quickstart" class="block text-ink-muted hover:text-ink transition-colors">Quickstart</a>
+          <a href="{base}/docs/api-reference" class="block text-ink-muted hover:text-ink transition-colors">API</a>
+          <a href="{base}/docs/configuration" class="block text-ink-muted hover:text-ink transition-colors">Configuration</a>
         </div>
       </div>
       <div>
         <p class="text-[12px] uppercase tracking-[0.12em] text-ink-muted mb-4">Resources</p>
         <div class="space-y-2.5 text-[14px]">
-          <a href="/docs" class="block text-ink-muted hover:text-ink transition-colors">Documentation</a>
-          <a href="/docs/cli" class="block text-ink-muted hover:text-ink transition-colors">CLI Reference</a>
+          <a href="{base}/docs" class="block text-ink-muted hover:text-ink transition-colors">Documentation</a>
+          <a href="{base}/docs/cli" class="block text-ink-muted hover:text-ink transition-colors">CLI Reference</a>
         </div>
       </div>
       <div>
