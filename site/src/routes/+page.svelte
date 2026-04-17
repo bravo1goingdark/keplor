@@ -40,8 +40,8 @@ resp = requests.post(
 </script>
 
 <svelte:head>
-  <title>Keplor - LLM Observability</title>
-  <meta name="description" content="Track every token, every cost, every request across all LLM providers. Single binary. Open source." />
+  <title>Keplor - LLM Log Aggregation</title>
+  <meta name="description" content="Capture every LLM request and response across all providers. Compressed, deduplicated, queryable. Single binary." />
 </svelte:head>
 
 <!-- Hero -->
@@ -49,16 +49,16 @@ resp = requests.post(
   <div class="max-w-[1280px] mx-auto">
     <div class="max-w-[66%]">
       <p class="text-[12px] uppercase tracking-[0.12em] text-ink-muted mb-6 animate-in">
-        LLM Observability
+        LLM Log Aggregation
       </p>
 
       <h1 class="font-serif text-[clamp(48px,7vw,96px)] leading-[0.95] tracking-[-0.03em] mb-8 animate-in">
-        Know what your<br />AI actually costs.
+        Every LLM call.<br />Captured.
       </h1>
 
       <p class="text-[18px] leading-[1.55] text-ink-muted max-w-[52ch] mb-10 animate-in-delay-1">
-        One binary tracks every token across every provider. No agents,
-        no dashboards, no infrastructure. Just honest numbers.
+        One binary captures every request and response across 13 providers.
+        Compressed, deduplicated, queryable. Nothing else needed.
       </p>
 
       <div class="flex items-center gap-6 animate-in-delay-2">
@@ -78,8 +78,8 @@ resp = requests.post(
   <div class="max-w-[1280px] mx-auto">
     <div class="grid md:grid-cols-3 gap-x-8 gap-y-12">
       {#each [
-        { n: '01', title: 'Precise cost accounting', desc: 'Every request priced to the nanodollar from the LiteLLM catalog. Broken down by user, API key, model, and org.' },
-        { n: '02', title: 'Full-body storage', desc: 'Requests and responses compressed with zstd. System prompts deduplicated by content hash. Trained dictionaries for 5x ratios.' },
+        { n: '01', title: 'Full request/response capture', desc: 'Every prompt and completion stored with zstd compression. System prompts and tool schemas deduplicated by content hash. Trained dictionaries for 5x ratios.' },
+        { n: '02', title: 'Query and filter', desc: 'REST API with cursor pagination. Filter by user, model, provider, source, or time range. Sub-100 microsecond reads. Cost computed automatically as metadata.' },
         { n: '03', title: 'Zero dependencies', desc: 'A single static binary under 10 MB. SQLite for storage. No containers, no runtime, no cloud account. Just run it.' },
       ] as { n, title, desc }}
         <div>
@@ -141,10 +141,10 @@ resp = requests.post(
 <section class="px-6 md:px-20 border-t border-line" style="padding-top: clamp(96px, 12vw, 160px); padding-bottom: clamp(96px, 12vw, 160px);">
   <div class="max-w-[1280px] mx-auto">
     <h2 class="font-serif text-[clamp(32px,4vw,48px)] leading-[1.05] tracking-[-0.02em] mb-5">
-      Start observing.
+      Start logging.
     </h2>
     <p class="text-[17px] text-ink-muted mb-8 max-w-[44ch] leading-[1.6]">
-      Five commands from clone to your first tracked event.
+      Five commands from clone to your first captured event.
       No account, no API key, no credit card.
     </p>
     <a href="/docs/quickstart" class="px-[22px] py-[12px] bg-accent text-accent-ink text-[15px] font-medium rounded-[6px] hover:-translate-y-px transition-transform inline-block">
