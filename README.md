@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="site/static/social-banner.svg" alt="Keplor — LLM Observability & Cost Accounting" width="100%">
+</p>
+
 # Keplor
 
 > Observe every LLM request. Know exactly what it cost.
