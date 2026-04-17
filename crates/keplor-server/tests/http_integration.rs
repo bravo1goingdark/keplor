@@ -17,9 +17,8 @@ static INIT_CRYPTO: Once = Once::new();
 
 async fn spawn_server(api_keys: Vec<String>) -> String {
     INIT_CRYPTO.call_once(|| {
-        rustls::crypto::aws_lc_rs::default_provider()
-            .install_default()
-            .expect("failed to install rustls crypto provider");
+        // Ok(()) on first call, Err if already installed — both are fine.
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     });
     let store = Arc::new(Store::open_in_memory().unwrap());
     let writer = Arc::new(BatchWriter::new(Arc::clone(&store), BatchConfig::default()));
