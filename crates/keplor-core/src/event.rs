@@ -77,6 +77,8 @@ pub struct LlmEvent {
     pub source: Option<SmolStr>,
     /// Wall-clock time in nanoseconds when Keplor ingested this event.
     pub ingested_at: i64,
+    /// Arbitrary metadata — stored as JSON text, not indexed.
+    pub metadata: Option<serde_json::Value>,
 }
 
 /// Three-dimensional latency breakdown.
@@ -241,6 +243,7 @@ mod tests {
             trace_id: None,
             source: None,
             ingested_at: 0,
+            metadata: None,
         };
         let e2 = e.clone();
         assert_eq!(e.id, e2.id);

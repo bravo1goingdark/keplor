@@ -39,6 +39,7 @@ fn make_event(i: usize) -> LlmEvent {
         trace_id: None,
         source: None,
         ingested_at: 0,
+        metadata: None,
     }
 }
 

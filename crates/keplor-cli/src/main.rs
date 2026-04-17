@@ -58,6 +58,15 @@ enum Cli {
         #[arg(short, long, default_value = "keplor.db")]
         db: PathBuf,
     },
+    /// Backfill daily rollups from stored events.
+    Rollup {
+        /// Number of past days to roll up (including today).
+        #[arg(long, default_value = "30")]
+        days: u32,
+        /// Path to the SQLite database.
+        #[arg(short, long, default_value = "keplor.db")]
+        db: PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
@@ -71,6 +80,7 @@ fn main() -> Result<()> {
         },
         Cli::Stats { db } => stats(db),
         Cli::Gc { older_than_days, db } => gc(db, older_than_days),
+        Cli::Rollup { days, db } => rollup(db, days),
     }
 }
 
@@ -237,6 +247,26 @@ fn gc(db: PathBuf, older_than_days: u32) -> Result<()> {
         "GC complete: deleted {} events, {} orphaned blobs (cutoff: {} days ago)",
         stats.events_deleted, stats.blobs_deleted, older_than_days
     );
+    Ok(())
+}
+
+fn rollup(db: PathBuf, days: u32) -> Result<()> {
+    init_tracing();
+    let store = keplor_store::Store::open(&db)
+        .with_context(|| format!("failed to open db at {}", db.display()))?;
+
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .context("system clock error")?
+        .as_secs() as i64;
+    let today = now_secs - (now_secs % 86400);
+
+    for i in 0..days {
+        let day = today - (i as i64) * 86400;
+        store.rollup_day(day).with_context(|| format!("rollup failed for day {day}"))?;
+    }
+
+    println!("rolled up {days} days ending at {today} (epoch seconds)");
     Ok(())
 }
 

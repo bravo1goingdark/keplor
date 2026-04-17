@@ -111,8 +111,11 @@ pub struct EventResponse {
     pub http_status: Option<u16>,
     pub source: Option<String>,
     pub user_id: Option<String>,
+    pub api_key_id: Option<String>,
     pub endpoint: String,
     pub streaming: bool,
+    pub error: Option<String>,
+    pub metadata: Option<serde_json::Value>,
 }
 
 /// Token usage in query response.
@@ -151,8 +154,8 @@ pub async fn query_events(
 
     let cursor = params.cursor.map(Cursor);
 
-    // Use the narrow query path — reads only the 16 columns the API
-    // needs instead of all 42 columns.
+    // Use the narrow query path — reads only the 19 columns the API
+    // needs instead of all 43 columns.
     let store = state.pipeline.store_arc();
     let events =
         tokio::task::spawn_blocking(move || store.query_summary(&filter, limit + 1, cursor))
@@ -166,25 +169,31 @@ pub async fn query_events(
 
     let responses: Vec<EventResponse> = page
         .into_iter()
-        .map(|e| EventResponse {
-            id: e.id.to_string(),
-            timestamp: e.ts_ns,
-            model: e.model,
-            provider: e.provider,
-            usage: UsageResponse {
-                input_tokens: e.input_tokens,
-                output_tokens: e.output_tokens,
-                cache_read_input_tokens: e.cache_read_input_tokens,
-                reasoning_tokens: e.reasoning_tokens,
-            },
-            cost_nanodollars: e.cost_nanodollars,
-            latency_total_ms: e.total_ms,
-            latency_ttft_ms: e.ttft_ms,
-            http_status: e.http_status,
-            source: e.source,
-            user_id: e.user_id,
-            endpoint: e.endpoint,
-            streaming: e.streaming,
+        .map(|e| {
+            let metadata = e.metadata_json.as_deref().and_then(|s| serde_json::from_str(s).ok());
+            EventResponse {
+                id: e.id.to_string(),
+                timestamp: e.ts_ns,
+                model: e.model,
+                provider: e.provider,
+                usage: UsageResponse {
+                    input_tokens: e.input_tokens,
+                    output_tokens: e.output_tokens,
+                    cache_read_input_tokens: e.cache_read_input_tokens,
+                    reasoning_tokens: e.reasoning_tokens,
+                },
+                cost_nanodollars: e.cost_nanodollars,
+                latency_total_ms: e.total_ms,
+                latency_ttft_ms: e.ttft_ms,
+                http_status: e.http_status,
+                source: e.source,
+                user_id: e.user_id,
+                api_key_id: e.api_key_id,
+                endpoint: e.endpoint,
+                streaming: e.streaming,
+                error: e.error_type,
+                metadata,
+            }
         })
         .collect();
 
@@ -193,6 +202,242 @@ pub async fn query_events(
         cursor: if has_more { next_cursor } else { None },
         has_more,
     }))
+}
+
+// ── Aggregation API ────────────────────────────────────────────────────
+
+/// Query parameters for `GET /v1/quota`.
+#[derive(Debug, Deserialize)]
+pub struct QuotaQuery {
+    /// Filter by user id.
+    pub user_id: Option<String>,
+    /// Filter by API key id.
+    pub api_key_id: Option<String>,
+    /// Events on or after this epoch nanosecond timestamp (required).
+    pub from: i64,
+}
+
+/// Response for `GET /v1/quota`.
+#[derive(Debug, Serialize)]
+pub struct QuotaResponse {
+    /// Total cost in nanodollars.
+    pub cost_nanodollars: i64,
+    /// Number of matching events.
+    pub event_count: i64,
+}
+
+/// `GET /v1/quota` — real-time cost + event count from `llm_events`.
+///
+/// At least one of `user_id` or `api_key_id` must be provided to prevent
+/// unfiltered scans of the entire table.
+pub async fn query_quota(
+    State(state): State<AppState>,
+    Query(params): Query<QuotaQuery>,
+) -> Result<Json<QuotaResponse>, crate::error::ServerError> {
+    if params.user_id.is_none() && params.api_key_id.is_none() {
+        return Err(crate::error::ServerError::Validation(
+            "at least one of user_id or api_key_id is required".into(),
+        ));
+    }
+
+    let store = state.pipeline.store_arc();
+    let summary = tokio::task::spawn_blocking(move || {
+        store.quota_summary(params.user_id.as_deref(), params.api_key_id.as_deref(), params.from)
+    })
+    .await
+    .map_err(|e| crate::error::ServerError::Internal(e.to_string()))?
+    .map_err(crate::error::ServerError::from)?;
+
+    Ok(Json(QuotaResponse {
+        cost_nanodollars: summary.cost_nanodollars,
+        event_count: summary.event_count,
+    }))
+}
+
+/// Query parameters for `GET /v1/rollups`.
+#[derive(Debug, Deserialize)]
+pub struct RollupsQuery {
+    /// Filter by user id.
+    pub user_id: Option<String>,
+    /// Filter by API key id.
+    pub api_key_id: Option<String>,
+    /// Start, epoch nanoseconds (converted to day boundary internally).
+    pub from: i64,
+    /// End, epoch nanoseconds (converted to day boundary internally).
+    pub to: i64,
+}
+
+/// A single rollup entry in the response.
+#[derive(Debug, Serialize)]
+pub struct RollupEntry {
+    /// Day boundary as epoch seconds.
+    pub day: i64,
+    /// User id.
+    pub user_id: String,
+    /// API key id.
+    pub api_key_id: String,
+    /// Provider id key.
+    pub provider: String,
+    /// Model name.
+    pub model: String,
+    /// Number of events.
+    pub event_count: i64,
+    /// Number of error events (http_status >= 400).
+    pub error_count: i64,
+    /// Total input tokens.
+    pub input_tokens: i64,
+    /// Total output tokens.
+    pub output_tokens: i64,
+    /// Total cache-read input tokens.
+    pub cache_read_input_tokens: i64,
+    /// Total cache-creation input tokens.
+    pub cache_creation_input_tokens: i64,
+    /// Total cost in nanodollars.
+    pub cost_nanodollars: i64,
+}
+
+/// Response for `GET /v1/rollups`.
+#[derive(Debug, Serialize)]
+pub struct RollupsResponse {
+    /// Daily rollup rows.
+    pub rollups: Vec<RollupEntry>,
+}
+
+/// `GET /v1/rollups` — pre-aggregated daily rollup rows.
+pub async fn query_rollups(
+    State(state): State<AppState>,
+    Query(params): Query<RollupsQuery>,
+) -> Result<Json<RollupsResponse>, crate::error::ServerError> {
+    let from_day = ns_to_day_epoch(params.from);
+    let to_day = ns_to_day_epoch(params.to);
+
+    let store = state.pipeline.store_arc();
+    let rows = tokio::task::spawn_blocking(move || {
+        store.query_rollups(
+            params.user_id.as_deref(),
+            params.api_key_id.as_deref(),
+            from_day,
+            to_day,
+        )
+    })
+    .await
+    .map_err(|e| crate::error::ServerError::Internal(e.to_string()))?
+    .map_err(crate::error::ServerError::from)?;
+
+    let rollups = rows
+        .into_iter()
+        .map(|r| RollupEntry {
+            day: r.day,
+            user_id: r.user_id,
+            api_key_id: r.api_key_id,
+            provider: r.provider,
+            model: r.model,
+            event_count: r.event_count,
+            error_count: r.error_count,
+            input_tokens: r.input_tokens,
+            output_tokens: r.output_tokens,
+            cache_read_input_tokens: r.cache_read_input_tokens,
+            cache_creation_input_tokens: r.cache_creation_input_tokens,
+            cost_nanodollars: r.cost_nanodollars,
+        })
+        .collect();
+
+    Ok(Json(RollupsResponse { rollups }))
+}
+
+/// Query parameters for `GET /v1/stats`.
+#[derive(Debug, Deserialize)]
+pub struct StatsQuery {
+    /// Filter by user id.
+    pub user_id: Option<String>,
+    /// Filter by API key id.
+    pub api_key_id: Option<String>,
+    /// Start, epoch nanoseconds.
+    pub from: i64,
+    /// End, epoch nanoseconds.
+    pub to: i64,
+    /// Optional provider filter.
+    pub provider: Option<String>,
+    /// Set to `"model"` to group results by provider+model.
+    pub group_by: Option<String>,
+}
+
+/// A single stats entry in the response.
+#[derive(Debug, Serialize)]
+pub struct StatEntry {
+    /// Provider (empty when not grouped).
+    pub provider: String,
+    /// Model name (empty when not grouped).
+    pub model: String,
+    /// Number of events.
+    pub event_count: i64,
+    /// Number of error events.
+    pub error_count: i64,
+    /// Total input tokens.
+    pub input_tokens: i64,
+    /// Total output tokens.
+    pub output_tokens: i64,
+    /// Total cache-read input tokens.
+    pub cache_read_input_tokens: i64,
+    /// Total cache-creation input tokens.
+    pub cache_creation_input_tokens: i64,
+    /// Total cost in nanodollars.
+    pub cost_nanodollars: i64,
+}
+
+/// Response for `GET /v1/stats`.
+#[derive(Debug, Serialize)]
+pub struct StatsResponse {
+    /// Aggregated stat rows.
+    pub stats: Vec<StatEntry>,
+}
+
+/// `GET /v1/stats` — aggregated period statistics from `daily_rollups`.
+pub async fn query_stats(
+    State(state): State<AppState>,
+    Query(params): Query<StatsQuery>,
+) -> Result<Json<StatsResponse>, crate::error::ServerError> {
+    let from_day = ns_to_day_epoch(params.from);
+    let to_day = ns_to_day_epoch(params.to);
+    let group_by_model = params.group_by.as_deref() == Some("model");
+
+    let store = state.pipeline.store_arc();
+    let rows = tokio::task::spawn_blocking(move || {
+        store.aggregate_stats(
+            params.user_id.as_deref(),
+            params.api_key_id.as_deref(),
+            from_day,
+            to_day,
+            params.provider.as_deref(),
+            group_by_model,
+        )
+    })
+    .await
+    .map_err(|e| crate::error::ServerError::Internal(e.to_string()))?
+    .map_err(crate::error::ServerError::from)?;
+
+    let stats = rows
+        .into_iter()
+        .map(|r| StatEntry {
+            provider: r.provider,
+            model: r.model,
+            event_count: r.event_count,
+            error_count: r.error_count,
+            input_tokens: r.input_tokens,
+            output_tokens: r.output_tokens,
+            cache_read_input_tokens: r.cache_read_input_tokens,
+            cache_creation_input_tokens: r.cache_creation_input_tokens,
+            cost_nanodollars: r.cost_nanodollars,
+        })
+        .collect();
+
+    Ok(Json(StatsResponse { stats }))
+}
+
+/// Convert epoch nanoseconds to a day boundary in epoch seconds.
+fn ns_to_day_epoch(ns: i64) -> i64 {
+    let secs = ns / 1_000_000_000;
+    secs - (secs % 86400)
 }
 
 // ── Health & Metrics ────────────────────────────────────────────────────

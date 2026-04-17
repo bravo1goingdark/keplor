@@ -15,6 +15,7 @@ use tower_http::trace::TraceLayer;
 use crate::auth::{self, ApiKeySet};
 use crate::config::ServerConfig;
 use crate::pipeline::Pipeline;
+use crate::rollup;
 use crate::routes::{self, AppState};
 
 /// The Keplor ingestion server.
@@ -32,6 +33,12 @@ impl PipelineServer {
         metrics_handle: PrometheusHandle,
     ) -> Self {
         let state = AppState { pipeline, metrics_handle: Arc::new(metrics_handle) };
+
+        // Spawn background rollup task — refreshes today's daily_rollups
+        // every 60s so aggregation queries stay current.
+        let rollup_store = state.pipeline.store_arc();
+        rollup::spawn_rollup_task(rollup_store, std::time::Duration::from_secs(60));
+
         let keys = Arc::new(keys);
         let body_limit = config.pipeline.max_body_bytes;
 
@@ -39,6 +46,9 @@ impl PipelineServer {
             .route("/v1/events", post(routes::ingest_single))
             .route("/v1/events/batch", post(routes::ingest_batch))
             .route("/v1/events", get(routes::query_events))
+            .route("/v1/quota", get(routes::query_quota))
+            .route("/v1/rollups", get(routes::query_rollups))
+            .route("/v1/stats", get(routes::query_stats))
             .layer(DefaultBodyLimit::max(body_limit))
             .layer(middleware::from_fn(move |req, next| {
                 let keys = Arc::clone(&keys);

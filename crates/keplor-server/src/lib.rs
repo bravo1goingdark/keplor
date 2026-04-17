@@ -8,6 +8,7 @@ pub mod config;
 pub mod error;
 pub mod normalize;
 pub mod pipeline;
+pub mod rollup;
 pub mod routes;
 pub mod schema;
 pub mod server;

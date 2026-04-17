@@ -271,6 +271,7 @@ fn build_llm_event(
         trace_id: event.trace_id.as_deref().and_then(|s| s.parse().ok()),
         source: event.source.as_deref().map(SmolStr::new),
         ingested_at: now_ns,
+        metadata: event.metadata.clone(),
     })
 }
 

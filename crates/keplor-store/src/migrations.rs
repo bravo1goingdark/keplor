@@ -5,8 +5,13 @@ use rusqlite::Connection;
 use crate::error::StoreError;
 
 /// All migrations in order.  Each entry is `(version, sql)`.
-static MIGRATIONS: &[(u32, &str)] =
-    &[(1, MIGRATION_0001), (2, MIGRATION_0002), (3, MIGRATION_0003)];
+static MIGRATIONS: &[(u32, &str)] = &[
+    (1, MIGRATION_0001),
+    (2, MIGRATION_0002),
+    (3, MIGRATION_0003),
+    (4, MIGRATION_0004),
+    (5, MIGRATION_0005),
+];
 
 const MIGRATION_0001: &str = r"
 CREATE TABLE IF NOT EXISTS schema_version(
@@ -93,6 +98,36 @@ CREATE INDEX IF NOT EXISTS idx_events_provider_ts ON llm_events(provider, ts_ns)
 CREATE INDEX IF NOT EXISTS idx_events_source_ts ON llm_events(source, ts_ns);
 ";
 
+const MIGRATION_0004: &str = r"
+-- Rebuild daily_rollups: add provider, error_count, cache token columns,
+-- fix NULL-in-PK bug (NULLs become empty string via COALESCE in rollup_day).
+-- Old table was always empty (rollup_day was never called), so DROP is safe.
+DROP TABLE IF EXISTS daily_rollups;
+
+CREATE TABLE daily_rollups (
+  day             INTEGER NOT NULL,
+  user_id         TEXT NOT NULL DEFAULT '',
+  api_key_id      TEXT NOT NULL DEFAULT '',
+  provider        TEXT NOT NULL DEFAULT '',
+  model           TEXT NOT NULL DEFAULT '',
+  event_count     INTEGER NOT NULL DEFAULT 0,
+  error_count     INTEGER NOT NULL DEFAULT 0,
+  input_tokens    INTEGER NOT NULL DEFAULT 0,
+  output_tokens   INTEGER NOT NULL DEFAULT 0,
+  cache_read_input_tokens     INTEGER NOT NULL DEFAULT 0,
+  cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0,
+  cost_nanodollars            INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY(day, user_id, api_key_id, provider, model)
+) STRICT;
+
+CREATE INDEX idx_rollups_user_day ON daily_rollups(user_id, day);
+CREATE INDEX idx_rollups_key_day  ON daily_rollups(api_key_id, day);
+";
+
+const MIGRATION_0005: &str = r"
+ALTER TABLE llm_events ADD COLUMN metadata_json TEXT;
+";
+
 /// Apply all unapplied migrations.
 pub(crate) fn migrate(conn: &Connection) -> Result<(), StoreError> {
     conn.execute_batch(
@@ -147,7 +182,7 @@ mod tests {
         migrate(&conn).unwrap();
         let ver: u32 =
             conn.query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(ver, 3);
+        assert_eq!(ver, 5);
     }
 
     #[test]
@@ -157,7 +192,7 @@ mod tests {
         migrate(&conn).unwrap();
         let ver: u32 =
             conn.query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(ver, 3);
+        assert_eq!(ver, 5);
     }
 
     #[test]

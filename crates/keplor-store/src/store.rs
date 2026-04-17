@@ -38,6 +38,8 @@ pub struct EventSummary {
     pub ts_ns: i64,
     /// Caller-provided user id.
     pub user_id: Option<String>,
+    /// API key id.
+    pub api_key_id: Option<String>,
     /// Provider id key (e.g. `"openai"`).
     pub provider: String,
     /// Model name.
@@ -64,6 +66,71 @@ pub struct EventSummary {
     pub streaming: bool,
     /// Ingestion source.
     pub source: Option<String>,
+    /// Error type (e.g. `"rate_limited"`, `"upstream_429"`).
+    pub error_type: Option<String>,
+    /// Arbitrary metadata as JSON text.
+    pub metadata_json: Option<String>,
+}
+
+/// Cost + event count from a quota query.
+#[derive(Debug, Clone)]
+pub struct QuotaSummary {
+    /// Total cost in nanodollars.
+    pub cost_nanodollars: i64,
+    /// Number of events matching the filter.
+    pub event_count: i64,
+}
+
+/// A single row from the `daily_rollups` table.
+#[derive(Debug, Clone)]
+pub struct RollupRow {
+    /// Day boundary as epoch seconds.
+    pub day: i64,
+    /// User id (empty string if not set).
+    pub user_id: String,
+    /// API key id (empty string if not set).
+    pub api_key_id: String,
+    /// Provider id key.
+    pub provider: String,
+    /// Model name.
+    pub model: String,
+    /// Number of events.
+    pub event_count: i64,
+    /// Number of events with http_status >= 400.
+    pub error_count: i64,
+    /// Total input tokens.
+    pub input_tokens: i64,
+    /// Total output tokens.
+    pub output_tokens: i64,
+    /// Total cache-read input tokens.
+    pub cache_read_input_tokens: i64,
+    /// Total cache-creation input tokens.
+    pub cache_creation_input_tokens: i64,
+    /// Total cost in nanodollars.
+    pub cost_nanodollars: i64,
+}
+
+/// An aggregated stats row (optionally grouped by model).
+#[derive(Debug, Clone)]
+pub struct AggregateRow {
+    /// Provider (empty string when not grouped).
+    pub provider: String,
+    /// Model name (empty string when not grouped).
+    pub model: String,
+    /// Number of events.
+    pub event_count: i64,
+    /// Number of error events.
+    pub error_count: i64,
+    /// Total input tokens.
+    pub input_tokens: i64,
+    /// Total output tokens.
+    pub output_tokens: i64,
+    /// Total cache-read input tokens.
+    pub cache_read_input_tokens: i64,
+    /// Total cache-creation input tokens.
+    pub cache_creation_input_tokens: i64,
+    /// Total cost in nanodollars.
+    pub cost_nanodollars: i64,
 }
 
 /// Local SQLite store for LLM events and their payload blobs.
@@ -147,6 +214,9 @@ impl Store {
         let error_type = event.error.as_ref().map(error_type_str);
         let error_message = event.error.as_ref().map(|e| e.to_string());
 
+        let metadata_str =
+            event.metadata.as_ref().map(|v| serde_json::to_string(v).unwrap_or_default());
+
         tx.execute(
             "INSERT INTO llm_events(
                 id, ts_ns, user_id, api_key_id, org_id, project_id, route_id,
@@ -159,7 +229,7 @@ impl Store {
                 error_type, error_message,
                 request_sha256, response_sha256, request_blob_id, response_blob_id,
                 client_ip, user_agent, request_id, trace_id,
-                source, ingested_at
+                source, ingested_at, metadata_json
              ) VALUES(
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7,
                 ?8, ?9, ?10, ?11, ?12, ?13,
@@ -169,7 +239,7 @@ impl Store {
                 ?31, ?32,
                 ?33, ?34, ?35, ?36,
                 ?37, ?38, ?39, ?40,
-                ?41, ?42
+                ?41, ?42, ?43
              )",
             params![
                 event.id.as_ulid().to_bytes().as_slice(),
@@ -214,6 +284,7 @@ impl Store {
                 event.trace_id.map(|t| t.to_string()),
                 event.source.as_deref(),
                 event.ingested_at,
+                metadata_str.as_deref(),
             ],
         )?;
 
@@ -399,7 +470,7 @@ impl Store {
                     error_type, error_message,
                     request_sha256, response_sha256, request_blob_id, response_blob_id,
                     client_ip, user_agent, request_id, trace_id,
-                    source, ingested_at
+                    source, ingested_at, metadata_json
                  ) VALUES(
                     ?1, ?2, ?3, ?4, ?5, ?6, ?7,
                     ?8, ?9, ?10, ?11, ?12, ?13,
@@ -409,7 +480,7 @@ impl Store {
                     ?31, ?32,
                     ?33, ?34, ?35, ?36,
                     ?37, ?38, ?39, ?40,
-                    ?41, ?42
+                    ?41, ?42, ?43
                  )",
             )?;
 
@@ -458,6 +529,7 @@ impl Store {
                     e.trace_id.map(|t| t.to_string()),
                     e.source.as_deref(),
                     e.ingested_at,
+                    e.metadata.as_ref().and_then(|m| serde_json::to_string(m).ok()),
                 ])?;
             }
         }
@@ -634,8 +706,8 @@ impl Store {
 
     /// Narrow query returning only the fields needed by the HTTP API.
     ///
-    /// Reads 16 columns instead of 42, avoiding allocation of unused
-    /// fields (hashes, error details, trace metadata, etc.).
+    /// Reads 19 columns instead of 43, avoiding allocation of unused
+    /// fields (hashes, trace metadata, etc.).
     pub fn query_summary(
         &self,
         filter: &EventFilter,
@@ -646,9 +718,10 @@ impl Store {
 
         let mut sql = String::with_capacity(256);
         sql.push_str(
-            "SELECT id, ts_ns, user_id, provider, model, endpoint, http_status, \
+            "SELECT id, ts_ns, user_id, api_key_id, provider, model, endpoint, http_status, \
              input_tokens, output_tokens, cache_read_input_tokens, reasoning_tokens, \
-             cost_nanodollars, latency_ttft_ms, latency_total_ms, streaming, source \
+             cost_nanodollars, latency_ttft_ms, latency_total_ms, streaming, source, \
+             error_type, metadata_json \
              FROM llm_events WHERE 1=1",
         );
 
@@ -794,21 +867,208 @@ impl Store {
     }
 
     /// Roll up a day's events into `daily_rollups`.
+    ///
+    /// Uses DELETE+INSERT (not INSERT OR REPLACE) so re-running is always
+    /// clean — handles edge cases where group-by dimensions change after
+    /// event corrections.
     pub fn rollup_day(&self, day_epoch: i64) -> Result<(), StoreError> {
         let conn = self.conn.lock().map_err(|e| StoreError::Compression(e.to_string()))?;
         let next_day = day_epoch + 86400;
+        let from_ns = day_epoch * 1_000_000_000i64;
+        let to_ns = next_day * 1_000_000_000i64;
 
-        conn.execute(
-            "INSERT OR REPLACE INTO daily_rollups(day, user_id, api_key_id, model,
-                event_count, input_tokens, output_tokens, cost_nanodollars)
-             SELECT ?1, user_id, api_key_id, model,
-                    COUNT(*), SUM(input_tokens), SUM(output_tokens), SUM(cost_nanodollars)
+        let tx = conn.unchecked_transaction()?;
+
+        tx.execute("DELETE FROM daily_rollups WHERE day = ?1", [day_epoch])?;
+
+        tx.execute(
+            "INSERT INTO daily_rollups(day, user_id, api_key_id, provider, model,
+                event_count, error_count, input_tokens, output_tokens,
+                cache_read_input_tokens, cache_creation_input_tokens, cost_nanodollars)
+             SELECT ?1,
+                    COALESCE(user_id, ''),
+                    COALESCE(api_key_id, ''),
+                    COALESCE(provider, ''),
+                    COALESCE(model, ''),
+                    COUNT(*),
+                    SUM(CASE WHEN http_status >= 400 THEN 1 ELSE 0 END),
+                    SUM(input_tokens),
+                    SUM(output_tokens),
+                    SUM(cache_read_input_tokens),
+                    SUM(cache_creation_input_tokens),
+                    SUM(cost_nanodollars)
              FROM llm_events
              WHERE ts_ns >= ?2 AND ts_ns < ?3
-             GROUP BY user_id, api_key_id, model",
-            params![day_epoch, day_epoch * 1_000_000_000i64, next_day * 1_000_000_000i64],
+             GROUP BY COALESCE(user_id, ''), COALESCE(api_key_id, ''),
+                      COALESCE(provider, ''), COALESCE(model, '')",
+            params![day_epoch, from_ns, to_ns],
         )?;
+
+        tx.commit()?;
         Ok(())
+    }
+
+    // ── Aggregation queries (for Obol integration) ─────────────────────
+
+    /// Real-time quota check: cost + event count from `llm_events`.
+    ///
+    /// At least one of `user_id` or `api_key_id` must be `Some`.
+    pub fn quota_summary(
+        &self,
+        user_id: Option<&str>,
+        api_key_id: Option<&str>,
+        from_ts_ns: i64,
+    ) -> Result<QuotaSummary, StoreError> {
+        let conn = self.conn.lock().map_err(|e| StoreError::Compression(e.to_string()))?;
+
+        let mut sql = String::from(
+            "SELECT COALESCE(SUM(cost_nanodollars),0), COUNT(*) FROM llm_events WHERE ts_ns >= ?1",
+        );
+        let mut bind_idx = 1usize;
+
+        // Dynamic filter: user_id and/or api_key_id.
+        if let Some(_uid) = user_id {
+            bind_idx += 1;
+            sql.push_str(&format!(" AND user_id = ?{bind_idx}"));
+        }
+        if let Some(_kid) = api_key_id {
+            bind_idx += 1;
+            sql.push_str(&format!(" AND api_key_id = ?{bind_idx}"));
+        }
+
+        let mut stmt = conn.prepare_cached(&sql)?;
+
+        // Build params dynamically.
+        let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::with_capacity(3);
+        params_vec.push(Box::new(from_ts_ns));
+        if let Some(uid) = user_id {
+            params_vec.push(Box::new(uid.to_owned()));
+        }
+        if let Some(kid) = api_key_id {
+            params_vec.push(Box::new(kid.to_owned()));
+        }
+        let params_ref: Vec<&dyn rusqlite::types::ToSql> =
+            params_vec.iter().map(|b| b.as_ref()).collect();
+
+        let (cost, count) = stmt
+            .query_row(params_ref.as_slice(), |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?;
+
+        Ok(QuotaSummary { cost_nanodollars: cost, event_count: count })
+    }
+
+    /// Query pre-aggregated daily rollup rows.
+    pub fn query_rollups(
+        &self,
+        user_id: Option<&str>,
+        api_key_id: Option<&str>,
+        from_day: i64,
+        to_day: i64,
+    ) -> Result<Vec<RollupRow>, StoreError> {
+        let conn = self.conn.lock().map_err(|e| StoreError::Compression(e.to_string()))?;
+
+        let mut sql = String::from(
+            "SELECT day, user_id, api_key_id, provider, model, \
+             event_count, error_count, input_tokens, output_tokens, \
+             cache_read_input_tokens, cache_creation_input_tokens, cost_nanodollars \
+             FROM daily_rollups WHERE day >= ?1 AND day <= ?2",
+        );
+
+        let mut bind_idx = 2usize;
+        if user_id.is_some() {
+            bind_idx += 1;
+            sql.push_str(&format!(" AND user_id = ?{bind_idx}"));
+        }
+        if api_key_id.is_some() {
+            bind_idx += 1;
+            sql.push_str(&format!(" AND api_key_id = ?{bind_idx}"));
+        }
+        sql.push_str(" ORDER BY day ASC");
+
+        let mut stmt = conn.prepare_cached(&sql)?;
+
+        let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::with_capacity(4);
+        params_vec.push(Box::new(from_day));
+        params_vec.push(Box::new(to_day));
+        if let Some(uid) = user_id {
+            params_vec.push(Box::new(uid.to_owned()));
+        }
+        if let Some(kid) = api_key_id {
+            params_vec.push(Box::new(kid.to_owned()));
+        }
+        let params_ref: Vec<&dyn rusqlite::types::ToSql> =
+            params_vec.iter().map(|b| b.as_ref()).collect();
+
+        let rows = stmt.query_map(params_ref.as_slice(), row_to_rollup)?;
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row?);
+        }
+        Ok(result)
+    }
+
+    /// Aggregate stats from `daily_rollups`, optionally grouped by model.
+    pub fn aggregate_stats(
+        &self,
+        user_id: Option<&str>,
+        api_key_id: Option<&str>,
+        from_day: i64,
+        to_day: i64,
+        provider_filter: Option<&str>,
+        group_by_model: bool,
+    ) -> Result<Vec<AggregateRow>, StoreError> {
+        let conn = self.conn.lock().map_err(|e| StoreError::Compression(e.to_string()))?;
+
+        let select_cols =
+            if group_by_model { "provider, model" } else { "'' AS provider, '' AS model" };
+        let mut sql = format!(
+            "SELECT {select_cols}, \
+             SUM(event_count), SUM(error_count), \
+             SUM(input_tokens), SUM(output_tokens), \
+             SUM(cache_read_input_tokens), SUM(cache_creation_input_tokens), \
+             SUM(cost_nanodollars) \
+             FROM daily_rollups WHERE day >= ?1 AND day <= ?2"
+        );
+
+        let mut bind_idx = 2usize;
+        if user_id.is_some() {
+            bind_idx += 1;
+            sql.push_str(&format!(" AND user_id = ?{bind_idx}"));
+        }
+        if api_key_id.is_some() {
+            bind_idx += 1;
+            sql.push_str(&format!(" AND api_key_id = ?{bind_idx}"));
+        }
+        if provider_filter.is_some() {
+            bind_idx += 1;
+            sql.push_str(&format!(" AND provider = ?{bind_idx}"));
+        }
+        if group_by_model {
+            sql.push_str(" GROUP BY provider, model ORDER BY SUM(cost_nanodollars) DESC");
+        }
+
+        let mut stmt = conn.prepare_cached(&sql)?;
+
+        let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::with_capacity(5);
+        params_vec.push(Box::new(from_day));
+        params_vec.push(Box::new(to_day));
+        if let Some(uid) = user_id {
+            params_vec.push(Box::new(uid.to_owned()));
+        }
+        if let Some(kid) = api_key_id {
+            params_vec.push(Box::new(kid.to_owned()));
+        }
+        if let Some(prov) = provider_filter {
+            params_vec.push(Box::new(prov.to_owned()));
+        }
+        let params_ref: Vec<&dyn rusqlite::types::ToSql> =
+            params_vec.iter().map(|b| b.as_ref()).collect();
+
+        let rows = stmt.query_map(params_ref.as_slice(), row_to_aggregate)?;
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row?);
+        }
+        Ok(result)
     }
 
     /// Delete events older than `older_than_ns` and clean up blobs with
@@ -952,6 +1212,7 @@ mod col {
     pub const TRACE_ID: usize = 39;
     pub const SOURCE: usize = 40;
     pub const INGESTED_AT: usize = 41;
+    pub const METADATA_JSON: usize = 42;
 }
 
 /// Column indices for the narrow `query_summary` SELECT.
@@ -959,19 +1220,22 @@ mod slim {
     pub const ID: usize = 0;
     pub const TS_NS: usize = 1;
     pub const USER_ID: usize = 2;
-    pub const PROVIDER: usize = 3;
-    pub const MODEL: usize = 4;
-    pub const ENDPOINT: usize = 5;
-    pub const HTTP_STATUS: usize = 6;
-    pub const INPUT_TOKENS: usize = 7;
-    pub const OUTPUT_TOKENS: usize = 8;
-    pub const CACHE_READ: usize = 9;
-    pub const REASONING: usize = 10;
-    pub const COST: usize = 11;
-    pub const TTFT: usize = 12;
-    pub const TOTAL_MS: usize = 13;
-    pub const STREAMING: usize = 14;
-    pub const SOURCE: usize = 15;
+    pub const API_KEY_ID: usize = 3;
+    pub const PROVIDER: usize = 4;
+    pub const MODEL: usize = 5;
+    pub const ENDPOINT: usize = 6;
+    pub const HTTP_STATUS: usize = 7;
+    pub const INPUT_TOKENS: usize = 8;
+    pub const OUTPUT_TOKENS: usize = 9;
+    pub const CACHE_READ: usize = 10;
+    pub const REASONING: usize = 11;
+    pub const COST: usize = 12;
+    pub const TTFT: usize = 13;
+    pub const TOTAL_MS: usize = 14;
+    pub const STREAMING: usize = 15;
+    pub const SOURCE: usize = 16;
+    pub const ERROR_TYPE: usize = 17;
+    pub const METADATA_JSON: usize = 18;
 }
 
 fn row_to_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<EventSummary> {
@@ -984,6 +1248,7 @@ fn row_to_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<EventSummary> {
         id: keplor_core::EventId(ulid::Ulid::from_bytes(id_arr)),
         ts_ns: row.get(slim::TS_NS)?,
         user_id: row.get(slim::USER_ID)?,
+        api_key_id: row.get(slim::API_KEY_ID)?,
         provider: row.get(slim::PROVIDER)?,
         model: row.get(slim::MODEL)?,
         endpoint: row.get(slim::ENDPOINT)?,
@@ -997,6 +1262,8 @@ fn row_to_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<EventSummary> {
         total_ms: row.get::<_, i64>(slim::TOTAL_MS)? as u32,
         streaming: row.get::<_, i64>(slim::STREAMING)? != 0,
         source: row.get(slim::SOURCE)?,
+        error_type: row.get(slim::ERROR_TYPE)?,
+        metadata_json: row.get(slim::METADATA_JSON)?,
     })
 }
 
@@ -1077,6 +1344,9 @@ fn row_to_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<LlmEvent> {
         trace_id: trace_id_str.and_then(|s| s.parse().ok()),
         source: row.get::<_, Option<String>>(col::SOURCE)?.map(SmolStr::new),
         ingested_at: row.get::<_, Option<i64>>(col::INGESTED_AT)?.unwrap_or(0),
+        metadata: row
+            .get::<_, Option<String>>(col::METADATA_JSON)?
+            .and_then(|s| serde_json::from_str(&s).ok()),
     })
 }
 
@@ -1091,6 +1361,37 @@ fn error_type_str(e: &ProviderError) -> &'static str {
         ProviderError::UpstreamUnavailable => "upstream_unavailable",
         ProviderError::Other { .. } => "other",
     }
+}
+
+fn row_to_rollup(row: &rusqlite::Row<'_>) -> rusqlite::Result<RollupRow> {
+    Ok(RollupRow {
+        day: row.get(0)?,
+        user_id: row.get(1)?,
+        api_key_id: row.get(2)?,
+        provider: row.get(3)?,
+        model: row.get(4)?,
+        event_count: row.get(5)?,
+        error_count: row.get(6)?,
+        input_tokens: row.get(7)?,
+        output_tokens: row.get(8)?,
+        cache_read_input_tokens: row.get(9)?,
+        cache_creation_input_tokens: row.get(10)?,
+        cost_nanodollars: row.get(11)?,
+    })
+}
+
+fn row_to_aggregate(row: &rusqlite::Row<'_>) -> rusqlite::Result<AggregateRow> {
+    Ok(AggregateRow {
+        provider: row.get(0)?,
+        model: row.get(1)?,
+        event_count: row.get(2)?,
+        error_count: row.get(3)?,
+        input_tokens: row.get(4)?,
+        output_tokens: row.get(5)?,
+        cache_read_input_tokens: row.get(6)?,
+        cache_creation_input_tokens: row.get(7)?,
+        cost_nanodollars: row.get(8)?,
+    })
 }
 
 fn error_from_stored(kind: &str, message: Option<&str>) -> ProviderError {
@@ -1140,6 +1441,7 @@ mod tests {
             trace_id: None,
             source: None,
             ingested_at: 0,
+            metadata: None,
         }
     }
 
