@@ -110,7 +110,8 @@ impl Pipeline {
         let model = normalize::normalize_model(&event.model);
 
         let usage = usage_from_ingest(&event.usage);
-        let cost = self.compute_cost(&provider, &model, &usage);
+        let cost =
+            event.cost_nanodollars.unwrap_or_else(|| self.compute_cost(&provider, &model, &usage));
 
         // Serialize bodies ONCE — propagate errors instead of silently storing empty blobs.
         let req_bytes = match &event.request_body {

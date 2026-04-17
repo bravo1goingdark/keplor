@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 /// The JSON body for `POST /v1/events`.
 ///
 /// Any LLM proxy (LiteLLM, OpenRouter, custom gateways) can POST events
-/// in this format.  Keplor computes cost from usage + its pricing catalog —
-/// `cost_nanodollars` is intentionally absent from this schema.
+/// in this format.  Keplor computes cost from usage + its pricing catalog
+/// unless the caller provides `cost_nanodollars` explicitly.
 #[derive(Debug, Deserialize)]
 pub struct IngestEvent {
     // --- required --------------------------------------------------------
@@ -15,6 +15,10 @@ pub struct IngestEvent {
 
     /// Provider identifier: `"openai"`, `"anthropic"`, `"gemini"`, etc.
     pub provider: String,
+
+    /// Caller-provided cost in nanodollars. When present, Keplor uses this
+    /// value instead of computing cost from its pricing catalog.
+    pub cost_nanodollars: Option<i64>,
 
     // --- optional (all have sensible defaults) ---------------------------
     /// Token usage counters.
