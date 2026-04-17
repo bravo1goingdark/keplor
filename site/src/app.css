@@ -1,25 +1,50 @@
 @import "tailwindcss";
 
 @theme {
-  --color-bg: #0a0a0a;
-  --color-bg-raised: #111111;
-  --color-bg-code: #161616;
-  --color-border: #1e1e1e;
-  --color-border-hover: #2a2a2a;
-  --color-text: #e5e5e5;
-  --color-text-muted: #636363;
-  --color-accent: #3b82f6;
-  --color-accent-dim: #2563eb;
+  --color-bg: #FAFAF7;
+  --color-bg-alt: #F2F0EA;
+  --color-ink: #111110;
+  --color-ink-muted: #5C5A55;
+  --color-line: #E3E0D8;
+  --color-accent: #FF5B2E;
+  --color-accent-ink: #FAFAF7;
 
-  --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
-  --font-mono: 'JetBrains Mono', 'Fira Code', ui-monospace, monospace;
+  --font-sans: 'DM Sans', system-ui, sans-serif;
+  --font-serif: 'Fraunces', 'Georgia', serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, monospace;
 }
 
 html {
   scroll-behavior: smooth;
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 ::selection {
-  background: rgba(59, 130, 246, 0.25);
+  background: rgba(255, 91, 46, 0.15);
+}
+
+/* Entrance animations */
+@keyframes fade-up {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.animate-in {
+  animation: fade-up 0.8s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+.animate-in-delay-1 {
+  animation: fade-up 0.6s cubic-bezier(0.2, 0.8, 0.2, 1) 0.1s both;
+}
+
+.animate-in-delay-2 {
+  animation: fade-up 0.6s cubic-bezier(0.2, 0.8, 0.2, 1) 0.2s both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-in, .animate-in-delay-1, .animate-in-delay-2 {
+    animation: none;
+    opacity: 1;
+  }
 }

@@ -2,4 +2,4 @@
   let { code }: { code: string } = $props();
 </script>
 
-<pre class="bg-bg-code border border-border rounded-lg p-[1.125rem] overflow-x-auto text-[0.8125rem] leading-7 font-mono my-3"><code>{code}</code></pre>
+<pre class="bg-bg-alt border border-line rounded-[4px] p-6 overflow-x-auto text-[14px] leading-[1.75] font-mono text-ink-muted my-5"><code>{code}</code></pre>

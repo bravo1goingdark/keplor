@@ -3,7 +3,7 @@
   let { children } = $props();
 </script>
 
-<div class="max-w-6xl mx-auto px-6 pt-10 pb-16 flex gap-12">
+<div class="max-w-[1280px] mx-auto px-6 md:px-20 pt-12 pb-20 flex gap-16">
   <DocsSidebar />
   <article class="flex-1 min-w-0 prose-custom">
     {@render children()}
@@ -11,25 +11,34 @@
 </div>
 
 <style>
+  :global(.prose-custom h1) {
+    font-family: var(--font-serif);
+    font-size: 2rem;
+    font-weight: 400;
+    letter-spacing: -0.02em;
+    margin-bottom: 0.5rem;
+  }
   :global(.prose-custom h2) {
-    font-size: 1.375rem;
-    font-weight: 600;
-    margin-top: 2.5rem;
-    margin-bottom: 0.75rem;
-    padding-bottom: 0.5rem;
-    border-bottom: 1px solid var(--color-border);
+    font-size: 1.125rem;
+    font-weight: 500;
+    letter-spacing: -0.01em;
+    margin-top: 3rem;
+    margin-bottom: 0.875rem;
+    padding-bottom: 0.625rem;
+    border-bottom: 1px solid var(--color-line);
   }
   :global(.prose-custom h3) {
-    font-size: 1.05rem;
-    font-weight: 600;
+    font-size: 0.9375rem;
+    font-weight: 500;
     margin-top: 1.75rem;
     margin-bottom: 0.5rem;
   }
   :global(.prose-custom p) {
-    color: #9a9a9a;
-    line-height: 1.75;
-    margin-bottom: 0.875rem;
+    color: var(--color-ink-muted);
+    line-height: 1.7;
+    margin-bottom: 1rem;
     font-size: 0.9375rem;
+    max-width: 58ch;
   }
   :global(.prose-custom a) {
     color: var(--color-accent);
@@ -39,59 +48,61 @@
     text-decoration: underline;
   }
   :global(.prose-custom pre) {
-    background: var(--color-bg-code);
-    border: 1px solid var(--color-border);
-    border-radius: 0.5rem;
-    padding: 1.125rem;
+    background: var(--color-bg-alt);
+    border: 1px solid var(--color-line);
+    border-radius: 4px;
+    padding: 1.25rem 1.5rem;
     overflow-x: auto;
     font-size: 0.8125rem;
-    line-height: 1.75;
+    line-height: 1.8;
     font-family: var(--font-mono);
-    margin: 0.75rem 0 1.25rem;
+    margin: 0.75rem 0 1.5rem;
+    color: var(--color-ink-muted);
   }
   :global(.prose-custom code) {
-    background: var(--color-bg-code);
-    padding: 0.1em 0.35em;
-    border-radius: 4px;
-    font-size: 0.85em;
-    border: 1px solid var(--color-border);
+    background: var(--color-bg-alt);
+    padding: 0.15em 0.4em;
+    border-radius: 3px;
+    font-size: 0.825em;
     font-family: var(--font-mono);
+    color: var(--color-ink);
   }
   :global(.prose-custom pre code) {
     background: none;
     padding: 0;
-    border: none;
     font-size: inherit;
+    color: inherit;
   }
   :global(.prose-custom table) {
     width: 100%;
     border-collapse: collapse;
-    margin: 0.75rem 0 1.25rem;
+    margin: 0.75rem 0 1.5rem;
     font-size: 0.8125rem;
   }
   :global(.prose-custom th) {
     text-align: left;
     padding: 0.625rem 0.875rem;
-    border-bottom: 1px solid var(--color-border);
-    color: var(--color-text-muted);
+    color: var(--color-ink-muted);
     font-weight: 500;
     font-size: 0.6875rem;
     text-transform: uppercase;
-    letter-spacing: 0.06em;
+    letter-spacing: 0.08em;
+    border-bottom: 1px solid var(--color-line);
   }
   :global(.prose-custom td) {
     padding: 0.625rem 0.875rem;
-    border-bottom: 1px solid var(--color-border);
-    color: #9a9a9a;
+    color: var(--color-ink-muted);
+    border-bottom: 1px solid var(--color-line);
   }
   :global(.prose-custom .method) {
     display: inline-block;
-    padding: 0.1rem 0.4rem;
+    padding: 0.1rem 0.45rem;
     border-radius: 3px;
-    font-size: 0.6875rem;
+    font-size: 0.625rem;
     font-weight: 600;
     font-family: var(--font-mono);
+    letter-spacing: 0.03em;
   }
-  :global(.prose-custom .method-post) { background: #065f46; color: #6ee7b7; }
-  :global(.prose-custom .method-get) { background: #1e3a5f; color: #7dd3fc; }
+  :global(.prose-custom .method-post) { background: #e8f5e9; color: #2e7d32; }
+  :global(.prose-custom .method-get) { background: #e3f2fd; color: #1565c0; }
 </style>

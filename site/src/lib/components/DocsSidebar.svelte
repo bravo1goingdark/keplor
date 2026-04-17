@@ -10,15 +10,15 @@
   ];
 </script>
 
-<aside class="hidden lg:block w-52 shrink-0">
-  <nav class="sticky top-20 space-y-0.5">
+<aside class="hidden lg:block w-44 shrink-0">
+  <nav class="sticky top-24 space-y-1">
     {#each nav as { href, label }}
       <a
         {href}
-        class="block px-3 py-1.5 rounded-md text-[13px] transition-colors
+        class="block px-3 py-1.5 text-[14px] transition-colors rounded-[4px]
                {page.url.pathname === href
-                 ? 'text-text bg-bg-raised'
-                 : 'text-text-muted hover:text-text hover:bg-bg-raised/50'}"
+                 ? 'text-ink font-medium'
+                 : 'text-ink-muted hover:text-ink'}"
       >
         {label}
       </a>
