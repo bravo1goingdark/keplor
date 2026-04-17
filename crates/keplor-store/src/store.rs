@@ -1,6 +1,7 @@
 //! [`Store`] — the local SQLite-backed storage engine.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 use bytes::Bytes;
@@ -133,39 +134,119 @@ pub struct AggregateRow {
     pub cost_nanodollars: i64,
 }
 
+/// Default number of read connections in the pool.
+const DEFAULT_READ_POOL_SIZE: usize = 4;
+
+/// Internal trait for opening additional connections (file vs. in-memory).
+trait ConnOpener {
+    fn open(&self) -> Result<Connection, StoreError>;
+}
+
+struct FileOpener(PathBuf);
+
+impl ConnOpener for FileOpener {
+    fn open(&self) -> Result<Connection, StoreError> {
+        Connection::open(&self.0).map_err(StoreError::from)
+    }
+}
+
+/// In-memory opener using a unique shared-cache name so that parallel
+/// tests each get their own database while connections within one Store
+/// still share state.
+struct MemoryOpener(String);
+
+impl ConnOpener for MemoryOpener {
+    fn open(&self) -> Result<Connection, StoreError> {
+        Connection::open(&self.0).map_err(StoreError::from)
+    }
+}
+
 /// Local SQLite store for LLM events and their payload blobs.
 ///
-/// Thread-safe: holds a `Mutex<Connection>`.
+/// Uses a **read/write split** connection pool:
+/// - One dedicated write connection (`write_conn`) for all mutations
+/// - N read connections (`read_pool`) for concurrent queries
+///
+/// SQLite WAL mode (set in pragmas) allows readers to proceed without
+/// blocking writers and vice-versa, as long as they use separate
+/// connections.
 pub struct Store {
-    conn: Mutex<Connection>,
+    write_conn: Mutex<Connection>,
+    read_pool: Vec<Mutex<Connection>>,
+    read_idx: AtomicUsize,
     coder: ZstdCoder,
 }
 
 impl std::fmt::Debug for Store {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Store").finish_non_exhaustive()
+        f.debug_struct("Store")
+            .field("read_pool_size", &self.read_pool.len())
+            .finish_non_exhaustive()
     }
 }
 
 impl Store {
     /// Open (or create) a store at the given path.
     pub fn open(path: &Path) -> Result<Self, StoreError> {
-        let conn = Connection::open(path)?;
-        Self::init(conn)
+        Self::open_with_pool_size(path, DEFAULT_READ_POOL_SIZE)
+    }
+
+    /// Open a store with a custom read pool size.
+    pub fn open_with_pool_size(path: &Path, read_pool_size: usize) -> Result<Self, StoreError> {
+        let pool_size = read_pool_size.max(1);
+        let write_conn = Connection::open(path)?;
+        let opener = FileOpener(path.to_path_buf());
+        Self::init(write_conn, &opener, pool_size)
     }
 
     /// Open an in-memory store (for tests).
+    ///
+    /// Uses a unique SQLite shared-cache URI so that the write and read
+    /// connections all see the same in-memory database, while parallel
+    /// test instances each get their own.
     pub fn open_in_memory() -> Result<Self, StoreError> {
-        let conn = Connection::open_in_memory()?;
-        Self::init(conn)
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+        let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let uri = format!("file:keplor_mem_{id}?mode=memory&cache=shared");
+        let write_conn = Connection::open(&uri)?;
+        let opener = MemoryOpener(uri);
+        Self::init(write_conn, &opener, DEFAULT_READ_POOL_SIZE)
     }
 
-    fn init(conn: Connection) -> Result<Self, StoreError> {
-        migrations::apply_pragmas(&conn)?;
-        migrations::migrate(&conn)?;
+    fn init(
+        write_conn: Connection,
+        opener: &dyn ConnOpener,
+        pool_size: usize,
+    ) -> Result<Self, StoreError> {
+        migrations::apply_pragmas(&write_conn)?;
+        migrations::migrate(&write_conn)?;
         let mut coder = ZstdCoder::new();
-        Self::load_dicts(&conn, &mut coder)?;
-        Ok(Self { conn: Mutex::new(conn), coder })
+        Self::load_dicts(&write_conn, &mut coder)?;
+
+        let mut read_pool = Vec::with_capacity(pool_size);
+        for _ in 0..pool_size {
+            let rc = opener.open()?;
+            migrations::apply_pragmas(&rc)?;
+            read_pool.push(Mutex::new(rc));
+        }
+
+        Ok(Self {
+            write_conn: Mutex::new(write_conn),
+            read_pool,
+            read_idx: AtomicUsize::new(0),
+            coder,
+        })
+    }
+
+    /// Acquire a read connection from the pool (round-robin).
+    fn read_conn(&self) -> Result<std::sync::MutexGuard<'_, Connection>, StoreError> {
+        let idx = self.read_idx.fetch_add(1, Ordering::Relaxed) % self.read_pool.len();
+        self.read_pool[idx].lock().map_err(|e| StoreError::Compression(e.to_string()))
+    }
+
+    /// Acquire the write connection.
+    fn write_conn(&self) -> Result<std::sync::MutexGuard<'_, Connection>, StoreError> {
+        self.write_conn.lock().map_err(|e| StoreError::Compression(e.to_string()))
     }
 
     /// Append an event with its raw request/response bodies.
@@ -187,7 +268,7 @@ impl Store {
 
         let provider_key = event.provider.id_key();
 
-        let conn = self.conn.lock().map_err(|e| StoreError::Compression(e.to_string()))?;
+        let conn = self.write_conn()?;
         let tx = conn.unchecked_transaction()?;
 
         let mut request_blob_id: Option<[u8; 32]> = None;
@@ -409,7 +490,7 @@ impl Store {
         }
 
         // ── Lock + single transaction ─────────────────────────────────
-        let conn = self.conn.lock().map_err(|e| StoreError::Compression(e.to_string()))?;
+        let conn = self.write_conn()?;
         let tx = conn.unchecked_transaction()?;
 
         // Insert unique blobs with ON CONFLICT for cross-batch dedup.
@@ -603,7 +684,7 @@ impl Store {
 
     /// Retrieve an event by id.
     pub fn get_event(&self, id: &EventId) -> Result<Option<LlmEvent>, StoreError> {
-        let conn = self.conn.lock().map_err(|e| StoreError::Compression(e.to_string()))?;
+        let conn = self.read_conn()?;
         let id_bytes = id.as_ulid().to_bytes();
 
         conn.query_row("SELECT * FROM llm_events WHERE id = ?1", [&id_bytes[..]], row_to_event)
@@ -617,7 +698,7 @@ impl Store {
         event_id: &EventId,
         component_type: &str,
     ) -> Result<Option<Bytes>, StoreError> {
-        let conn = self.conn.lock().map_err(|e| StoreError::Compression(e.to_string()))?;
+        let conn = self.read_conn()?;
         let id_bytes = event_id.as_ulid().to_bytes();
 
         let row: Option<(Vec<u8>, String, String)> = conn
@@ -655,7 +736,7 @@ impl Store {
         limit: u32,
         cursor: Option<Cursor>,
     ) -> Result<Vec<LlmEvent>, StoreError> {
-        let conn = self.conn.lock().map_err(|e| StoreError::Compression(e.to_string()))?;
+        let conn = self.read_conn()?;
 
         let mut sql = String::with_capacity(256);
         sql.push_str("SELECT * FROM llm_events WHERE 1=1");
@@ -724,7 +805,7 @@ impl Store {
         limit: u32,
         cursor: Option<Cursor>,
     ) -> Result<Vec<EventSummary>, StoreError> {
-        let conn = self.conn.lock().map_err(|e| StoreError::Compression(e.to_string()))?;
+        let conn = self.read_conn()?;
 
         let mut sql = String::with_capacity(256);
         sql.push_str(
@@ -817,7 +898,7 @@ impl Store {
         component_type: &str,
         max_samples: usize,
     ) -> Result<Vec<Vec<u8>>, StoreError> {
-        let conn = self.conn.lock().map_err(|e| StoreError::Compression(e.to_string()))?;
+        let conn = self.read_conn()?;
 
         let mut stmt = conn.prepare_cached(
             "SELECT data FROM payload_blobs
@@ -864,12 +945,14 @@ impl Store {
 
         let dict_id = format!("{provider}_{component_type}");
 
-        let conn = self.conn.lock().map_err(|e| StoreError::Compression(e.to_string()))?;
-        conn.execute(
-            "INSERT OR REPLACE INTO zstd_dicts(id, provider, component_type, sample_count, created_at, data)
-             VALUES(?1, ?2, ?3, ?4, strftime('%s','now'), ?5)",
-            params![&dict_id, provider, component_type, samples.len() as i64, &dict_bytes],
-        )?;
+        {
+            let conn = self.write_conn()?;
+            conn.execute(
+                "INSERT OR REPLACE INTO zstd_dicts(id, provider, component_type, sample_count, created_at, data)
+                 VALUES(?1, ?2, ?3, ?4, strftime('%s','now'), ?5)",
+                params![&dict_id, provider, component_type, samples.len() as i64, &dict_bytes],
+            )?;
+        }
 
         let key = crate::compress::DictKey {
             provider: provider.into(),
@@ -905,7 +988,7 @@ impl Store {
     /// clean — handles edge cases where group-by dimensions change after
     /// event corrections.
     pub fn rollup_day(&self, day_epoch: i64) -> Result<(), StoreError> {
-        let conn = self.conn.lock().map_err(|e| StoreError::Compression(e.to_string()))?;
+        let conn = self.write_conn()?;
         let next_day = day_epoch + 86400;
         let from_ns = day_epoch * 1_000_000_000i64;
         let to_ns = next_day * 1_000_000_000i64;
@@ -952,7 +1035,7 @@ impl Store {
         api_key_id: Option<&str>,
         from_ts_ns: i64,
     ) -> Result<QuotaSummary, StoreError> {
-        let conn = self.conn.lock().map_err(|e| StoreError::Compression(e.to_string()))?;
+        let conn = self.read_conn()?;
 
         let mut sql = String::from(
             "SELECT COALESCE(SUM(cost_nanodollars),0), COUNT(*) FROM llm_events WHERE ts_ns >= ?1",
@@ -997,7 +1080,7 @@ impl Store {
         from_day: i64,
         to_day: i64,
     ) -> Result<Vec<RollupRow>, StoreError> {
-        let conn = self.conn.lock().map_err(|e| StoreError::Compression(e.to_string()))?;
+        let conn = self.read_conn()?;
 
         let mut sql = String::from(
             "SELECT day, user_id, api_key_id, provider, model, \
@@ -1049,7 +1132,7 @@ impl Store {
         provider_filter: Option<&str>,
         group_by_model: bool,
     ) -> Result<Vec<AggregateRow>, StoreError> {
-        let conn = self.conn.lock().map_err(|e| StoreError::Compression(e.to_string()))?;
+        let conn = self.read_conn()?;
 
         let select_cols =
             if group_by_model { "provider, model" } else { "'' AS provider, '' AS model" };
@@ -1108,7 +1191,7 @@ impl Store {
     /// refcount reaching 0.  Uses set-based SQL — O(3) statements
     /// regardless of event count.
     pub fn gc_expired(&self, older_than_ns: i64) -> Result<GcStats, StoreError> {
-        let conn = self.conn.lock().map_err(|e| StoreError::Compression(e.to_string()))?;
+        let conn = self.write_conn()?;
         let tx = conn.unchecked_transaction()?;
 
         // Bulk-decrement refcounts for all components of expiring events.
@@ -1147,7 +1230,7 @@ impl Store {
 
     /// Get the refcount for a blob by its SHA-256.
     pub fn blob_refcount(&self, sha: &[u8; 32]) -> Result<Option<i64>, StoreError> {
-        let conn = self.conn.lock().map_err(|e| StoreError::Compression(e.to_string()))?;
+        let conn = self.read_conn()?;
         conn.query_row("SELECT refcount FROM payload_blobs WHERE sha256 = ?1", [&sha[..]], |r| {
             r.get(0)
         })
@@ -1157,7 +1240,7 @@ impl Store {
 
     /// Count total blob rows.
     pub fn blob_count(&self) -> Result<usize, StoreError> {
-        let conn = self.conn.lock().map_err(|e| StoreError::Compression(e.to_string()))?;
+        let conn = self.read_conn()?;
         let count: i64 = conn.query_row("SELECT COUNT(*) FROM payload_blobs", [], |r| r.get(0))?;
         #[allow(clippy::cast_sign_loss)]
         Ok(count as usize)
@@ -1165,7 +1248,7 @@ impl Store {
 
     /// Total stored bytes (compressed) across all blobs.
     pub fn total_compressed_bytes(&self) -> Result<i64, StoreError> {
-        let conn = self.conn.lock().map_err(|e| StoreError::Compression(e.to_string()))?;
+        let conn = self.read_conn()?;
         let total: i64 = conn.query_row(
             "SELECT COALESCE(SUM(compressed_size), 0) FROM payload_blobs",
             [],
@@ -1176,7 +1259,7 @@ impl Store {
 
     /// Total uncompressed bytes across all blobs (for compression ratio).
     pub fn total_uncompressed_bytes(&self) -> Result<i64, StoreError> {
-        let conn = self.conn.lock().map_err(|e| StoreError::Compression(e.to_string()))?;
+        let conn = self.read_conn()?;
         let total: i64 = conn.query_row(
             "SELECT COALESCE(SUM(uncompressed_size), 0) FROM payload_blobs",
             [],
