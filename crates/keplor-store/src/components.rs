@@ -1,8 +1,15 @@
 //! Payload-component splitting: extract dedup-friendly pieces from
 //! request/response JSON bodies.
+//!
+//! Uses `serde_json::value::RawValue` to avoid building a full
+//! heap-allocated `Value` tree.  The input bytes are already canonical
+//! serde_json output (produced by `pipeline.rs`), so raw byte slicing
+//! preserves dedup-safe determinism.
 
 use bytes::Bytes;
 use keplor_core::Provider;
+use serde::Deserialize;
+use serde_json::value::RawValue;
 
 /// Identifies what kind of component a blob represents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -52,25 +59,15 @@ pub fn split_request(provider: &Provider, body: &Bytes) -> Vec<Component> {
         return vec![Component { kind: ComponentType::Raw, data: body.clone() }];
     }
 
-    let parsed = match serde_json::from_slice::<serde_json::Value>(body) {
-        Ok(v) => v,
-        Err(_) => {
-            return vec![Component { kind: ComponentType::Raw, data: body.clone() }];
-        },
-    };
-
     let mut components = Vec::with_capacity(3);
 
-    match provider {
-        Provider::Anthropic | Provider::Bedrock => {
-            extract_anthropic_request(&parsed, &mut components);
-        },
-        _ => {
-            extract_openai_request(&parsed, &mut components);
-        },
-    }
+    let ok = match provider {
+        Provider::Anthropic | Provider::Bedrock => extract_anthropic_request(body, &mut components),
+        _ => extract_openai_request(body, &mut components),
+    };
 
-    if components.is_empty() {
+    if !ok || components.is_empty() {
+        components.clear();
         components.push(Component { kind: ComponentType::Raw, data: body.clone() });
     }
 
@@ -82,14 +79,34 @@ pub fn split_response(body: &Bytes) -> Vec<Component> {
     vec![Component { kind: ComponentType::Response, data: body.clone() }]
 }
 
-fn serialize_to_bytes(value: &serde_json::Value) -> Option<Bytes> {
-    let mut buf = Vec::with_capacity(128);
-    serde_json::to_writer(&mut buf, value).ok()?;
-    Some(Bytes::from(buf))
+// ── OpenAI extraction ──────────────────────────────────────────────────
+
+/// Minimal top-level struct — borrows field values as raw byte slices
+/// instead of allocating a full `Value` tree.
+#[derive(Deserialize)]
+struct OpenAIShell<'a> {
+    #[serde(borrow)]
+    messages: Option<Vec<&'a RawValue>>,
+    #[serde(borrow)]
+    tools: Option<&'a RawValue>,
+    #[serde(borrow)]
+    functions: Option<&'a RawValue>,
 }
 
-fn extract_openai_request(parsed: &serde_json::Value, out: &mut Vec<Component>) {
-    if let Some(messages) = parsed.get("messages").and_then(|v| v.as_array()) {
+/// Just enough to check the `role` field of a message.
+#[derive(Deserialize)]
+struct RoleCheck<'a> {
+    #[serde(borrow)]
+    role: Option<&'a str>,
+}
+
+fn extract_openai_request(body: &[u8], out: &mut Vec<Component>) -> bool {
+    let shell: OpenAIShell<'_> = match serde_json::from_slice(body) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+
+    if let Some(messages) = &shell.messages {
         let mut sys_buf = Vec::with_capacity(128);
         let mut msg_buf = Vec::with_capacity(128);
         let mut has_system = false;
@@ -98,8 +115,12 @@ fn extract_openai_request(parsed: &serde_json::Value, out: &mut Vec<Component>) 
         sys_buf.push(b'[');
         msg_buf.push(b'[');
 
-        for m in messages {
-            let is_system = m.get("role").and_then(|r| r.as_str()) == Some("system");
+        for msg_raw in messages {
+            let is_system = match serde_json::from_str::<RoleCheck<'_>>(msg_raw.get()) {
+                Ok(rc) => rc.role == Some("system"),
+                Err(_) => false,
+            };
+
             let buf = if is_system {
                 has_system = true;
                 &mut sys_buf
@@ -107,11 +128,13 @@ fn extract_openai_request(parsed: &serde_json::Value, out: &mut Vec<Component>) 
                 has_other = true;
                 &mut msg_buf
             };
+
             if buf.len() > 1 {
                 buf.push(b',');
             }
-            // write directly into the buffer without intermediate allocation
-            let _ = serde_json::to_writer(&mut *buf, m);
+            // Raw bytes from RawValue are already canonical serde_json
+            // output — copy them directly, no re-serialization needed.
+            buf.extend_from_slice(msg_raw.get().as_bytes());
         }
 
         sys_buf.push(b']');
@@ -125,35 +148,61 @@ fn extract_openai_request(parsed: &serde_json::Value, out: &mut Vec<Component>) 
         }
     }
 
-    if let Some(tools) = parsed.get("tools") {
-        if let Some(bytes) = serialize_to_bytes(tools) {
-            out.push(Component { kind: ComponentType::Tools, data: bytes });
-        }
-    } else if let Some(functions) = parsed.get("functions") {
-        if let Some(bytes) = serialize_to_bytes(functions) {
-            out.push(Component { kind: ComponentType::Tools, data: bytes });
-        }
+    if let Some(tools) = &shell.tools {
+        out.push(Component {
+            kind: ComponentType::Tools,
+            data: Bytes::copy_from_slice(tools.get().as_bytes()),
+        });
+    } else if let Some(functions) = &shell.functions {
+        out.push(Component {
+            kind: ComponentType::Tools,
+            data: Bytes::copy_from_slice(functions.get().as_bytes()),
+        });
     }
+
+    true
 }
 
-fn extract_anthropic_request(parsed: &serde_json::Value, out: &mut Vec<Component>) {
-    if let Some(system) = parsed.get("system") {
-        if let Some(bytes) = serialize_to_bytes(system) {
-            out.push(Component { kind: ComponentType::SystemPrompt, data: bytes });
-        }
+// ── Anthropic extraction ───────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct AnthropicShell<'a> {
+    #[serde(borrow)]
+    system: Option<&'a RawValue>,
+    #[serde(borrow)]
+    messages: Option<&'a RawValue>,
+    #[serde(borrow)]
+    tools: Option<&'a RawValue>,
+}
+
+fn extract_anthropic_request(body: &[u8], out: &mut Vec<Component>) -> bool {
+    let shell: AnthropicShell<'_> = match serde_json::from_slice(body) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+
+    if let Some(system) = &shell.system {
+        out.push(Component {
+            kind: ComponentType::SystemPrompt,
+            data: Bytes::copy_from_slice(system.get().as_bytes()),
+        });
     }
 
-    if let Some(messages) = parsed.get("messages") {
-        if let Some(bytes) = serialize_to_bytes(messages) {
-            out.push(Component { kind: ComponentType::Messages, data: bytes });
-        }
+    if let Some(messages) = &shell.messages {
+        out.push(Component {
+            kind: ComponentType::Messages,
+            data: Bytes::copy_from_slice(messages.get().as_bytes()),
+        });
     }
 
-    if let Some(tools) = parsed.get("tools") {
-        if let Some(bytes) = serialize_to_bytes(tools) {
-            out.push(Component { kind: ComponentType::Tools, data: bytes });
-        }
+    if let Some(tools) = &shell.tools {
+        out.push(Component {
+            kind: ComponentType::Tools,
+            data: Bytes::copy_from_slice(tools.get().as_bytes()),
+        });
     }
+
+    true
 }
 
 #[cfg(test)]
@@ -227,13 +276,19 @@ mod tests {
     }
 
     #[test]
-    fn system_prompt_dedup_same_bytes() {
-        let body1 = Bytes::from(
+    fn system_prompt_dedup_canonical_bytes() {
+        // Simulate pipeline canonical output: serde_json::to_vec of a Value.
+        let v1: serde_json::Value = serde_json::from_str(
             r#"{"messages":[{"role":"system","content":"Be helpful."},{"role":"user","content":"A"}]}"#,
-        );
-        let body2 = Bytes::from(
+        )
+        .unwrap();
+        let v2: serde_json::Value = serde_json::from_str(
             r#"{"messages":[{"role":"system","content":"Be helpful."},{"role":"user","content":"B"}]}"#,
-        );
+        )
+        .unwrap();
+        let body1 = Bytes::from(serde_json::to_vec(&v1).unwrap());
+        let body2 = Bytes::from(serde_json::to_vec(&v2).unwrap());
+
         let c1 = split_request(&Provider::OpenAI, &body1);
         let c2 = split_request(&Provider::OpenAI, &body2);
 
@@ -244,5 +299,41 @@ mod tests {
         let m1 = c1.iter().find(|c| c.kind == ComponentType::Messages).unwrap();
         let m2 = c2.iter().find(|c| c.kind == ComponentType::Messages).unwrap();
         assert_ne!(m1.data, m2.data, "different user messages should differ");
+    }
+
+    #[test]
+    fn canonical_bytes_match_old_format() {
+        // Verify that RawValue-based extraction produces the same bytes
+        // as the old Value-based approach for canonical serde_json input.
+        let v: serde_json::Value = serde_json::from_str(
+            r#"{"model":"gpt-4o","messages":[{"role":"system","content":"Be helpful."},{"role":"user","content":"Hello!"}],"tools":[{"type":"function"}]}"#,
+        )
+        .unwrap();
+        let canonical = Bytes::from(serde_json::to_vec(&v).unwrap());
+
+        let components = split_request(&Provider::OpenAI, &canonical);
+        assert_eq!(components.len(), 3);
+
+        let sys = components.iter().find(|c| c.kind == ComponentType::SystemPrompt).unwrap();
+        let msgs = components.iter().find(|c| c.kind == ComponentType::Messages).unwrap();
+        let tools = components.iter().find(|c| c.kind == ComponentType::Tools).unwrap();
+
+        // System prompt: single message wrapped in array
+        let expected_sys: serde_json::Value =
+            serde_json::from_str(r#"[{"role":"system","content":"Be helpful."}]"#).unwrap();
+        let expected_sys_bytes = serde_json::to_vec(&expected_sys).unwrap();
+        assert_eq!(sys.data.as_ref(), expected_sys_bytes.as_slice());
+
+        // Messages: non-system messages wrapped in array
+        let expected_msgs: serde_json::Value =
+            serde_json::from_str(r#"[{"role":"user","content":"Hello!"}]"#).unwrap();
+        let expected_msgs_bytes = serde_json::to_vec(&expected_msgs).unwrap();
+        assert_eq!(msgs.data.as_ref(), expected_msgs_bytes.as_slice());
+
+        // Tools: raw value
+        let expected_tools: serde_json::Value =
+            serde_json::from_str(r#"[{"type":"function"}]"#).unwrap();
+        let expected_tools_bytes = serde_json::to_vec(&expected_tools).unwrap();
+        assert_eq!(tools.data.as_ref(), expected_tools_bytes.as_slice());
     }
 }

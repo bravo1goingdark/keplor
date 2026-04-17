@@ -125,6 +125,8 @@ All three are well under the 10 MB binary-size constraint from CLAUDE.md.
 
 2,560 events in 10 batches of 256. Harness: `benches/dhat_batch.rs`.
 
+### Before RawValue optimization
+
 | Category | Bytes | % of total | Per-event |
 |----------|-------|-----------|-----------|
 | serde_json (component split) | 5,548,970 | 38.1% | 2,168 B |
@@ -132,16 +134,24 @@ All three are well under the 10 MB binary-size constraint from CLAUDE.md.
 | keplor_store (Vecs, buffers) | 3,584,384 | 24.6% | 1,400 B |
 | zstd (compressor context) | 1,064,300 | 7.3% | 416 B |
 | rusqlite | 20,821 | 0.1% | 8 B |
+| **Total** | **14,552,747** | | **5,684 B/event, 29 blocks/event** |
 
-**Key finding**: serde_json dominates allocations (38%) — the
-`serde_json::from_slice::<Value>()` call in `components.rs:55` parses the
-full request body into a heap-allocated Value tree for component
-extraction. This is the highest-ROI allocation target for future work.
+### After RawValue optimization
 
-zstd compressor context allocation (7.3%) is small — pooling would save
-~416 bytes/event, not worth the complexity.
+| Category | Bytes | % of total | Per-event |
+|----------|-------|-----------|-----------|
+| bench harness (test data) | 4,334,272 | 47.3% | 1,693 B |
+| keplor_store (Vecs, buffers) | 3,584,384 | 39.1% | 1,400 B |
+| zstd (compressor context) | 1,064,300 | 11.6% | 416 B |
+| serde_json | 163,840 | **1.8%** | 64 B |
+| rusqlite | 20,821 | 0.2% | 8 B |
+| **Total** | **9,167,617** | | **3,581 B/event, 15 blocks/event** |
 
-## 7. Concurrent load test (oha)
+**Reduction: 37% fewer bytes, 47% fewer blocks.** serde_json dropped
+from 38.1% to 1.8% of allocations by switching from `Value` tree to
+`RawValue` byte slicing.
+
+## 7. Concurrent load test (oha) — final
 
 Server: `keplor run` with opt-level 3, default config, file-backed SQLite.
 
@@ -149,24 +159,23 @@ Server: `keplor run` with opt-level 3, default config, file-backed SQLite.
 
 | Metric | Value |
 |--------|-------|
-| Throughput | **999 req/s** |
-| p50 | 50.1 ms |
-| p99 | 56.4 ms |
-| p99.9 | 61.7 ms |
+| Throughput | **1,002 req/s** |
+| p50 | 49.9 ms |
+| p99 | 52.8 ms |
+| p99.9 | 53.5 ms |
 | Success rate | 100% |
 
 Latency is dominated by the 50 ms batch flush interval — each request
-waits for the next batch commit. Tight p50-p99 spread (6 ms) confirms
-`spawn_blocking` prevents worker starvation.
+waits for the next batch commit. p50-p99 spread is 2.9 ms.
 
 ### Batch (POST /v1/events/batch) — 2K req × 50 events, 20 concurrent
 
 | Metric | Value |
 |--------|-------|
-| Throughput | **1,577 req/s (~79K events/s)** |
-| p50 | 10.8 ms |
-| p99 | 40.2 ms |
-| p99.9 | 53.2 ms |
+| Throughput | **7,366 req/s (~368K events/s)** |
+| p50 | 2.6 ms |
+| p99 | 6.4 ms |
+| p99.9 | 7.8 ms |
 | Success rate | 100% |
 
 ## 8. Profiling gaps

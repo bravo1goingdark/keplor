@@ -113,19 +113,37 @@ Throughput: append_event +49%, append_batch +57%.
 
 **Files modified:** `Cargo.toml:30`
 
+### Opt-5: RawValue component extraction (replaces serde_json::Value)
+
+**Root cause**: `components.rs` parsed the entire request body into a
+heap-allocated `serde_json::Value` tree (Map<String, Value> with BTreeMap),
+walked it, then re-serialized each component. dhat showed serde_json was
+38.1% of all allocations.
+
+**Changes**: Replaced `from_slice::<Value>` with targeted structs using
+`serde_json::value::RawValue`. Top-level fields (`messages`, `tools`,
+`system`) are borrowed as `&RawValue` (zero-copy byte slices into the
+input). For OpenAI messages, each array element is a `&RawValue` with a
+minimal `RoleCheck` struct to inspect the `role` field. Raw bytes are
+copied directly to the output buffer — no re-serialization needed since
+the pipeline guarantees canonical serde_json input.
+
+**Files modified:** `crates/keplor-store/src/components.rs` (full rewrite),
+`Cargo.toml` (added `raw_value` feature to serde_json)
+
+**Measured impact:**
+- `split_request`: 3.6 µs → 1.28 µs (**2.8x faster**)
+- `append_batch/64`: 6.49 ms → 2.52 ms (**2.6x faster, 25.4K ev/s**)
+- dhat allocations: 14.6M → 9.2M (**-37% bytes, -47% blocks**)
+- serde_json share: 38.1% → 1.8%
+- Load test batch endpoint: 79K → **368K events/s** (4.7x)
+
 ## Phase 5 — Architectural changes
 
-No architectural changes needed. Load test confirms 79K events/sec on the
-batch endpoint, which exceeds the 10K req/s/core target from CLAUDE.md.
+No architectural changes needed. Load test confirms **368K events/sec** on
+the batch endpoint — 37x above the 10K req/s/core target from CLAUDE.md.
 
-**dhat finding — future optimization target**: serde_json accounts for
-38.1% of heap allocations on the batch write path. The
-`serde_json::from_slice::<Value>()` call in `components.rs:55` builds a
-full heap-allocated Value tree to extract system prompts, messages, and
-tools. A streaming/SAX-like JSON parser or targeted extraction using
-`serde_json::StreamDeserializer` could reduce this significantly.
-
-**Other future considerations** (if throughput target increases further):
+**Future considerations** (if throughput target increases further):
 - Replace `Mutex<Connection>` with a connection pool for concurrent writers.
 - Shard writes by `user_id` or `provider` across multiple SQLite files.
 
@@ -133,20 +151,24 @@ tools. A streaming/SAX-like JSON parser or targeted extraction using
 
 All verification passed:
 
-- `cargo test --workspace` — **177 tests, 0 failures**
+- `cargo test --workspace` — **178 tests, 0 failures**
 - `cargo clippy --workspace --all-targets -- -D warnings` — **clean**
 - `cargo fmt --check` — **clean**
-- Criterion benchmarks — established baselines, improvements measured
+- Criterion benchmarks — all improvements measured, outside noise range
+- dhat — allocation reduction confirmed (37% bytes, 47% blocks)
+- Load test — 368K events/s batch, 1K req/s single, 100% success
 - No new `unsafe` — workspace lint enforces `deny(unsafe_code)`
 
-## Phase 7 — Remaining work
+## Phase 7 — Status
 
-| Item | Status | Notes |
-|------|--------|-------|
-| CPU profiling (flamegraph) | BLOCKED | `perf_event_paranoid=4` (needs root) |
-| Allocation profiling (dhat) | **DONE** | serde_json 38%, keplor_store 25%, zstd 7% |
-| opt-level measurement | **DONE** | Switched to 3: 7.5M binary, +49-57% throughput |
-| Concurrent load test | **DONE** | 999 req/s single, 79K ev/s batch |
-| Precomputed SHA benchmark | **DONE** | 1.94x speedup confirmed |
+| Item | Status | Result |
+|------|--------|--------|
+| spawn_blocking | **DONE** | +464% BatchWriter throughput |
+| Double SHA elimination | **DONE** | 1.94x batch speedup (criterion) |
+| Static metrics labels | **DONE** | Zero-alloc per event |
+| opt-level z → 3 | **DONE** | +49-57% throughput, 7.5M binary |
+| RawValue component extraction | **DONE** | 2.6x batch, -37% allocs, 368K ev/s load test |
+| dhat profiling | **DONE** | serde_json 38% → 1.8% |
+| Concurrent load test | **DONE** | 1K single, 368K batch ev/s |
+| CPU flamegraph | BLOCKED | `perf_event_paranoid=4` (needs root) |
 | Miri | SKIPPED | Not available on stable; zero unsafe in workspace |
-| Production metrics | N/A | No production deployment yet |

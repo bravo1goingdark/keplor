@@ -57,7 +57,7 @@ zstd                   = { version = "0.13" }
 
 # --- serde / json ---
 serde                  = { version = "1", features = ["derive"] }
-serde_json             = { version = "1" }
+serde_json             = { version = "1", features = ["raw_value"] }
 
 # --- observability ---
 tracing                     = { version = "0.1" }

@@ -904,17 +904,22 @@ mod tests {
     fn dedup_shared_system_prompt() {
         let store = Store::open_in_memory().unwrap();
 
-        let e1 = test_event();
-        let req1 = Bytes::from(
+        // Use canonical serde_json output — `split_request` assumes the
+        // bytes come from `serde_json::to_vec` (as the pipeline produces).
+        let v1: serde_json::Value = serde_json::from_str(
             r#"{"messages":[{"role":"system","content":"Be helpful."},{"role":"user","content":"A"}]}"#,
-        );
+        ).unwrap();
+        let v2: serde_json::Value = serde_json::from_str(
+            r#"{"messages":[{"role":"system","content":"Be helpful."},{"role":"user","content":"B"}]}"#,
+        ).unwrap();
+
+        let e1 = test_event();
+        let req1 = Bytes::from(serde_json::to_vec(&v1).unwrap());
 
         let mut e2 = test_event();
         e2.id = EventId::new();
         e2.ts_ns += 1;
-        let req2 = Bytes::from(
-            r#"{"messages":[{"role":"system","content":"Be helpful."},{"role":"user","content":"B"}]}"#,
-        );
+        let req2 = Bytes::from(serde_json::to_vec(&v2).unwrap());
 
         let resp = test_resp_body();
 
