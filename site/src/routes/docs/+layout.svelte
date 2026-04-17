@@ -105,4 +105,6 @@
   }
   :global(.prose-custom .method-post) { background: #e8f5e9; color: #2e7d32; }
   :global(.prose-custom .method-get) { background: #e3f2fd; color: #1565c0; }
+  :global(html.dark .prose-custom .method-post) { background: #1b3a20; color: #66bb6a; }
+  :global(html.dark .prose-custom .method-get) { background: #152a3f; color: #64b5f6; }
 </style>

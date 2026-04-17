@@ -14,6 +14,17 @@
   --font-mono: 'JetBrains Mono', ui-monospace, monospace;
 }
 
+/* Dark mode: applied when <html class="dark"> */
+html.dark {
+  --color-bg: #141413;
+  --color-bg-alt: #1C1C1A;
+  --color-ink: #E8E6E1;
+  --color-ink-muted: #9C9A94;
+  --color-line: #2E2D2A;
+  --color-accent: #FF7A52;
+  --color-accent-ink: #141413;
+}
+
 html {
   scroll-behavior: smooth;
   -webkit-font-smoothing: antialiased;
@@ -22,6 +33,15 @@ html {
 
 ::selection {
   background: rgba(255, 91, 46, 0.15);
+}
+
+html.dark ::selection {
+  background: rgba(255, 122, 82, 0.25);
+}
+
+/* Override hardcoded code-highlight color for dark mode */
+html.dark .text-\[\#9a6e3a\] {
+  color: #d4a76a !important;
 }
 
 /* Entrance animations */

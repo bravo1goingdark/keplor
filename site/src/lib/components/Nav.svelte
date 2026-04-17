@@ -1,6 +1,7 @@
 <script lang="ts">
   import { base } from '$app/paths';
   import { page } from '$app/state';
+  import ThemeToggle from './ThemeToggle.svelte';
 
   let scrolled = $state(false);
 
@@ -29,6 +30,7 @@
       <a href="https://github.com/bravo1goingdark/keplor" target="_blank" rel="noopener" class="text-ink-muted hover:text-ink transition-colors">
         GitHub
       </a>
+      <ThemeToggle />
       <a href="{base}/docs/quickstart" class="px-[22px] py-[12px] bg-accent text-accent-ink text-[15px] font-medium rounded-[6px] hover:-translate-y-px transition-transform">
         Get started
       </a>
