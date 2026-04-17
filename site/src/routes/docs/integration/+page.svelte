@@ -1,0 +1,374 @@
+<script lang="ts">
+  import { base } from '$app/paths';
+  import Pre from '$lib/components/Pre.svelte';
+
+  const curlIngest = `$ curl -X POST http://localhost:8080/v1/events \\
+  -H "Authorization: Bearer sk-your-key" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "model": "gpt-4o",
+    "provider": "openai",
+    "usage": {"input_tokens": 1000, "output_tokens": 500},
+    "latency": {"ttft_ms": 30, "total_ms": 450},
+    "user_id": "alice",
+    "source": "my-proxy"
+  }'`;
+
+  const curlResponse = `{
+  "id": "01JA2B3C4D5E6F7G8H9J0KMNPQ",
+  "cost_nanodollars": 6250000,
+  "model": "gpt-4o",
+  "provider": "openai"
+}`;
+
+  const pythonExample = 'import requests, time\n\n' +
+'KEPLOR = "http://localhost:8080"\n' +
+'HEADERS = {\n' +
+'    "Authorization": "Bearer sk-your-key",\n' +
+'    "Content-Type": "application/json",\n' +
+'}\n\n' +
+'# After each LLM call, log to Keplor\n' +
+'def log_llm_event(model, provider, usage, latency_ms, user_id=None):\n' +
+'    return requests.post(f"{KEPLOR}/v1/events", headers=HEADERS, json={\n' +
+'        "model": model,\n' +
+'        "provider": provider,\n' +
+'        "usage": usage,\n' +
+'        "latency": {"total_ms": latency_ms},\n' +
+'        "http_status": 200,\n' +
+'        "user_id": user_id,\n' +
+'        "source": "my-proxy",\n' +
+'    }).json()\n\n' +
+'result = log_llm_event("gpt-4o", "openai", {\n' +
+'    "input_tokens": 1500,\n' +
+'    "output_tokens": 800,\n' +
+'}, 450, user_id="alice")\n\n' +
+'print(f"Event {result[\'id\']} cost: ${result[\'cost_nanodollars\'] / 1e9:.6f}")';
+
+  const nodeExample = 'const KEPLOR = "http://localhost:8080";\n' +
+'const headers = {\n' +
+'  "Authorization": "Bearer sk-your-key",\n' +
+'  "Content-Type": "application/json",\n' +
+'};\n\n' +
+'async function logLlmCall(model, provider, usage, latencyMs, userId) {\n' +
+'  const resp = await fetch(`${KEPLOR}/v1/events`, {\n' +
+'    method: "POST",\n' +
+'    headers,\n' +
+'    body: JSON.stringify({\n' +
+'      model, provider, usage,\n' +
+'      latency: { total_ms: latencyMs },\n' +
+'      http_status: 200,\n' +
+'      user_id: userId,\n' +
+'      source: "my-node-app",\n' +
+'    }),\n' +
+'  });\n' +
+'  return resp.json();\n' +
+'}\n\n' +
+'const result = await logLlmCall("gpt-4o", "openai",\n' +
+'  { input_tokens: 1200, output_tokens: 600 }, 350, "alice");\n' +
+'console.log(`Cost: $${(result.cost_nanodollars / 1e9).toFixed(6)}`);';
+
+  const batchExample = `$ curl -X POST http://localhost:8080/v1/events/batch \\
+  -H "Authorization: Bearer sk-your-key" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "events": [
+      {"model": "gpt-4o", "provider": "openai", "usage": {"input_tokens": 500}},
+      {"model": "claude-sonnet-4-20250514", "provider": "anthropic",
+       "usage": {"input_tokens": 800, "output_tokens": 200}}
+    ]
+  }'`;
+
+  const batchResponse = `{
+  "results": [
+    {"id": "01JA...", "cost_nanodollars": 1250000, "model": "gpt-4o", "provider": "openai"},
+    {"id": "01JB...", "cost_nanodollars": 4200000, "model": "claude-sonnet-4-20250514", "provider": "anthropic"}
+  ],
+  "accepted": 2,
+  "rejected": 0
+}`;
+
+  const litellmCallback = 'import litellm, requests\n\n' +
+'KEPLOR = "http://localhost:8080"\n\n' +
+'def keplor_callback(kwargs, completion_response, start_time, end_time):\n' +
+'    latency_ms = int((end_time - start_time).total_seconds() * 1000)\n' +
+'    usage = completion_response.get("usage", {})\n' +
+'    requests.post(f"{KEPLOR}/v1/events", json={\n' +
+'        "model": kwargs.get("model", ""),\n' +
+'        "provider": kwargs.get("custom_llm_provider", "openai"),\n' +
+'        "usage": {\n' +
+'            "input_tokens": usage.get("prompt_tokens", 0),\n' +
+'            "output_tokens": usage.get("completion_tokens", 0),\n' +
+'        },\n' +
+'        "latency": {"total_ms": latency_ms},\n' +
+'        "http_status": 200,\n' +
+'        "user_id": kwargs.get("user"),\n' +
+'        "source": "litellm",\n' +
+'    })\n\n' +
+'litellm.success_callback = [keplor_callback]';
+
+  const quotaExample = `$ curl "http://localhost:8080/v1/quota?user_id=alice&from=1700000000000000000" \\
+  -H "Authorization: Bearer sk-your-key"`;
+
+  const quotaResponse = `{"cost_nanodollars": 150000000, "event_count": 85}`;
+
+  const fullEventExample = `{
+  "model": "claude-sonnet-4-20250514",
+  "provider": "anthropic",
+  "cost_nanodollars": null,
+  "usage": {
+    "input_tokens": 2000,
+    "output_tokens": 1000,
+    "cache_read_input_tokens": 500,
+    "cache_creation_input_tokens": 0,
+    "reasoning_tokens": 0
+  },
+  "latency": {
+    "ttft_ms": 45,
+    "total_ms": 800,
+    "time_to_close_ms": 20
+  },
+  "timestamp": "2024-11-15T10:30:00Z",
+  "method": "POST",
+  "endpoint": "/v1/messages",
+  "http_status": 200,
+  "source": "litellm",
+  "user_id": "alice",
+  "api_key_id": "my-service",
+  "org_id": "acme-corp",
+  "project_id": "chatbot-v2",
+  "route_id": "chat",
+  "flags": {
+    "streaming": true,
+    "tool_calls": false,
+    "reasoning": true,
+    "stream_incomplete": false,
+    "cache_used": true
+  },
+  "error": null,
+  "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+  "request_id": "req_abc123",
+  "client_ip": "10.0.1.42",
+  "user_agent": "my-proxy/1.0",
+  "request_body": {"messages": [{"role": "user", "content": "Hello"}]},
+  "response_body": {"content": [{"type": "text", "text": "Hi there!"}]},
+  "metadata": {"session_id": "sess_xyz", "user_tag": "premium"}
+}`;
+</script>
+
+<svelte:head>
+  <title>Integration Guide - Keplor</title>
+</svelte:head>
+
+<h1 class="text-3xl font-bold mb-2">Integration Guide</h1>
+<p class="text-lg text-text-muted mb-8">Everything a service needs to log LLM traffic through Keplor.</p>
+
+<h2 id="overview">How it works</h2>
+<p>Your proxy or application makes LLM calls as usual, then POSTs event data to Keplor. Keplor computes cost from its bundled pricing catalog, compresses and stores the event, and makes it queryable via the API.</p>
+
+<Pre code={"Your App / Proxy                  Keplor\n      |                              |\n      |-- LLM call --> Provider      |\n      |<-- response --               |\n      |                              |\n      |-- POST /v1/events ---------> | validate, compute cost,\n      |<-- 201 {id, cost} ---------- | compress, store"} />
+
+<p>Keplor is <strong>observational only</strong> &mdash; it never touches your LLM traffic. It just records what happened.</p>
+
+<h2 id="quickstart">Minimal example</h2>
+<p>Send the two required fields (<code>model</code> and <code>provider</code>) plus token counts:</p>
+<Pre code={curlIngest} />
+<p>Response:</p>
+<Pre code={curlResponse} />
+<p>Cost is auto-computed: <code>6250000</code> nanodollars = <strong>$0.00625</strong>.</p>
+
+<h2 id="auth">Authentication</h2>
+<p>When API keys are configured, include a Bearer token:</p>
+<pre><code>Authorization: Bearer sk-your-key</code></pre>
+
+<h3>Key formats</h3>
+<table>
+  <thead><tr><th>Config value</th><th>Key ID used</th><th>Secret to send</th></tr></thead>
+  <tbody>
+    <tr><td><code>"prod-svc:sk-abc123"</code></td><td><code>prod-svc</code></td><td><code>sk-abc123</code></td></tr>
+    <tr><td><code>"sk-abc123"</code></td><td><code>key_&lt;sha256-prefix&gt;</code> (auto-derived)</td><td><code>sk-abc123</code></td></tr>
+  </tbody>
+</table>
+
+<h3>Server-side key attribution</h3>
+<p>When auth is enabled, Keplor <strong>overrides</strong> the client-provided <code>api_key_id</code> with the authenticated key's ID. This prevents clients from spoofing attribution. Cost rollups, quotas, and billing are always tied to the actual key.</p>
+
+<h3>Open mode</h3>
+<p>When no keys are configured (the default), auth is disabled. All requests are accepted without a Bearer token.</p>
+
+<h2 id="schema">What to send</h2>
+<p>Only <code>model</code> and <code>provider</code> are required. Everything else is optional with sensible defaults.</p>
+
+<h3>Required fields</h3>
+<table>
+  <thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td><code>model</code></td><td>string</td><td>Model name (<code>"gpt-4o"</code>, <code>"claude-sonnet-4-20250514"</code>)</td></tr>
+    <tr><td><code>provider</code></td><td>string</td><td>Provider key (see <a href="#providers">supported providers</a>)</td></tr>
+  </tbody>
+</table>
+
+<h3>Token usage</h3>
+<table>
+  <thead><tr><th>Field</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td><code>usage.input_tokens</code></td><td>u32</td><td>0</td><td>Input/prompt tokens</td></tr>
+    <tr><td><code>usage.output_tokens</code></td><td>u32</td><td>0</td><td>Output/completion tokens</td></tr>
+    <tr><td><code>usage.cache_read_input_tokens</code></td><td>u32</td><td>0</td><td>Tokens served from cache</td></tr>
+    <tr><td><code>usage.cache_creation_input_tokens</code></td><td>u32</td><td>0</td><td>Tokens written to cache</td></tr>
+    <tr><td><code>usage.reasoning_tokens</code></td><td>u32</td><td>0</td><td>Chain-of-thought / thinking tokens</td></tr>
+    <tr><td><code>usage.audio_input_tokens</code></td><td>u32</td><td>0</td><td>Audio input tokens</td></tr>
+    <tr><td><code>usage.audio_output_tokens</code></td><td>u32</td><td>0</td><td>Audio output tokens</td></tr>
+    <tr><td><code>usage.image_tokens</code></td><td>u32</td><td>0</td><td>Image/vision tokens</td></tr>
+    <tr><td><code>usage.tool_use_tokens</code></td><td>u32</td><td>0</td><td>Tool/function call tokens</td></tr>
+  </tbody>
+</table>
+
+<h3>Latency</h3>
+<table>
+  <thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td><code>latency.ttft_ms</code></td><td>u32</td><td>Time to first byte (ms)</td></tr>
+    <tr><td><code>latency.total_ms</code></td><td>u32</td><td>End-to-end latency (ms)</td></tr>
+    <tr><td><code>latency.time_to_close_ms</code></td><td>u32</td><td>Time from last token to stream close</td></tr>
+  </tbody>
+</table>
+
+<h3>Attribution</h3>
+<table>
+  <thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td><code>user_id</code></td><td>string</td><td>User identity for cost attribution</td></tr>
+    <tr><td><code>api_key_id</code></td><td>string</td><td>API key (overridden by server when auth enabled)</td></tr>
+    <tr><td><code>org_id</code></td><td>string</td><td>Organization ID</td></tr>
+    <tr><td><code>project_id</code></td><td>string</td><td>Project ID</td></tr>
+    <tr><td><code>route_id</code></td><td>string</td><td>Logical route name (<code>"chat"</code>, <code>"embeddings"</code>)</td></tr>
+    <tr><td><code>source</code></td><td>string</td><td>Name of the sending system</td></tr>
+  </tbody>
+</table>
+
+<h3>Flags</h3>
+<table>
+  <thead><tr><th>Field</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td><code>flags.streaming</code></td><td>bool</td><td>false</td><td>Response was streamed</td></tr>
+    <tr><td><code>flags.tool_calls</code></td><td>bool</td><td>false</td><td>Included tool/function calls</td></tr>
+    <tr><td><code>flags.reasoning</code></td><td>bool</td><td>false</td><td>Used extended thinking</td></tr>
+    <tr><td><code>flags.stream_incomplete</code></td><td>bool</td><td>false</td><td>Stream ended prematurely</td></tr>
+    <tr><td><code>flags.cache_used</code></td><td>bool</td><td>false</td><td>Response served from cache</td></tr>
+  </tbody>
+</table>
+
+<h3>Other optional fields</h3>
+<table>
+  <thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td><code>cost_nanodollars</code></td><td>i64</td><td>Override auto-computed cost (nanodollars)</td></tr>
+    <tr><td><code>timestamp</code></td><td>i64 or string</td><td>Epoch nanos or ISO 8601 (default: server time)</td></tr>
+    <tr><td><code>method</code></td><td>string</td><td>HTTP method (default: <code>"POST"</code>)</td></tr>
+    <tr><td><code>endpoint</code></td><td>string</td><td>API path (<code>"/v1/chat/completions"</code>)</td></tr>
+    <tr><td><code>http_status</code></td><td>u16</td><td>Upstream HTTP status code</td></tr>
+    <tr><td><code>error.kind</code></td><td>string</td><td>Error category (<code>"rate_limited"</code>, etc.)</td></tr>
+    <tr><td><code>error.message</code></td><td>string</td><td>Error message text</td></tr>
+    <tr><td><code>error.status</code></td><td>u16</td><td>Error HTTP status</td></tr>
+    <tr><td><code>trace_id</code></td><td>string</td><td>W3C trace ID</td></tr>
+    <tr><td><code>request_id</code></td><td>string</td><td>Provider request ID</td></tr>
+    <tr><td><code>client_ip</code></td><td>string</td><td>Client source IP</td></tr>
+    <tr><td><code>user_agent</code></td><td>string</td><td>Client user-agent</td></tr>
+    <tr><td><code>request_body</code></td><td>any JSON</td><td>Full request body (stored compressed)</td></tr>
+    <tr><td><code>response_body</code></td><td>any JSON</td><td>Full response body (stored compressed)</td></tr>
+    <tr><td><code>metadata</code></td><td>any JSON</td><td>Arbitrary metadata (queryable via <code>user_tag</code>/<code>session_tag</code>)</td></tr>
+  </tbody>
+</table>
+
+<h3>Full event example</h3>
+<Pre code={fullEventExample} />
+
+<h2 id="what-you-get">What you get back</h2>
+<p>Every successful ingest returns:</p>
+<table>
+  <thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td><code>id</code></td><td>string</td><td>ULID (time-sortable unique ID)</td></tr>
+    <tr><td><code>cost_nanodollars</code></td><td>i64</td><td>Computed or overridden cost</td></tr>
+    <tr><td><code>model</code></td><td>string</td><td>Normalized model name</td></tr>
+    <tr><td><code>provider</code></td><td>string</td><td>Normalized provider key</td></tr>
+  </tbody>
+</table>
+
+<h2 id="providers">Supported providers</h2>
+<table>
+  <thead><tr><th>Provider key</th><th>Service</th></tr></thead>
+  <tbody>
+    <tr><td><code>openai</code></td><td>OpenAI (api.openai.com)</td></tr>
+    <tr><td><code>anthropic</code></td><td>Anthropic (api.anthropic.com)</td></tr>
+    <tr><td><code>gemini</code></td><td>Google AI Studio</td></tr>
+    <tr><td><code>vertex_ai</code></td><td>Google Vertex AI</td></tr>
+    <tr><td><code>bedrock</code></td><td>AWS Bedrock</td></tr>
+    <tr><td><code>azure</code></td><td>Azure OpenAI</td></tr>
+    <tr><td><code>mistral</code></td><td>Mistral AI</td></tr>
+    <tr><td><code>groq</code></td><td>Groq</td></tr>
+    <tr><td><code>xai</code></td><td>xAI Grok</td></tr>
+    <tr><td><code>deepseek</code></td><td>DeepSeek</td></tr>
+    <tr><td><code>cohere</code></td><td>Cohere v2</td></tr>
+    <tr><td><code>ollama</code></td><td>Ollama (local)</td></tr>
+  </tbody>
+</table>
+<p>Any unrecognized provider string is treated as <strong>OpenAI-compatible</strong>. Matching is case-insensitive.</p>
+
+<h2 id="cost">Cost accounting</h2>
+<p>Costs are stored as <strong>int64 nanodollars</strong> (10<sup>-9</sup> USD) to avoid floating-point precision issues.</p>
+<table>
+  <thead><tr><th>Nanodollars</th><th>USD</th></tr></thead>
+  <tbody>
+    <tr><td><code>1,000,000,000</code></td><td>$1.00</td></tr>
+    <tr><td><code>1,000,000</code></td><td>$0.001</td></tr>
+    <tr><td><code>1,000</code></td><td>$0.000001</td></tr>
+  </tbody>
+</table>
+<p>When you omit <code>cost_nanodollars</code>, Keplor computes it from the model pricing catalog and your <code>usage</code> token counts. This handles prompt caching discounts, reasoning token pricing, and audio/image tokens automatically.</p>
+<p>To override: set <code>cost_nanodollars</code> to your own value. Unknown models get cost <code>0</code>.</p>
+
+<h2 id="batch">Batch ingestion</h2>
+<p>For high-throughput scenarios, use <code>/v1/events/batch</code> with up to <strong>10,000 events</strong> per request:</p>
+<Pre code={batchExample} />
+<p>Response (<code>201</code> all accepted, <code>207</code> partial):</p>
+<Pre code={batchResponse} />
+<p>Batch writes are fire-and-forget: events are validated synchronously but flushed to disk asynchronously (~50ms). Events may be lost on server crash before flush.</p>
+
+<h2 id="querying">Querying your data</h2>
+<p>Check cost for a user:</p>
+<Pre code={quotaExample} />
+<Pre code={quotaResponse} />
+<p>See the <a href="{base}/docs/api-reference">API Reference</a> for all query endpoints: events, rollups, stats, and quota.</p>
+
+<h2 id="errors">Error handling</h2>
+<table>
+  <thead><tr><th>Status</th><th>Meaning</th><th>Retry?</th></tr></thead>
+  <tbody>
+    <tr><td><code>201</code></td><td>Created</td><td>No</td></tr>
+    <tr><td><code>207</code></td><td>Partial success (batch)</td><td>Retry failed items</td></tr>
+    <tr><td><code>400</code></td><td>Validation error or bad JSON</td><td>Fix request</td></tr>
+    <tr><td><code>401</code></td><td>Missing or invalid API key</td><td>Fix auth</td></tr>
+    <tr><td><code>422</code></td><td>Unprocessable entity</td><td>Fix payload</td></tr>
+    <tr><td><code>500</code></td><td>Server error</td><td>Yes, with backoff</td></tr>
+  </tbody>
+</table>
+<p>All errors return <code>{'{"error": "message"}'}</code>.</p>
+
+<h2 id="examples">Integration examples</h2>
+
+<h3>Python</h3>
+<Pre code={pythonExample} />
+
+<h3>Node.js</h3>
+<Pre code={nodeExample} />
+
+<h3>LiteLLM callback</h3>
+<Pre code={litellmCallback} />
+
+<h2 id="next">Next steps</h2>
+<p>
+  <a href="{base}/docs/api-reference">API Reference</a> &mdash; all endpoints, parameters, and response shapes.<br />
+  <a href="{base}/docs/configuration">Configuration</a> &mdash; TOML config, env vars, auth keys.<br />
+  <a href="{base}/docs/quickstart">Quickstart</a> &mdash; install and run Keplor in 2 minutes.
+</p>

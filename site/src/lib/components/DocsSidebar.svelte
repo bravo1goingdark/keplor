@@ -5,6 +5,7 @@
   const nav = [
     { href: `${base}/docs`, label: 'Overview' },
     { href: `${base}/docs/quickstart`, label: 'Quickstart' },
+    { href: `${base}/docs/integration`, label: 'Integration Guide' },
     { href: `${base}/docs/api-reference`, label: 'API Reference' },
     { href: `${base}/docs/configuration`, label: 'Configuration' },
     { href: `${base}/docs/cli`, label: 'CLI' },
