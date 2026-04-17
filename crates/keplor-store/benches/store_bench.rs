@@ -167,12 +167,48 @@ fn bench_query(c: &mut Criterion) {
     group.finish();
 }
 
+/// Like `make_event` but with pre-computed SHAs — matching what the
+/// server pipeline produces.  This exercises the double-SHA elimination
+/// in `append_batch`.
+fn make_event_with_sha(i: usize, req: &[u8], resp: &[u8]) -> LlmEvent {
+    let mut e = make_event(i);
+    e.request_sha256 = sha256_bytes(req);
+    e.response_sha256 = sha256_bytes(resp);
+    e
+}
+
+fn bench_append_batch_precomputed_sha(c: &mut Criterion) {
+    let mut group = c.benchmark_group("append_batch_precomputed_sha");
+    for batch_size in [64, 256] {
+        let events: Vec<(LlmEvent, Bytes, Bytes)> = (0..batch_size)
+            .map(|i| {
+                let req = make_request(i);
+                let resp = make_response(i);
+                let event = make_event_with_sha(i, &req, &resp);
+                (event, req, resp)
+            })
+            .collect();
+
+        group.throughput(Throughput::Elements(batch_size as u64));
+        group.bench_with_input(BenchmarkId::from_parameter(batch_size), &events, |b, events| {
+            b.iter_with_setup(
+                || Store::open_in_memory().unwrap(),
+                |store| {
+                    black_box(store.append_batch(events).unwrap());
+                },
+            );
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_sha256,
     bench_zstd_compress,
     bench_split_request,
     bench_append_batch,
+    bench_append_batch_precomputed_sha,
     bench_append_event,
     bench_query,
 );

@@ -208,6 +208,6 @@ From `cargo tree -d`: `getrandom` (3 versions), `hashbrown` (3 versions), `rand`
 | 3 | Double SHA-256 per event | `pipeline.rs:237-238` + `store.rs:225-226` | Pipeline and store independently hash same bytes | ~4us wasted per event |
 | 4 | Fresh zstd Compressor per call | `compress.rs:48-52` | No context reuse | ~5us alloc overhead per unique blob |
 | 5 | Metrics label allocation per event | `pipeline.rs:140` | `id_key().to_owned()` | ~50 bytes heap per event |
-| 6 | `opt-level = "z"` vs performance | `Cargo.toml:30` | Size optimization trades runtime speed | 5-20% throughput (NEEDS MEASUREMENT) |
+| 6 | `opt-level = "z"` → `3` | `Cargo.toml:30` | RESOLVED: switched to 3, +49% throughput, 7.5M binary (under 10MB) | — |
 | 7 | Single Mutex<Connection> for reads+writes | `store.rs:32` | No read-write separation | Read latency increases under write load |
 | 8 | Catalog prefix fallback allocates | `catalog.rs:248` | `format!` + `ModelKey::new` in loop | Negligible (rare path, <5% of lookups) |

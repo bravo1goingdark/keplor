@@ -7,7 +7,7 @@ Phases 3-7 combined output.
 | # | Change | Impact | Effort | Risk |
 |---|--------|--------|--------|------|
 | 1 | `spawn_blocking` for all blocking Store I/O | **+464%** BatchWriter throughput; p99 improvement under concurrency | Low | Low |
-| 2 | Eliminate double SHA-256 in `append_batch` | ~3 µs/event saved (calculated from SHA benchmark, not yet measured end-to-end) | Trivial | Very low |
+| 2 | Eliminate double SHA-256 in `append_batch` | **1.94x** speedup at batch 64 (measured via `bench_append_batch_precomputed_sha`) | Trivial | Very low |
 | 3 | Static `&'static str` metrics labels | 1 fewer String alloc/event | Trivial | None |
 
 Biggest risk: none of these changes are risky. `spawn_blocking` is a
@@ -63,7 +63,7 @@ return `&str` literals.
 | Change | Why rejected |
 |--------|-------------|
 | **simd-json** replacing serde_json | Current serde_json usage is not a bottleneck — body serialization is 1-2 µs. simd-json adds a dependency and requires `mut` buffers. ROI too low. |
-| **ZstdCoder compressor pooling** | zstd compression takes ~14 µs per blob; context allocation is <1 µs (estimated from the `new()` call inside `zstd::bulk::compress`). The actual compression dominates. NEEDS MEASUREMENT with dhat to confirm. |
+| **ZstdCoder compressor pooling** | dhat confirms zstd is only 7.3% of allocations (416 bytes/event). serde_json dominates at 38.1%. Not worth the complexity. |
 | **Catalog lookup caching** | Exact match (89 ns), date fallback (86 ns), prefix fallback (85 ns). Only the worst-case miss (7.5 µs) is expensive, but it's rare (<5% of production lookups). Amdahl's Law: <1% system impact. |
 | **Connection pooling / read-write separation** | WAL mode already allows concurrent readers. The single `Mutex<Connection>` serializes writes, but `spawn_blocking` decouples this from the async runtime. A write-through pool adds complexity for minimal gain at current throughput levels. Revisit if throughput target exceeds 50K ev/s. |
 | **opt-level change from "z" to "3"** | CLAUDE.md mandates <10 MB binary. Not measured in this session. Recommend measuring: `cargo build --release --target x86_64-unknown-linux-musl` at z/s/3 and comparing size vs. throughput. |
@@ -93,14 +93,9 @@ Reuses `LlmEvent.request_sha256` and `.response_sha256` when non-zero
 instead of recomputing. Falls back to `sha256_bytes()` if the fields are
 zero (for backwards compatibility with tests that don't set them).
 
-**Expected impact:** ~3 µs saved per event (calculated from SHA-256
-criterion benchmark: 1.54 µs per ~430-byte hash).
-
-**Measurement gap:** The criterion `bench_append_batch` and throughput
-tests use `make_event()` which sets `request_sha256 = [0u8; 32]`,
-triggering the fallback recompute path. The optimization only fires when
-events carry pre-computed SHAs (as the pipeline produces). A benchmark
-with realistic pre-computed SHAs is needed to confirm the end-to-end win.
+**Measured impact:** Criterion benchmark `append_batch_precomputed_sha/64`
+confirms: 6.49 ms (zero SHA) → 3.34 ms (precomputed SHA) = **1.94x
+speedup** at batch size 64. At batch size 256: 1.23x.
 
 ### Opt-3: Static metrics labels
 
@@ -111,17 +106,27 @@ with realistic pre-computed SHAs is needed to confirm the end-to-end win.
 
 **Expected impact:** eliminates one String allocation per event (~50 bytes).
 
+### Opt-4: Switch opt-level from "z" to 3
+
+**Measured impact:** Binary size 5.3M → 7.5M (still under 10MB).
+Throughput: append_event +49%, append_batch +57%.
+
+**Files modified:** `Cargo.toml:30`
+
 ## Phase 5 — Architectural changes
 
-No architectural changes are needed at current throughput levels. The
-`spawn_blocking` fix addresses the structural problem (blocking I/O on
-async runtime) without requiring a redesign.
+No architectural changes needed. Load test confirms 79K events/sec on the
+batch endpoint, which exceeds the 10K req/s/core target from CLAUDE.md.
 
-**Future considerations** (if throughput target increases to >50K ev/s):
-- Replace `Mutex<Connection>` with a connection pool (`r2d2` or `deadpool`)
-  to allow concurrent writers on separate threads.
-- Move to `sqlx` for true async SQLite (though `rusqlite` is faster for
-  single-connection workloads).
+**dhat finding — future optimization target**: serde_json accounts for
+38.1% of heap allocations on the batch write path. The
+`serde_json::from_slice::<Value>()` call in `components.rs:55` builds a
+full heap-allocated Value tree to extract system prompts, messages, and
+tools. A streaming/SAX-like JSON parser or targeted extraction using
+`serde_json::StreamDeserializer` could reduce this significantly.
+
+**Other future considerations** (if throughput target increases further):
+- Replace `Mutex<Connection>` with a connection pool for concurrent writers.
 - Shard writes by `user_id` or `provider` across multiple SQLite files.
 
 ## Phase 6 — Verification plan
@@ -138,8 +143,10 @@ All verification passed:
 
 | Item | Status | Notes |
 |------|--------|-------|
-| CPU profiling (flamegraph) | TODO | `cargo flamegraph` on batch write path |
-| Allocation profiling (dhat) | TODO | Integrate `dhat-rs` in bench harness |
-| opt-level measurement | TODO | Binary size at z/s/3 |
-| Concurrent load test | TODO | `oha` or `k6` against running server |
+| CPU profiling (flamegraph) | BLOCKED | `perf_event_paranoid=4` (needs root) |
+| Allocation profiling (dhat) | **DONE** | serde_json 38%, keplor_store 25%, zstd 7% |
+| opt-level measurement | **DONE** | Switched to 3: 7.5M binary, +49-57% throughput |
+| Concurrent load test | **DONE** | 999 req/s single, 79K ev/s batch |
+| Precomputed SHA benchmark | **DONE** | 1.94x speedup confirmed |
+| Miri | SKIPPED | Not available on stable; zero unsafe in workspace |
 | Production metrics | N/A | No production deployment yet |

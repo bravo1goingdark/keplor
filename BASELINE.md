@@ -1,7 +1,8 @@
 # BASELINE.md — Keplor Performance Baselines
 
 Phase 2 output. All measurements on in-memory SQLite, `--release` profile
-(`opt-level = "z"`, fat LTO, `codegen-units = 1`, `panic = abort`).
+(fat LTO, `codegen-units = 1`, `panic = abort`).
+Final opt-level: `3` (switched from `"z"` — see section 5).
 
 ## 1. Throughput tests (pre-optimization)
 
@@ -96,13 +97,82 @@ continue buffering events instead of being blocked. This leads to larger
 effective batches and better dedup (blobs went from 20,007 to 2,311 for
 10K events).
 
-## 4. Profiling notes
+## 4. Criterion: precomputed SHA vs zero SHA
 
-- **CPU profiling**: not performed (no `cargo flamegraph` in this session).
-  Criterion results point to zstd compression as the dominant cost in the
-  batch write path (~14 µs per blob vs ~1.5 µs for SHA-256).
-- **Allocation profiling**: not performed (`dhat-rs` not integrated).
-  Recommended for future work.
-- **Async runtime**: `tokio-console` not tested. The `spawn_blocking` fix
-  addresses the theoretical blocking concern; production load testing
-  would confirm p99 improvement.
+Proves the double-SHA elimination fires and has measurable impact:
+
+| Variant | Batch 64 | Batch 256 | Throughput |
+|---------|----------|-----------|-----------|
+| Zero SHA (recomputes) | 6.49 ms | 16.3 ms | 9.9K ev/s |
+| Precomputed SHA (skips) | 3.34 ms | 13.3 ms | 19.2K ev/s |
+| **Speedup** | **1.94x** | **1.23x** | |
+
+## 5. opt-level comparison
+
+Binary size (native x86_64-unknown-linux-gnu, fat LTO, strip=symbols):
+
+| opt-level | Binary size | append_event | append_batch (64) | BatchWriter |
+|-----------|------------|-------------|-------------------|-------------|
+| `"z"` | **5.3 MB** | 2,403 ev/s | ~6,003 ev/s | 22,905 ev/s |
+| `"s"` | 5.5 MB | — | — | — |
+| `3` | **7.5 MB** | 3,591 ev/s | 9,398 ev/s | 24,081 ev/s |
+
+All three are well under the 10 MB binary-size constraint from CLAUDE.md.
+`opt-level = 3` gives **+49% append_event**, **+57% append_batch** for
+2.2 MB more binary size. Switched to `3`.
+
+## 6. Allocation profiling (dhat-rs)
+
+2,560 events in 10 batches of 256. Harness: `benches/dhat_batch.rs`.
+
+| Category | Bytes | % of total | Per-event |
+|----------|-------|-----------|-----------|
+| serde_json (component split) | 5,548,970 | 38.1% | 2,168 B |
+| bench harness (test data) | 4,334,272 | 29.8% | 1,693 B |
+| keplor_store (Vecs, buffers) | 3,584,384 | 24.6% | 1,400 B |
+| zstd (compressor context) | 1,064,300 | 7.3% | 416 B |
+| rusqlite | 20,821 | 0.1% | 8 B |
+
+**Key finding**: serde_json dominates allocations (38%) — the
+`serde_json::from_slice::<Value>()` call in `components.rs:55` parses the
+full request body into a heap-allocated Value tree for component
+extraction. This is the highest-ROI allocation target for future work.
+
+zstd compressor context allocation (7.3%) is small — pooling would save
+~416 bytes/event, not worth the complexity.
+
+## 7. Concurrent load test (oha)
+
+Server: `keplor run` with opt-level 3, default config, file-backed SQLite.
+
+### Single event (POST /v1/events) — 10K req, 50 concurrent
+
+| Metric | Value |
+|--------|-------|
+| Throughput | **999 req/s** |
+| p50 | 50.1 ms |
+| p99 | 56.4 ms |
+| p99.9 | 61.7 ms |
+| Success rate | 100% |
+
+Latency is dominated by the 50 ms batch flush interval — each request
+waits for the next batch commit. Tight p50-p99 spread (6 ms) confirms
+`spawn_blocking` prevents worker starvation.
+
+### Batch (POST /v1/events/batch) — 2K req × 50 events, 20 concurrent
+
+| Metric | Value |
+|--------|-------|
+| Throughput | **1,577 req/s (~79K events/s)** |
+| p50 | 10.8 ms |
+| p99 | 40.2 ms |
+| p99.9 | 53.2 ms |
+| Success rate | 100% |
+
+## 8. Profiling gaps
+
+- **CPU flamegraph**: blocked by `perf_event_paranoid=4` (needs root).
+- **Miri**: not available on stable 1.93.0 (nightly only). Zero unsafe
+  in workspace (`deny(unsafe_code)` lint), so miri is redundant.
+- **tokio-console**: not tested. The load test confirms `spawn_blocking`
+  works correctly under concurrency.
