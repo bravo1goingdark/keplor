@@ -19,6 +19,100 @@ Format for each entry:
 
 <!-- Append entries below this line. Most recent on top. -->
 
+## 2026-04-17 — Phase 4 complete
+
+### What was built
+
+`keplor-proxy` filled in, 9 modules:
+
+| Module       | Public items                                                                                           |
+|--------------|--------------------------------------------------------------------------------------------------------|
+| `error`      | `ProxyError` (Hyper, HyperClient, Tls, Io, NoRoute, ConnectTimeout, ConcurrencyLimit, Config, InvalidUri) |
+| `capture`    | `CaptureSink` trait, `RequestCtx`, `StreamOutcome`, `CaptureEvent`, `NullSink`, `ChannelSink`         |
+| `tee`        | `TeeBody<B>` (new, passthrough, bytes_forwarded; impl `http_body::Body`)                              |
+| `headers`    | `strip_hop_by_hop_request`, `strip_hop_by_hop_response`, `rewrite_host`                               |
+| `route`      | `Route`, `RouteTable` (from_config, resolve)                                                          |
+| `config`     | `ProxyConfig`, `ServerConfig`, `UpstreamConfig`, `CaptureConfig`, `RouteConfig`                       |
+| `limits`     | `ConcurrencyLimiter` (try_acquire, max, available)                                                    |
+| `upstream`   | `UpstreamPool`, `UpstreamClient` (hyper-util + rustls + http2, ArcSwap hot-swap)                      |
+| `server`     | `ProxyServer` (new, run, run_on, shutdown_token); plain HTTP via axum::serve, TLS via manual accept loop |
+
+Plus: `examples/echo-proxy.rs`, `benches/proxy_overhead.rs`, `tests/integration.rs`.
+
+### Acceptance
+
+- `cargo test -p keplor-proxy` → **34 passed** (29 unit + 5 integration), 0 failed.
+- `cargo clippy --workspace --all-targets -- -D warnings` → green.
+- `cargo fmt --all -- --check` → green.
+- Workspace total: **188 passed**, 0 failed.
+
+### Test coverage by required area
+
+| Required                                                     | Tests |
+|--------------------------------------------------------------|-------|
+| CaptureSink: NullSink no-panic                               | 1     |
+| CaptureSink: ChannelSink delivers events in order            | 1     |
+| CaptureSink: ChannelSink survives closed receiver            | 1     |
+| TeeBody: full body roundtrip                                 | 1     |
+| TeeBody: multi-frame drops capture on full channel           | 1     |
+| TeeBody: passthrough mode                                    | 1     |
+| TeeBody: empty body                                          | 1     |
+| TeeBody: bytes_forwarded tracking                            | 1     |
+| Headers: strip hop-by-hop from request                       | 1     |
+| Headers: strip hop-by-hop from response                      | 1     |
+| Headers: preserve all auth headers                           | 1     |
+| Headers: rewrite_host replaces and inserts                   | 2     |
+| Route: exact host, case-insensitive, path prefix, first-match| 4     |
+| Route: no match, port stripping, invalid URL, empty table    | 4     |
+| Route: provider auto-detected                                | 1     |
+| Config: full TOML deserialize                                | 1     |
+| Config: defaults when empty                                  | 1     |
+| Limits: acquire up to max, release frees, max reports        | 3     |
+| Upstream: construction, hot-swap                             | 2     |
+| Integration: GET forward + capture                           | 1     |
+| Integration: POST with body forward + capture                | 1     |
+| Integration: upstream 429 forwarded transparently            | 1     |
+| Integration: unknown host → 502                              | 1     |
+| Integration: query params preserved                          | 1     |
+
+### Key design choices
+
+- **`hyper_util::client::legacy::Client`** for upstream (not reqwest) — frame-level body control.
+- **Single Client pool** (not per-host HashMap) — hyper-util already pools per-host internally. `ArcSwap<Client>` for future hot-reload.
+- **Plain HTTP via `axum::serve`**, TLS via manual `tokio-rustls::TlsAcceptor` + `hyper_util::server::conn::auto::Builder` accept loop.
+- **`TeeBody<B>`** uses `Box::pin(inner)` rather than `pin_project_lite` because `http_body::Body` trait requires `Pin<&mut Self>` and the boxed approach avoids complex generic pin projection for inner bodies that may not be `Unpin`.
+- **Error transparency**: all upstream 4xx/5xx responses forwarded as-is to the client.
+
+### Deviations / notes
+
+- **Single Client pool** instead of `ArcSwap<HashMap<Host, Client>>` — `hyper_util::client::legacy::Client` already pools connections per-host internally. The HashMap approach is unnecessary complexity. `ArcSwap<Client>` preserved for hot-reload.
+- **No `Host` extractor from axum** — axum 0.8 removed the `Host` extractor. Extracted manually from the `host` header via `req.headers().get(header::HOST)`.
+- **`axum::body::Body` is `!Sync`** (wraps `UnsyncBoxBody`), so the TLS serve path uses `service_fn` to bridge between hyper's service expectation and axum's router, rather than directly using `BodyExt::boxed()`.
+- **Explicit `rustls::crypto::aws_lc_rs::default_provider()`** passed to `ClientConfig::builder_with_provider()` and `WebPkiServerVerifier::builder_with_provider()` — required because rustls 0.23 no longer auto-detects the crypto provider from features at runtime.
+- **`webpki-roots` added as crate-local dep** for root CA certificates.
+- **`futures-util`, `toml`, `portpicker` added as dev-deps** for tests.
+- **`criterion` dev-dep requires `async_tokio` feature** for async benchmarks.
+
+### Metrics implemented
+
+| Metric                         | Type      | Labels                    |
+|--------------------------------|-----------|---------------------------|
+| `keplor_requests_total`        | counter   | route, method, status     |
+| `keplor_active_streams`        | gauge     | route                     |
+| `keplor_capture_dropped_total` | counter   | stage (request/response)  |
+
+`keplor_request_bytes_total`, `keplor_response_bytes_total`, and `keplor_proxy_overhead_seconds` are deferred to Phase 5 when the response drain task has better access to byte counts and timing. The infrastructure (`TeeBody::bytes_forwarded()`) is ready.
+
+### Deferred to later phases
+
+- Provider-specific parsing / SSE reassembly (phase 5).
+- Request/response byte counters and overhead histogram metrics (phase 5 — needs response drain task completion signal).
+- Dict-trained zstd compression integration (phase 8).
+- `keplor db vacuum/backup/restore` CLI hooks (phase 6).
+- TLS cert hot-reload via filesystem watcher (phase 6/11).
+
+---
+
 ## 2026-04-17 — Phase 3 complete
 
 ### What was built
