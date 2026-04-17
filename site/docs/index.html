@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Documentation - Keplor</title>
+  <link rel="icon" type="image/svg+xml" href="../assets/favicon.svg">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="../assets/style.css">
+</head>
+<body class="min-h-screen">
+
+  <!-- Nav -->
+  <nav class="fixed top-0 w-full z-50 border-b" style="background:rgba(10,10,10,0.85);backdrop-filter:blur(12px);border-color:#262626">
+    <div class="max-w-6xl mx-auto px-6 h-14 flex items-center justify-between">
+      <a href="../" class="flex items-center gap-2 no-underline">
+        <img src="../assets/favicon.svg" alt="" class="w-6 h-6">
+        <span class="font-semibold text-white tracking-tight">keplor</span>
+      </a>
+      <div class="flex items-center gap-6 text-sm">
+        <a href="./" class="text-white no-underline">Docs</a>
+        <a href="api-reference.html" class="text-neutral-400 hover:text-white no-underline transition-colors">API</a>
+        <a href="https://github.com/bravo1goingdark/keplor" class="text-neutral-400 hover:text-white no-underline transition-colors">GitHub</a>
+      </div>
+    </div>
+  </nav>
+
+  <div class="max-w-6xl mx-auto px-6 pt-24 pb-16 flex gap-12">
+    <!-- Sidebar -->
+    <aside class="hidden lg:block w-56 flex-shrink-0">
+      <nav class="docs-nav sticky top-20 space-y-1">
+        <a href="./" class="active">Overview</a>
+        <a href="quickstart.html">Quickstart</a>
+        <a href="api-reference.html">API Reference</a>
+        <a href="configuration.html">Configuration</a>
+        <a href="cli.html">CLI</a>
+      </nav>
+    </aside>
+
+    <!-- Content -->
+    <main class="docs-content flex-1 min-w-0">
+      <h1 class="text-3xl font-bold mb-2">Documentation</h1>
+      <p class="text-lg mb-12" style="color:#737373">Everything you need to deploy and operate Keplor.</p>
+
+      <div class="grid sm:grid-cols-2 gap-4">
+        <a href="quickstart.html" class="feature-card no-underline block">
+          <div class="text-sm font-mono mb-2" style="color:#3b82f6">01</div>
+          <h3 class="font-semibold mb-1 text-white">Quickstart</h3>
+          <p class="text-sm" style="color:#737373">Install, run, and send your first event in under 2 minutes.</p>
+        </a>
+
+        <a href="api-reference.html" class="feature-card no-underline block">
+          <div class="text-sm font-mono mb-2" style="color:#3b82f6">02</div>
+          <h3 class="font-semibold mb-1 text-white">API Reference</h3>
+          <p class="text-sm" style="color:#737373">Complete HTTP endpoint documentation with request/response schemas.</p>
+        </a>
+
+        <a href="configuration.html" class="feature-card no-underline block">
+          <div class="text-sm font-mono mb-2" style="color:#3b82f6">03</div>
+          <h3 class="font-semibold mb-1 text-white">Configuration</h3>
+          <p class="text-sm" style="color:#737373">TOML config file format, environment variables, and defaults.</p>
+        </a>
+
+        <a href="cli.html" class="feature-card no-underline block">
+          <div class="text-sm font-mono mb-2" style="color:#3b82f6">04</div>
+          <h3 class="font-semibold mb-1 text-white">CLI Reference</h3>
+          <p class="text-sm" style="color:#737373">Commands for server management, querying, statistics, and maintenance.</p>
+        </a>
+      </div>
+
+      <h2>Architecture</h2>
+      <p>Keplor is structured as a Rust workspace with five crates:</p>
+      <table>
+        <thead><tr><th>Crate</th><th>Purpose</th></tr></thead>
+        <tbody>
+          <tr><td><code>keplor-core</code></td><td>Event, Provider, Usage, Cost types and error enums</td></tr>
+          <tr><td><code>keplor-server</code></td><td>HTTP server, ingestion pipeline, route handlers</td></tr>
+          <tr><td><code>keplor-store</code></td><td>SQLite storage, content-addressed dedup, zstd compression</td></tr>
+          <tr><td><code>keplor-pricing</code></td><td>LiteLLM pricing catalog loader and cost computation</td></tr>
+          <tr><td><code>keplor-cli</code></td><td>The <code>keplor</code> binary with all commands</td></tr>
+        </tbody>
+      </table>
+
+      <h2>Design principles</h2>
+      <table>
+        <thead><tr><th>Principle</th><th>What it means</th></tr></thead>
+        <tbody>
+          <tr><td>Pure observational</td><td>Never reformat, rewrite, or modify payloads</td></tr>
+          <tr><td>Heavy compression</td><td>zstd with trained dictionaries, content-addressed dedup</td></tr>
+          <tr><td>Zero-dep default</td><td>SQLite works out of the box, no external services required</td></tr>
+          <tr><td>Lean binary</td><td>Single static musl binary under 10 MB</td></tr>
+        </tbody>
+      </table>
+    </main>
+  </div>
+
+</body>
+</html>

@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Configuration - Keplor</title>
+  <link rel="icon" type="image/svg+xml" href="../assets/favicon.svg">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="../assets/style.css">
+</head>
+<body class="min-h-screen">
+
+  <nav class="fixed top-0 w-full z-50 border-b" style="background:rgba(10,10,10,0.85);backdrop-filter:blur(12px);border-color:#262626">
+    <div class="max-w-6xl mx-auto px-6 h-14 flex items-center justify-between">
+      <a href="../" class="flex items-center gap-2 no-underline">
+        <img src="../assets/favicon.svg" alt="" class="w-6 h-6">
+        <span class="font-semibold text-white tracking-tight">keplor</span>
+      </a>
+      <div class="flex items-center gap-6 text-sm">
+        <a href="./" class="text-neutral-400 hover:text-white no-underline transition-colors">Docs</a>
+        <a href="api-reference.html" class="text-neutral-400 hover:text-white no-underline transition-colors">API</a>
+        <a href="https://github.com/bravo1goingdark/keplor" class="text-neutral-400 hover:text-white no-underline transition-colors">GitHub</a>
+      </div>
+    </div>
+  </nav>
+
+  <div class="max-w-6xl mx-auto px-6 pt-24 pb-16 flex gap-12">
+    <aside class="hidden lg:block w-56 flex-shrink-0">
+      <nav class="docs-nav sticky top-20 space-y-1">
+        <a href="./">Overview</a>
+        <a href="quickstart.html">Quickstart</a>
+        <a href="api-reference.html">API Reference</a>
+        <a href="configuration.html" class="active">Configuration</a>
+        <a href="cli.html">CLI</a>
+      </nav>
+    </aside>
+
+    <main class="docs-content flex-1 min-w-0">
+      <h1 class="text-3xl font-bold mb-2">Configuration</h1>
+      <p class="text-lg mb-8" style="color:#737373">TOML config file with environment variable overrides.</p>
+
+      <h2>Config file</h2>
+      <p>By default, Keplor looks for <code>keplor.toml</code> in the working directory. Override with <code>--config</code>:</p>
+      <pre><code><span style="color:#737373">$</span> keplor run --config /etc/keplor/keplor.toml</code></pre>
+
+      <h2>Full example</h2>
+      <pre><code><span style="color:#737373"># keplor.toml</span>
+
+<span style="color:#c084fc">[server]</span>
+listen_addr = <span style="color:#fbbf24">"0.0.0.0:8080"</span>
+shutdown_timeout_secs = <span style="color:#6ee7b7">25</span>
+
+<span style="color:#c084fc">[storage]</span>
+db_path = <span style="color:#fbbf24">"/var/lib/keplor/keplor.db"</span>
+
+<span style="color:#c084fc">[auth]</span>
+api_keys = [<span style="color:#fbbf24">"sk-keplor-prod-abc123"</span>, <span style="color:#fbbf24">"sk-keplor-prod-def456"</span>]
+
+<span style="color:#c084fc">[pipeline]</span>
+batch_size = <span style="color:#6ee7b7">128</span>
+max_body_bytes = <span style="color:#6ee7b7">10485760</span></code></pre>
+
+      <h2>Reference</h2>
+
+      <h3>[server]</h3>
+      <table>
+        <thead><tr><th>Key</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
+        <tbody>
+          <tr><td><code>listen_addr</code></td><td>string</td><td><code>"0.0.0.0:8080"</code></td><td>Address and port to bind the HTTP server</td></tr>
+          <tr><td><code>shutdown_timeout_secs</code></td><td>u64</td><td><code>25</code></td><td>Seconds to wait for in-flight requests during graceful shutdown</td></tr>
+        </tbody>
+      </table>
+
+      <h3>[storage]</h3>
+      <table>
+        <thead><tr><th>Key</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
+        <tbody>
+          <tr><td><code>db_path</code></td><td>string</td><td><code>"keplor.db"</code></td><td>Path to the SQLite database file. Created if it doesn't exist.</td></tr>
+        </tbody>
+      </table>
+
+      <h3>[auth]</h3>
+      <table>
+        <thead><tr><th>Key</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
+        <tbody>
+          <tr><td><code>api_keys</code></td><td>string[]</td><td><code>[]</code></td><td>List of valid API keys. When empty, authentication is disabled (open access). A warning is logged at startup.</td></tr>
+        </tbody>
+      </table>
+
+      <h3>[pipeline]</h3>
+      <table>
+        <thead><tr><th>Key</th><th>Type</th><th>Default</th><th>Constraints</th><th>Description</th></tr></thead>
+        <tbody>
+          <tr><td><code>batch_size</code></td><td>usize</td><td><code>64</code></td><td>1 &ndash; 100,000</td><td>Max events accumulated before forcing a batch flush</td></tr>
+          <tr><td><code>max_body_bytes</code></td><td>usize</td><td><code>10485760</code></td><td>1 &ndash; 104,857,600</td><td>Max HTTP request body size in bytes (10 MB default)</td></tr>
+        </tbody>
+      </table>
+
+      <h2>Environment variables</h2>
+      <p>All config keys can be overridden with environment variables using the <code>KEPLOR_</code> prefix and underscore nesting:</p>
+      <pre><code><span style="color:#737373">$</span> KEPLOR_SERVER_LISTEN_ADDR=0.0.0.0:9090 \
+  KEPLOR_STORAGE_DB_PATH=/tmp/keplor.db \
+  KEPLOR_AUTH_API_KEYS=sk-key1,sk-key2 \
+  keplor run</code></pre>
+      <p>Environment variables take precedence over the config file.</p>
+
+      <h2>SQLite pragmas</h2>
+      <p>Keplor applies these SQLite pragmas at startup for performance:</p>
+      <table>
+        <thead><tr><th>Pragma</th><th>Value</th><th>Purpose</th></tr></thead>
+        <tbody>
+          <tr><td><code>journal_mode</code></td><td>WAL</td><td>Write-ahead logging for concurrent reads</td></tr>
+          <tr><td><code>synchronous</code></td><td>NORMAL</td><td>Fsync on checkpoint only, not every commit</td></tr>
+          <tr><td><code>mmap_size</code></td><td>256 MB</td><td>Memory-mapped I/O for read performance</td></tr>
+          <tr><td><code>busy_timeout</code></td><td>5000 ms</td><td>Retry on lock contention</td></tr>
+          <tr><td><code>cache_size</code></td><td>64 MB</td><td>Page cache for query performance</td></tr>
+          <tr><td><code>temp_store</code></td><td>MEMORY</td><td>Temp tables in RAM</td></tr>
+        </tbody>
+      </table>
+
+      <h2>Validation</h2>
+      <p>Config values are validated at startup. Invalid values cause an immediate error with a descriptive message:</p>
+      <pre><code><span style="color:#f87171">Error: invalid config: pipeline.batch_size must be > 0</span></code></pre>
+    </main>
+  </div>
+
+</body>
+</html>

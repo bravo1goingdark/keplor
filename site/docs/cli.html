@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CLI Reference - Keplor</title>
+  <link rel="icon" type="image/svg+xml" href="../assets/favicon.svg">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="../assets/style.css">
+</head>
+<body class="min-h-screen">
+
+  <nav class="fixed top-0 w-full z-50 border-b" style="background:rgba(10,10,10,0.85);backdrop-filter:blur(12px);border-color:#262626">
+    <div class="max-w-6xl mx-auto px-6 h-14 flex items-center justify-between">
+      <a href="../" class="flex items-center gap-2 no-underline">
+        <img src="../assets/favicon.svg" alt="" class="w-6 h-6">
+        <span class="font-semibold text-white tracking-tight">keplor</span>
+      </a>
+      <div class="flex items-center gap-6 text-sm">
+        <a href="./" class="text-neutral-400 hover:text-white no-underline transition-colors">Docs</a>
+        <a href="api-reference.html" class="text-neutral-400 hover:text-white no-underline transition-colors">API</a>
+        <a href="https://github.com/bravo1goingdark/keplor" class="text-neutral-400 hover:text-white no-underline transition-colors">GitHub</a>
+      </div>
+    </div>
+  </nav>
+
+  <div class="max-w-6xl mx-auto px-6 pt-24 pb-16 flex gap-12">
+    <aside class="hidden lg:block w-56 flex-shrink-0">
+      <nav class="docs-nav sticky top-20 space-y-1">
+        <a href="./">Overview</a>
+        <a href="quickstart.html">Quickstart</a>
+        <a href="api-reference.html">API Reference</a>
+        <a href="configuration.html">Configuration</a>
+        <a href="cli.html" class="active">CLI</a>
+      </nav>
+    </aside>
+
+    <main class="docs-content flex-1 min-w-0">
+      <h1 class="text-3xl font-bold mb-2">CLI Reference</h1>
+      <p class="text-lg mb-8" style="color:#737373">All commands available in the <code>keplor</code> binary.</p>
+
+      <!-- run -->
+      <h2>keplor run</h2>
+      <p>Start the HTTP ingestion server.</p>
+      <pre><code><span style="color:#737373">$</span> keplor run [OPTIONS]</code></pre>
+      <table>
+        <thead><tr><th>Option</th><th>Default</th><th>Description</th></tr></thead>
+        <tbody>
+          <tr><td><code>-c, --config &lt;PATH&gt;</code></td><td><code>keplor.toml</code></td><td>Path to TOML config file</td></tr>
+        </tbody>
+      </table>
+      <p>If the config file doesn't exist, defaults are used and a warning is logged. The server binds to <code>0.0.0.0:8080</code> and creates <code>keplor.db</code> in the current directory.</p>
+
+      <!-- migrate -->
+      <h2>keplor migrate</h2>
+      <p>Apply database migrations without starting the server. Useful for upgrading the schema before deployment.</p>
+      <pre><code><span style="color:#737373">$</span> keplor migrate [OPTIONS]</code></pre>
+      <table>
+        <thead><tr><th>Option</th><th>Default</th><th>Description</th></tr></thead>
+        <tbody>
+          <tr><td><code>-d, --db &lt;PATH&gt;</code></td><td><code>keplor.db</code></td><td>Path to the SQLite database</td></tr>
+        </tbody>
+      </table>
+      <pre><code><span style="color:#737373">$</span> keplor migrate --db /var/lib/keplor/keplor.db
+<span style="color:#6ee7b7">migrations applied to /var/lib/keplor/keplor.db</span></code></pre>
+
+      <!-- query -->
+      <h2>keplor query</h2>
+      <p>Query stored events from the command line.</p>
+      <pre><code><span style="color:#737373">$</span> keplor query [OPTIONS]</code></pre>
+      <table>
+        <thead><tr><th>Option</th><th>Default</th><th>Description</th></tr></thead>
+        <tbody>
+          <tr><td><code>--user-id &lt;ID&gt;</code></td><td></td><td>Filter by user ID</td></tr>
+          <tr><td><code>--model &lt;NAME&gt;</code></td><td></td><td>Filter by model name</td></tr>
+          <tr><td><code>--provider &lt;KEY&gt;</code></td><td></td><td>Filter by provider</td></tr>
+          <tr><td><code>--source &lt;NAME&gt;</code></td><td></td><td>Filter by ingestion source</td></tr>
+          <tr><td><code>--limit &lt;N&gt;</code></td><td><code>20</code></td><td>Maximum results</td></tr>
+          <tr><td><code>-d, --db &lt;PATH&gt;</code></td><td><code>keplor.db</code></td><td>Path to the SQLite database</td></tr>
+        </tbody>
+      </table>
+      <pre><code><span style="color:#737373">$</span> keplor query --provider openai --limit 5
+ID                           PROVIDER       MODEL                   TOKENS       COST ($)
+--------------------------------------------------------------------------------------------
+01J5XQKR4M2E3N8V...         openai         gpt-4o                     700     0.00625000
+01J5XPBN7K1D2M6R...         openai         gpt-4o-mini                340     0.00012750
+
+2 event(s)</code></pre>
+
+      <!-- stats -->
+      <h2>keplor stats</h2>
+      <p>Print storage statistics: event count, blob count, compression ratios.</p>
+      <pre><code><span style="color:#737373">$</span> keplor stats [OPTIONS]</code></pre>
+      <table>
+        <thead><tr><th>Option</th><th>Default</th><th>Description</th></tr></thead>
+        <tbody>
+          <tr><td><code>-d, --db &lt;PATH&gt;</code></td><td><code>keplor.db</code></td><td>Path to the SQLite database</td></tr>
+        </tbody>
+      </table>
+      <pre><code><span style="color:#737373">$</span> keplor stats
+<span style="color:#6ee7b7">=== Keplor Storage Statistics ===
+Database:             keplor.db
+Total events:         12,847
+Unique blobs:         3,219
+Compressed size:      1,847,293 bytes
+Uncompressed size:    24,671,840 bytes
+Compression ratio:    13.4x</span></code></pre>
+
+      <!-- gc -->
+      <h2>keplor gc</h2>
+      <p>Delete events older than a threshold and clean up orphaned blobs.</p>
+      <pre><code><span style="color:#737373">$</span> keplor gc --older-than-days &lt;DAYS&gt; [OPTIONS]</code></pre>
+      <table>
+        <thead><tr><th>Option</th><th>Required</th><th>Description</th></tr></thead>
+        <tbody>
+          <tr><td><code>--older-than-days &lt;N&gt;</code></td><td>yes</td><td>Delete events older than N days</td></tr>
+          <tr><td><code>-d, --db &lt;PATH&gt;</code></td><td>no</td><td>Path to the SQLite database (default: <code>keplor.db</code>)</td></tr>
+        </tbody>
+      </table>
+      <pre><code><span style="color:#737373">$</span> keplor gc --older-than-days 30
+<span style="color:#6ee7b7">GC complete: deleted 4,291 events, 847 orphaned blobs (cutoff: 30 days ago)</span></code></pre>
+      <p>Run periodically via cron to prevent unbounded database growth:</p>
+      <pre><code><span style="color:#737373"># crontab -e</span>
+0 3 * * * /usr/local/bin/keplor gc --older-than-days 90 --db /var/lib/keplor/keplor.db</code></pre>
+    </main>
+  </div>
+
+</body>
+</html>

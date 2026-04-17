@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Quickstart - Keplor</title>
+  <link rel="icon" type="image/svg+xml" href="../assets/favicon.svg">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="../assets/style.css">
+</head>
+<body class="min-h-screen">
+
+  <nav class="fixed top-0 w-full z-50 border-b" style="background:rgba(10,10,10,0.85);backdrop-filter:blur(12px);border-color:#262626">
+    <div class="max-w-6xl mx-auto px-6 h-14 flex items-center justify-between">
+      <a href="../" class="flex items-center gap-2 no-underline">
+        <img src="../assets/favicon.svg" alt="" class="w-6 h-6">
+        <span class="font-semibold text-white tracking-tight">keplor</span>
+      </a>
+      <div class="flex items-center gap-6 text-sm">
+        <a href="./" class="text-neutral-400 hover:text-white no-underline transition-colors">Docs</a>
+        <a href="api-reference.html" class="text-neutral-400 hover:text-white no-underline transition-colors">API</a>
+        <a href="https://github.com/bravo1goingdark/keplor" class="text-neutral-400 hover:text-white no-underline transition-colors">GitHub</a>
+      </div>
+    </div>
+  </nav>
+
+  <div class="max-w-6xl mx-auto px-6 pt-24 pb-16 flex gap-12">
+    <aside class="hidden lg:block w-56 flex-shrink-0">
+      <nav class="docs-nav sticky top-20 space-y-1">
+        <a href="./">Overview</a>
+        <a href="quickstart.html" class="active">Quickstart</a>
+        <a href="api-reference.html">API Reference</a>
+        <a href="configuration.html">Configuration</a>
+        <a href="cli.html">CLI</a>
+      </nav>
+    </aside>
+
+    <main class="docs-content flex-1 min-w-0">
+      <h1 class="text-3xl font-bold mb-2">Quickstart</h1>
+      <p class="text-lg mb-8" style="color:#737373">From zero to ingesting events in under 2 minutes.</p>
+
+      <h2>1. Install</h2>
+      <p>Build from source with Cargo:</p>
+      <pre><code><span style="color:#737373">$</span> git clone https://github.com/bravo1goingdark/keplor.git
+<span style="color:#737373">$</span> cd keplor
+<span style="color:#737373">$</span> cargo build --release
+<span style="color:#737373">$</span> cp target/release/keplor /usr/local/bin/</code></pre>
+
+      <p>Or build a static musl binary for deployment:</p>
+      <pre><code><span style="color:#737373">$</span> cargo build --release --target x86_64-unknown-linux-musl</code></pre>
+
+      <h2>2. Start the server</h2>
+      <pre><code><span style="color:#737373">$</span> keplor run</code></pre>
+      <p>Keplor starts on <code>0.0.0.0:8080</code> with an in-directory <code>keplor.db</code> SQLite database. No configuration file needed for local development.</p>
+      <p>Verify it's running:</p>
+      <pre><code><span style="color:#737373">$</span> curl http://localhost:8080/health
+<span style="color:#6ee7b7">{"status":"ok","version":"0.1.0","db":"connected"}</span></code></pre>
+
+      <h2>3. Send your first event</h2>
+      <pre><code><span style="color:#737373">$</span> curl -X POST http://localhost:8080/v1/events \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-4o",
+    "provider": "openai",
+    "usage": {
+      "input_tokens": 500,
+      "output_tokens": 200
+    },
+    "latency": {
+      "total_ms": 1200,
+      "ttft_ms": 180
+    },
+    "user_id": "alice",
+    "source": "my-app"
+  }'</code></pre>
+      <p>Response:</p>
+      <pre><code><span style="color:#6ee7b7">{
+  "id": "01J5XQKR...",
+  "cost_nanodollars": 6250000,
+  "model": "gpt-4o",
+  "provider": "openai"
+}</span></code></pre>
+      <p>The cost is automatically computed from the LiteLLM pricing catalog. <code>6250000</code> nanodollars = $0.00625.</p>
+
+      <h2>4. Query it back</h2>
+      <pre><code><span style="color:#737373">$</span> curl "http://localhost:8080/v1/events?user_id=alice&limit=5"</code></pre>
+      <p>Or use the CLI:</p>
+      <pre><code><span style="color:#737373">$</span> keplor query --user-id alice
+ID                           PROVIDER       MODEL                   TOKENS       COST ($)
+--------------------------------------------------------------------------------------------
+01J5XQKR...                  openai         gpt-4o                     700     0.00625000
+
+1 event(s)</code></pre>
+
+      <h2>5. Check storage stats</h2>
+      <pre><code><span style="color:#737373">$</span> keplor stats
+=== Keplor Storage Statistics ===
+Database:             keplor.db
+Total events:         1
+Unique blobs:         2
+Compressed size:      156 bytes
+Uncompressed size:    312 bytes
+Compression ratio:    2.0x</code></pre>
+
+      <h2>Next steps</h2>
+      <p>
+        <a href="api-reference.html">API Reference</a> for the full endpoint documentation.<br>
+        <a href="configuration.html">Configuration</a> to set up authentication, storage paths, and tuning.<br>
+        <a href="cli.html">CLI Reference</a> for all available commands.
+      </p>
+    </main>
+  </div>
+
+</body>
+</html>
