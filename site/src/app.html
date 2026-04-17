@@ -3,10 +3,31 @@
 	<head>
 		<meta charset="utf-8" />
 		<meta name="viewport" content="width=device-width, initial-scale=1" />
+
+		<!-- Favicon -->
 		<link rel="icon" type="image/svg+xml" href="%sveltekit.assets%/favicon.svg" />
+		<link rel="apple-touch-icon" sizes="180x180" href="%sveltekit.assets%/favicon.svg" />
+
+		<!-- SEO defaults (overridden per-page via svelte:head) -->
+		<meta name="theme-color" content="#FAFAF7" media="(prefers-color-scheme: light)" />
+		<meta name="theme-color" content="#141413" media="(prefers-color-scheme: dark)" />
+		<meta name="robots" content="index, follow" />
+		<meta name="author" content="Keplor" />
+
+		<!-- Open Graph -->
+		<meta property="og:site_name" content="Keplor" />
+		<meta property="og:type" content="website" />
+		<meta property="og:locale" content="en_US" />
+
+		<!-- Twitter -->
+		<meta name="twitter:card" content="summary_large_image" />
+
+		<!-- Fonts -->
 		<link rel="preconnect" href="https://fonts.googleapis.com" />
 		<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 		<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500&family=DM+Sans:wght@400;500&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+
+		<!-- Dark mode (runs before paint to avoid flash) -->
 		<script>
 			(function(){
 				var t=localStorage.getItem('theme');

@@ -9,6 +9,7 @@
         <p class="text-[12px] uppercase tracking-[0.12em] text-ink-muted mb-4">Product</p>
         <div class="space-y-2.5 text-[14px]">
           <a href="{base}/docs/quickstart" class="block text-ink-muted hover:text-ink transition-colors">Quickstart</a>
+          <a href="{base}/docs/integration" class="block text-ink-muted hover:text-ink transition-colors">Integration</a>
           <a href="{base}/docs/api-reference" class="block text-ink-muted hover:text-ink transition-colors">API</a>
           <a href="{base}/docs/configuration" class="block text-ink-muted hover:text-ink transition-colors">Configuration</a>
         </div>
@@ -35,12 +36,12 @@
       </div>
     </div>
 
-    <div class="flex items-end justify-between">
+    <div class="flex flex-col sm:flex-row items-start sm:items-end justify-between gap-4">
       <div>
         <span class="font-serif text-[15px]">keplor</span>
         <p class="text-[13px] text-ink-muted mt-1">Observe what's already there.</p>
       </div>
-      <p class="text-[12px] text-ink-muted">&copy; 2026</p>
+      <p class="text-[12px] text-ink-muted">&copy; 2026 Keplor. Open source under Apache-2.0.</p>
     </div>
   </div>
 </footer>
