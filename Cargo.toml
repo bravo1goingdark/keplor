@@ -46,7 +46,8 @@ opt-level = 0
 tokio                  = { version = "1" }
 axum                   = { version = "0.8" }
 tower                  = { version = "0.5" }
-reqwest                = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }
+reqwest                = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots-no-provider", "stream", "json"] }
+rustls                 = { version = "0.23", default-features = false, features = ["aws_lc_rs", "logging", "std", "tls12"] }
 
 # --- bytes ---
 bytes                  = { version = "1" }
@@ -63,7 +64,7 @@ serde_json             = { version = "1", features = ["raw_value"] }
 tracing                     = { version = "0.1" }
 tracing-subscriber          = { version = "0.3" }
 metrics                     = { version = "0.24" }
-metrics-exporter-prometheus = { version = "0.16" }
+metrics-exporter-prometheus = { version = "0.16", default-features = false, features = ["http-listener", "async-runtime"] }
 
 # --- CLI + config ---
 clap    = { version = "4.5", features = ["derive", "env"] }

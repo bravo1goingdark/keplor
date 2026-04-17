@@ -14,7 +14,11 @@ all-features = false
 [advisories]
 version = 2
 yanked  = "deny"
-ignore  = []
+ignore  = [
+    # RUSTSEC-2026-0097: rand::rng() unsound with custom logger.
+    # We only use rand 0.8 as a dev-dependency and never call rand::rng().
+    "RUSTSEC-2026-0097",
+]
 
 [licenses]
 version             = 2
@@ -34,6 +38,7 @@ allow = [
     "Unlicense",
     "0BSD",
     "OpenSSL",
+    "CDLA-Permissive-2.0",
 ]
 exceptions = []
 

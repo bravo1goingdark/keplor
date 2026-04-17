@@ -11,8 +11,16 @@ use keplor_server::server::install_metrics_recorder;
 use keplor_server::{Pipeline, PipelineServer};
 use keplor_store::{BatchConfig, BatchWriter, Store};
 use reqwest::StatusCode;
+use std::sync::Once;
+
+static INIT_CRYPTO: Once = Once::new();
 
 async fn spawn_server(api_keys: Vec<String>) -> String {
+    INIT_CRYPTO.call_once(|| {
+        rustls::crypto::aws_lc_rs::default_provider()
+            .install_default()
+            .expect("failed to install rustls crypto provider");
+    });
     let store = Arc::new(Store::open_in_memory().unwrap());
     let writer = Arc::new(BatchWriter::new(Arc::clone(&store), BatchConfig::default()));
     let catalog = Arc::new(Catalog::load_bundled().unwrap());
