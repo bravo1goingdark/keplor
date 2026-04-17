@@ -16,7 +16,20 @@
   class="fixed top-0 w-full z-50 transition-all duration-300 {scrolled ? 'bg-bg/80 backdrop-blur-md border-b border-line' : ''}"
 >
   <div class="max-w-[1280px] mx-auto px-6 md:px-20 h-16 flex items-center justify-between">
-    <a href="{base}/" class="font-serif text-[17px] hover:text-accent transition-colors">keplor</a>
+    <a href="{base}/" class="flex items-center gap-2.5 hover:opacity-80 transition-opacity">
+      <!-- Prism K mark -->
+      <svg class="w-6 h-6" viewBox="0 0 64 64" fill="none">
+        <line x1="14" y1="9" x2="14" y2="55" stroke="currentColor" stroke-width="3.7" stroke-linecap="round"/>
+        <line x1="16.6" y1="32" x2="50" y2="9" stroke="currentColor" stroke-width="3.7" stroke-linecap="round"/>
+        <line x1="17.3" y1="37.1" x2="50" y2="17.3" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" opacity="0.28"/>
+        <line x1="16.6" y1="32" x2="50" y2="55" stroke="currentColor" stroke-width="3.7" stroke-linecap="round"/>
+        <line x1="17.3" y1="26.9" x2="50" y2="46.7" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" opacity="0.28"/>
+        <circle cx="16.6" cy="32" r="3.2" class="fill-accent"/>
+      </svg>
+      <span class="text-[17px] font-semibold tracking-[-0.02em]" style="font-family: 'Space Grotesk', system-ui, sans-serif">
+        kepl<span class="text-accent">o</span>r
+      </span>
+    </a>
     <div class="flex items-center gap-6 md:gap-8 text-[15px]">
       <a
         href="{base}/docs"

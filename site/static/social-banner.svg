@@ -1,0 +1,73 @@
+<svg width="1280" height="640" viewBox="0 0 1280 640" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <style>
+      @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600&amp;family=DM+Mono:wght@400&amp;display=swap');
+    </style>
+    <radialGradient id="glow" cx="75%" cy="35%" r="50%">
+      <stop offset="0%" stop-color="#FF5B2E" stop-opacity="0.06"/>
+      <stop offset="100%" stop-color="#FF5B2E" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1280" height="640" fill="#0f0f10"/>
+
+  <!-- Subtle accent glow -->
+  <rect width="1280" height="640" fill="url(#glow)"/>
+
+  <!-- Subtle grid lines -->
+  <g opacity="0.04" stroke="#fff" stroke-width="0.5">
+    <line x1="0" y1="160" x2="1280" y2="160"/>
+    <line x1="0" y1="320" x2="1280" y2="320"/>
+    <line x1="0" y1="480" x2="1280" y2="480"/>
+    <line x1="320" y1="0" x2="320" y2="640"/>
+    <line x1="640" y1="0" x2="640" y2="640"/>
+    <line x1="960" y1="0" x2="960" y2="640"/>
+  </g>
+
+  <!-- Prism K icon (size ~120px, positioned left of wordmark) -->
+  <g transform="translate(370, 208)">
+    <!-- Scale the 64px icon to ~120px: 120/64 = 1.875 -->
+    <g transform="scale(1.875)">
+      <!-- Stem -->
+      <line x1="14" y1="9" x2="14" y2="55" stroke="#f0f0f0" stroke-width="3.7" stroke-linecap="round"/>
+      <!-- Upper arm (main) -->
+      <line x1="16.6" y1="32" x2="50" y2="9" stroke="#f0f0f0" stroke-width="3.7" stroke-linecap="round"/>
+      <!-- Upper arm (facet) -->
+      <line x1="17.3" y1="37.1" x2="50" y2="17.3" stroke="rgba(240,240,240,0.25)" stroke-width="1.9" stroke-linecap="round"/>
+      <!-- Lower arm (main) -->
+      <line x1="16.6" y1="32" x2="50" y2="55" stroke="#f0f0f0" stroke-width="3.7" stroke-linecap="round"/>
+      <!-- Lower arm (facet) -->
+      <line x1="17.3" y1="26.9" x2="50" y2="46.7" stroke="rgba(240,240,240,0.25)" stroke-width="1.9" stroke-linecap="round"/>
+      <!-- Accent dot -->
+      <circle cx="16.6" cy="32" r="3.2" fill="#FF7A52"/>
+    </g>
+  </g>
+
+  <!-- Wordmark: "keplor" with accent "o" -->
+  <text x="520" y="295" font-family="'Space Grotesk', system-ui, sans-serif" font-size="72" font-weight="600" letter-spacing="-1.5" fill="#f0f0f0">
+    kepl<tspan fill="#FF7A52">o</tspan>r
+  </text>
+
+  <!-- Tagline -->
+  <text x="524" y="340" font-family="'DM Mono', monospace" font-size="15" letter-spacing="1.2" fill="rgba(240,240,240,0.35)" text-transform="uppercase">
+    LLM OBSERVABILITY &amp; COST ACCOUNTING
+  </text>
+
+  <!-- Bottom stats bar -->
+  <g transform="translate(0, 480)">
+    <line x1="140" y1="0" x2="1140" y2="0" stroke="rgba(240,240,240,0.06)" stroke-width="1"/>
+
+    <text x="200" y="60" font-family="'Space Grotesk', system-ui, sans-serif" font-size="28" font-weight="500" fill="#f0f0f0">&lt;10 MB</text>
+    <text x="200" y="84" font-family="'DM Mono', monospace" font-size="12" fill="rgba(240,240,240,0.3)" letter-spacing="0.5">BINARY SIZE</text>
+
+    <text x="440" y="60" font-family="'Space Grotesk', system-ui, sans-serif" font-size="28" font-weight="500" fill="#f0f0f0">368K/s</text>
+    <text x="440" y="84" font-family="'DM Mono', monospace" font-size="12" fill="rgba(240,240,240,0.3)" letter-spacing="0.5">THROUGHPUT</text>
+
+    <text x="680" y="60" font-family="'Space Grotesk', system-ui, sans-serif" font-size="28" font-weight="500" fill="#f0f0f0">2,263</text>
+    <text x="680" y="84" font-family="'DM Mono', monospace" font-size="12" fill="rgba(240,240,240,0.3)" letter-spacing="0.5">MODELS PRICED</text>
+
+    <text x="920" y="60" font-family="'Space Grotesk', system-ui, sans-serif" font-size="28" font-weight="500" fill="#f0f0f0">&lt;1 ms</text>
+    <text x="920" y="84" font-family="'DM Mono', monospace" font-size="12" fill="rgba(240,240,240,0.3)" letter-spacing="0.5">P99 OVERHEAD</text>
+  </g>
+</svg>
