@@ -98,6 +98,10 @@ impl Catalog {
     }
 
     /// Parse the catalogue from LiteLLM JSON bytes.
+    ///
+    /// Pre-populates fallback variants (date-stripped, unprefixed, and
+    /// provider-prefixed) at load time so that [`lookup`] needs at most
+    /// two HashMap probes instead of up to 24.
     fn from_json(bytes: &[u8]) -> Result<Self, PricingError> {
         let raw: HashMap<String, serde_json::Value> = serde_json::from_slice(bytes)
             .map_err(|e| PricingError::Parse { reason: e.to_string() })?;
@@ -126,15 +130,28 @@ impl Catalog {
 
             let pricing = Arc::new(entry.into_pricing());
             let canonical = ModelKey::new(key);
+            let canonical_str = canonical.as_str();
 
             // Index under the full key.
             entries.insert(canonical.clone(), Arc::clone(&pricing));
 
+            // Date-stripped variant of the full key (e.g. `openai/gpt-4o`
+            // from `openai/gpt-4o-2024-08-06`).
+            if let Some(base) = strip_date_suffix(canonical_str) {
+                entries.entry(ModelKey::new(base)).or_insert_with(|| Arc::clone(&pricing));
+            }
+
             // If the key has a provider prefix (`openai/gpt-4o`), also
             // index the unprefixed form when it doesn't collide.
-            if let Some((_prefix, suffix)) = key.split_once('/') {
+            if let Some((_prefix, suffix)) = canonical_str.split_once('/') {
                 let short = ModelKey::new(suffix);
                 entries.entry(short).or_insert_with(|| Arc::clone(&pricing));
+
+                // Date-stripped unprefixed (e.g. `gpt-4o` from
+                // `openai/gpt-4o-2024-08-06`).
+                if let Some(base) = strip_date_suffix(suffix) {
+                    entries.entry(ModelKey::new(base)).or_insert_with(|| Arc::clone(&pricing));
+                }
             }
         }
 
@@ -199,8 +216,11 @@ impl Catalog {
     }
 
     /// Look up pricing with **fallback**: exact match first, then strip
-    /// a trailing date suffix (`-YYYY-MM-DD` or `-YYYYMMDD`), then
-    /// try prepending the LiteLLM provider prefix.
+    /// a trailing date suffix (`-YYYY-MM-DD` or `-YYYYMMDD`).
+    ///
+    /// Provider-prefix and date-stripped variants are pre-populated at
+    /// catalog load time, so this method needs at most two HashMap
+    /// probes (exact, then date-stripped).
     ///
     /// # Examples
     ///
@@ -214,49 +234,16 @@ impl Catalog {
     /// ```
     #[must_use]
     pub fn lookup(&self, key: &ModelKey) -> Option<&Arc<ModelPricing>> {
-        // 1. Exact match.
+        // 1. Exact match (covers canonical, unprefixed, and pre-populated variants).
         if let Some(p) = self.entries.get(key) {
             return Some(p);
         }
 
+        // 2. Strip trailing date suffix — catches versioned keys not in
+        //    the catalog (e.g. a model released after the catalog snapshot).
         let s = key.as_str();
-
-        // 2. Strip trailing date suffix.
         if let Some(base) = strip_date_suffix(s) {
-            let fallback = ModelKey::new(base);
-            if let Some(p) = self.entries.get(&fallback) {
-                return Some(p);
-            }
-        }
-
-        // 3. If no provider prefix, try common prefixes.
-        if !s.contains('/') {
-            for prefix in &[
-                "openai",
-                "anthropic",
-                "gemini",
-                "vertex_ai",
-                "bedrock",
-                "azure",
-                "mistral",
-                "groq",
-                "xai",
-                "deepseek",
-                "cohere",
-                "ollama",
-            ] {
-                let prefixed = ModelKey::new(&format!("{prefix}/{s}"));
-                if let Some(p) = self.entries.get(&prefixed) {
-                    return Some(p);
-                }
-                // Also try with date stripped.
-                if let Some(base) = strip_date_suffix(prefixed.as_str()) {
-                    let fb = ModelKey::new(base);
-                    if let Some(p) = self.entries.get(&fb) {
-                        return Some(p);
-                    }
-                }
-            }
+            return self.entries.get(&ModelKey::new(base));
         }
 
         None

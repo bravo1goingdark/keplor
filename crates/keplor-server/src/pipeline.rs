@@ -113,19 +113,14 @@ impl Pipeline {
         let cost =
             event.cost_nanodollars.unwrap_or_else(|| self.compute_cost(&provider, &model, &usage));
 
-        // Serialize bodies ONCE — propagate errors instead of silently storing empty blobs.
+        // Bodies are already raw JSON bytes from the HTTP payload — no
+        // re-serialization needed thanks to RawValue deserialization.
         let req_bytes = match &event.request_body {
-            Some(v) => Bytes::from(
-                serde_json::to_vec(v)
-                    .map_err(|e| ServerError::Json(format!("request body: {e}")))?,
-            ),
+            Some(v) => Bytes::from(v.get().as_bytes().to_vec()),
             None => Bytes::new(),
         };
         let resp_bytes = match &event.response_body {
-            Some(v) => Bytes::from(
-                serde_json::to_vec(v)
-                    .map_err(|e| ServerError::Json(format!("response body: {e}")))?,
-            ),
+            Some(v) => Bytes::from(v.get().as_bytes().to_vec()),
             None => Bytes::new(),
         };
 

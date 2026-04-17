@@ -8,15 +8,20 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use smol_str::SmolStr;
+
 use crate::error::StoreError;
 
 /// Key for looking up a trained dictionary.
+///
+/// Uses [`SmolStr`] to avoid heap allocation — provider keys and component
+/// types are always ≤23 bytes, fitting in SmolStr's inline storage.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DictKey {
     /// Provider id string (e.g. `"openai"`).
-    pub provider: String,
+    pub provider: SmolStr,
     /// Component type (e.g. `"system_prompt"`).
-    pub component_type: String,
+    pub component_type: SmolStr,
 }
 
 /// Zstd encoder/decoder with optional per-key trained dictionaries.

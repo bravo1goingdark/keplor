@@ -79,10 +79,10 @@ pub struct IngestEvent {
     pub user_agent: Option<String>,
 
     // --- bodies (optional, stored compressed) ----------------------------
-    /// Raw request body as a JSON value.
-    pub request_body: Option<serde_json::Value>,
-    /// Raw response body as a JSON value.
-    pub response_body: Option<serde_json::Value>,
+    /// Raw request body — preserved as-is from the HTTP payload.
+    pub request_body: Option<Box<serde_json::value::RawValue>>,
+    /// Raw response body — preserved as-is from the HTTP payload.
+    pub response_body: Option<Box<serde_json::value::RawValue>>,
 
     // --- extensibility ---------------------------------------------------
     /// Arbitrary metadata — stored but not indexed in v1.

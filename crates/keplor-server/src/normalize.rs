@@ -12,9 +12,17 @@ pub fn normalize_provider(raw: &str) -> Provider {
 }
 
 /// Normalise a model name: trim whitespace, lowercase for catalog lookup.
+///
+/// Skips the heap allocation from [`str::to_ascii_lowercase`] when the
+/// trimmed input is already lowercase (the common case for SDK traffic).
 #[inline]
 pub fn normalize_model(raw: &str) -> SmolStr {
-    SmolStr::new(raw.trim().to_ascii_lowercase())
+    let trimmed = raw.trim();
+    if trimmed.bytes().all(|b| !b.is_ascii_uppercase()) {
+        SmolStr::new(trimmed)
+    } else {
+        SmolStr::new(trimmed.to_ascii_lowercase())
+    }
 }
 
 #[cfg(test)]

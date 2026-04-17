@@ -331,6 +331,10 @@ impl Store {
             component_links: Vec<(&'static str, [u8; 32])>,
             error_type: Option<&'static str>,
             error_message: Option<String>,
+            // Pre-formatted outside the lock to avoid allocations under Mutex.
+            client_ip_str: Option<String>,
+            trace_id_str: Option<String>,
+            metadata_str: Option<String>,
         }
 
         let mut batch_events: Vec<BatchEvent<'_>> = Vec::with_capacity(events.len());
@@ -371,14 +375,15 @@ impl Store {
 
                 if seen_shas.insert(sha) {
                     let dict_key = crate::compress::DictKey {
-                        provider: provider_key.to_owned(),
-                        component_type: comp.kind.as_str().to_owned(),
+                        provider: provider_key.into(),
+                        component_type: comp.kind.as_str().into(),
                     };
                     let has_dict = self.coder.has_dict(&dict_key);
                     let compressed = self.coder.compress(&comp.data, Some(&dict_key))?;
                     unique_blobs.push(PreparedBlob {
                         sha,
                         component_type: comp.kind.as_str(),
+                        provider_key,
                         uncompressed_len: comp.data.len(),
                         compressed,
                         used_dict: has_dict,
@@ -397,6 +402,9 @@ impl Store {
                 component_links,
                 error_type: event.error.as_ref().map(error_type_str),
                 error_message: event.error.as_ref().map(|e| e.to_string()),
+                client_ip_str: event.client_ip.map(|ip| ip.to_string()),
+                trace_id_str: event.trace_id.map(|t| t.to_string()),
+                metadata_str: event.metadata.as_ref().and_then(|m| serde_json::to_string(m).ok()),
             });
         }
 
@@ -418,17 +426,16 @@ impl Store {
             )?;
 
             // First pass: insert each unique blob once.
-            let provider_key = batch_events[0].provider_key;
             for blob in &unique_blobs {
                 let (compression, dict_id): (&str, Option<String>) = if blob.used_dict {
-                    ("zstd_dict", Some(format!("{}_{}", provider_key, blob.component_type)))
+                    ("zstd_dict", Some(format!("{}_{}", blob.provider_key, blob.component_type)))
                 } else {
                     ("zstd_raw", None)
                 };
                 blob_stmt.execute(params![
                     &blob.sha[..],
                     blob.component_type,
-                    provider_key,
+                    blob.provider_key,
                     compression,
                     dict_id,
                     blob.uncompressed_len as i64,
@@ -438,11 +445,11 @@ impl Store {
             }
 
             // Second pass: bump refcount for intra-batch duplicates.
+            // One UPDATE per duplicate SHA (instead of N-1 individual UPDATEs).
             let mut bump_stmt = tx.prepare_cached(
-                "UPDATE payload_blobs SET refcount = refcount + 1, hit_count = hit_count + 1
-                 WHERE sha256 = ?1",
+                "UPDATE payload_blobs SET refcount = refcount + ?1, hit_count = hit_count + ?1
+                 WHERE sha256 = ?2",
             )?;
-            // Total references minus unique insertions = extra bumps needed.
             let mut ref_counts: std::collections::HashMap<[u8; 32], usize> =
                 std::collections::HashMap::with_capacity(unique_blobs.len());
             for be in &batch_events {
@@ -451,8 +458,8 @@ impl Store {
                 }
             }
             for (sha, count) in &ref_counts {
-                for _ in 1..*count {
-                    bump_stmt.execute([&sha[..]])?;
+                if *count > 1 {
+                    bump_stmt.execute(params![(*count - 1) as i64, &sha[..]])?;
                 }
             }
         }
@@ -523,13 +530,13 @@ impl Store {
                     &pe.response_sha[..],
                     pe.request_blob_id.as_ref().map(|b| &b[..]),
                     pe.response_blob_id.as_ref().map(|b| &b[..]),
-                    e.client_ip.map(|ip| ip.to_string()),
+                    &pe.client_ip_str,
                     e.user_agent.as_deref(),
                     e.request_id.as_deref(),
-                    e.trace_id.map(|t| t.to_string()),
+                    &pe.trace_id_str,
                     e.source.as_deref(),
                     e.ingested_at,
-                    e.metadata.as_ref().and_then(|m| serde_json::to_string(m).ok()),
+                    pe.metadata_str.as_deref(),
                 ])?;
             }
         }
@@ -561,8 +568,8 @@ impl Store {
         provider: &str,
     ) -> Result<(), StoreError> {
         let dict_key = crate::compress::DictKey {
-            provider: provider.to_owned(),
-            component_type: component_type.to_owned(),
+            provider: provider.into(),
+            component_type: component_type.into(),
         };
         let has_dict = self.coder.has_dict(&dict_key);
         let compressed = self.coder.compress(data, Some(&dict_key))?;
@@ -630,7 +637,10 @@ impl Store {
         // Only use dict for blobs that were compressed with one.
         // Old blobs (compression = 'zstd_raw') decompress without dict.
         let dict_key = if compression == "zstd_dict" {
-            Some(crate::compress::DictKey { provider, component_type: component_type.to_owned() })
+            Some(crate::compress::DictKey {
+                provider: provider.into(),
+                component_type: component_type.into(),
+            })
         } else {
             None
         };
@@ -862,8 +872,8 @@ impl Store {
         )?;
 
         let key = crate::compress::DictKey {
-            provider: provider.to_owned(),
-            component_type: component_type.to_owned(),
+            provider: provider.into(),
+            component_type: component_type.into(),
         };
         self.coder.register_dict(key, dict_bytes)?;
 
@@ -880,7 +890,10 @@ impl Store {
         })?;
         for row in rows {
             let (provider, component_type, data) = row?;
-            let key = crate::compress::DictKey { provider, component_type };
+            let key = crate::compress::DictKey {
+                provider: provider.into(),
+                component_type: component_type.into(),
+            };
             coder.register_dict(key, data)?;
         }
         Ok(())
@@ -1176,6 +1189,8 @@ impl Store {
 struct PreparedBlob {
     sha: [u8; 32],
     component_type: &'static str,
+    /// Provider that produced this blob (for correct dict_id tagging).
+    provider_key: &'static str,
     uncompressed_len: usize,
     compressed: Vec<u8>,
     /// Whether a trained dict was used for compression.
