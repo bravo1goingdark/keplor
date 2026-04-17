@@ -19,6 +19,81 @@ Format for each entry:
 
 <!-- Append entries below this line. Most recent on top. -->
 
+## 2026-04-17 — Phase 3 complete
+
+### What was built
+
+`keplor-store` filled in, 6 modules:
+
+| Module         | Public items                                                                                  |
+|----------------|-----------------------------------------------------------------------------------------------|
+| `store`        | `Store` (`open`, `open_in_memory`, `append_event`, `get_event`, `get_component`, `query`, `rollup_day`, `gc_expired`, `blob_refcount`, `blob_count`, `total_compressed_bytes`, `total_uncompressed_bytes`), `GcStats` |
+| `components`   | `ComponentType` (SystemPrompt, Tools, Messages, Response, Raw), `Component`, `split_request`, `split_response` |
+| `compress`     | `ZstdCoder` (compress/decompress with optional dict), `DictKey`                               |
+| `filter`       | `EventFilter`, `Cursor`                                                                       |
+| `migrations`   | Internal versioned SQL migration runner + pragma setup                                        |
+| `error`        | `StoreError` (Sqlite, Migration, Compression, ComponentExtract, IntegrityCheck)               |
+
+### Acceptance
+
+- `cargo test -p keplor-store` → **20 passed** (18 unit + 2 integration), 0 failed.
+- `cargo clippy --workspace --all-targets -- -D warnings` → green.
+- `cargo fmt --all -- --check` → green.
+- Workspace total: **151 passed**, 0 failed.
+
+### Compression ratio
+
+1000 synthetic OpenAI chat completions with realistic system prompts (~5KB each, 5 distinct), tools, and short user messages:
+
+| Metric                   | Value       |
+|--------------------------|-------------|
+| Total raw bytes          | 9.1 MB      |
+| Unique blobs             | 2007        |
+| Dedup ratio              | 20.8× (raw / unique uncompressed) |
+| Compression ratio        | **28.2×** (raw / unique compressed) |
+| Compressed < 5% of raw   | **PASS**    |
+
+### Test coverage by required area
+
+| Required                                        | Tests |
+|-------------------------------------------------|-------|
+| Round-trip: `append_event` → `get_event`        | 1 (fields + components verified) |
+| Dedup: shared system_prompt → refcount=2        | 1     |
+| GC: delete events → orphan blobs removed        | 1     |
+| Compression ratio: 1000 events > 20× compressed | 1     |
+| Concurrent writes: 8 tokio tasks, no deadlock   | 1     |
+| Query with user filter                          | 1     |
+| Get nonexistent returns None                    | 1     |
+| Component splitting (OpenAI/Anthropic/non-JSON) | 7     |
+| ZstdCoder round-trip (no dict, with dict, empty)| 3     |
+| Migrations (fresh, idempotent, tables exist)    | 3     |
+
+### Schema additions beyond the phase spec
+
+- **`event_components` junction table** — maps `(event_id, component_type) → blob_sha256`.
+  Required because component-level dedup stores multiple blobs per event
+  (system_prompt, tools, messages, response), not a single raw blob. The
+  `request_blob_id` / `response_blob_id` on `llm_events` point to the
+  messages / response component for quick access without joining.
+
+### Deviations / notes
+
+- **`http` and `ulid` added as crate-local deps** for `store.rs` row
+  marshalling (`http::Method`, `ulid::Ulid::from_bytes`).
+- **`rand` added as dev-dep** for potential future randomised tests.
+- **`ZstdCoder` stores raw dict bytes** (`Vec<u8>`) rather than
+  `EncoderDictionary` / `DecoderDictionary` to stay `Send + Sync`
+  without wrapper types. Per-operation Compressor/Decompressor creation
+  is fast enough for the non-hot path.
+
+### Deferred to later phases
+
+- Dict training (phase 8) — infrastructure is in place.
+- `keplor db vacuum/backup/restore` CLI hooks (phase 6).
+- Parquet cold export (phase 9+).
+
+---
+
 ## 2026-04-17 — Phase 2 complete
 
 ### What was built

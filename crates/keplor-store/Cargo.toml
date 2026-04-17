@@ -12,6 +12,25 @@ publish      = { workspace = true }
 [lints]
 workspace = true
 
+[features]
+default = ["batch"]
+batch   = ["dep:tokio"]
+
 [dependencies]
+keplor-core = { path = "../keplor-core" }
+bytes       = { workspace = true }
+rusqlite    = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+sha2        = { workspace = true }
+smol_str    = { version = "0.3", features = ["serde"] }
+thiserror   = { workspace = true }
+ulid        = { workspace = true }
+http        = "1"
+tracing     = { workspace = true }
+zstd        = { workspace = true }
+tokio       = { workspace = true, optional = true, features = ["sync", "time", "rt"] }
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
+rand  = "0.8"

@@ -1,10 +1,9 @@
 //! Integration tests: fixture-based cost verification and property tests.
 
-use std::sync::Arc;
-
 use keplor_core::{Cost, Provider, Usage};
 use keplor_pricing::compute::{compute_cost, CacheTtl, ContextBucket, CostOpts};
 use keplor_pricing::{Catalog, ModelKey};
+use std::sync::Arc;
 
 use proptest::prelude::*;
 
