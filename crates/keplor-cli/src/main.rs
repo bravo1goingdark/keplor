@@ -49,6 +49,15 @@ enum Cli {
         #[arg(short, long, default_value = "keplor.db")]
         db: PathBuf,
     },
+    /// Delete events older than a threshold.
+    Gc {
+        /// Delete events older than this many days.
+        #[arg(long)]
+        older_than_days: u32,
+        /// Path to the SQLite database.
+        #[arg(short, long, default_value = "keplor.db")]
+        db: PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
@@ -61,6 +70,7 @@ fn main() -> Result<()> {
             query(db, user_id, model, provider, source, limit)
         },
         Cli::Stats { db } => stats(db),
+        Cli::Gc { older_than_days, db } => gc(db, older_than_days),
     }
 }
 
@@ -74,6 +84,12 @@ fn run_server(config_path: PathBuf) -> Result<()> {
         tracing::info!("no config file found, using defaults");
         keplor_server::ServerConfig::default()
     };
+
+    config.validate().map_err(|e| anyhow::anyhow!("invalid config: {e}"))?;
+
+    if config.auth.api_keys.is_empty() {
+        tracing::warn!("API key authentication is DISABLED — all ingestion endpoints are open");
+    }
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -200,6 +216,27 @@ fn stats(db: PathBuf) -> Result<()> {
     if compressed > 0 {
         println!("Compression ratio:    {:.1}x", uncompressed as f64 / compressed as f64);
     }
+    Ok(())
+}
+
+fn gc(db: PathBuf, older_than_days: u32) -> Result<()> {
+    init_tracing();
+    let store = keplor_store::Store::open(&db)
+        .with_context(|| format!("failed to open db at {}", db.display()))?;
+
+    let cutoff_ns = {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .context("system clock error")?
+            .as_nanos() as i64;
+        now - (older_than_days as i64) * 86_400 * 1_000_000_000
+    };
+
+    let stats = store.gc_expired(cutoff_ns).context("gc failed")?;
+    println!(
+        "GC complete: deleted {} events, {} orphaned blobs (cutoff: {} days ago)",
+        stats.events_deleted, stats.blobs_deleted, older_than_days
+    );
     Ok(())
 }
 

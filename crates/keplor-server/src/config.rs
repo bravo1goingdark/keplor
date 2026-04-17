@@ -85,6 +85,35 @@ impl ServerConfig {
 
         Figment::new().merge(Toml::file(path)).merge(Env::prefixed("KEPLOR_").split("_")).extract()
     }
+
+    /// Validate configuration values at startup.
+    ///
+    /// Returns a descriptive error for invalid combinations that would
+    /// cause silent misbehavior at runtime.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.pipeline.batch_size == 0 {
+            return Err("pipeline.batch_size must be > 0".into());
+        }
+        if self.pipeline.batch_size > 100_000 {
+            return Err(format!(
+                "pipeline.batch_size = {} is dangerously large (max 100,000)",
+                self.pipeline.batch_size
+            ));
+        }
+        if self.pipeline.max_body_bytes == 0 {
+            return Err("pipeline.max_body_bytes must be > 0".into());
+        }
+        if self.pipeline.max_body_bytes > 100 * 1024 * 1024 {
+            return Err(format!(
+                "pipeline.max_body_bytes = {} exceeds 100 MB safety limit",
+                self.pipeline.max_body_bytes
+            ));
+        }
+        if self.storage.db_path.as_os_str().is_empty() {
+            return Err("storage.db_path must not be empty".into());
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -98,5 +127,31 @@ mod tests {
         assert_eq!(cfg.storage.db_path, PathBuf::from("keplor.db"));
         assert!(cfg.auth.api_keys.is_empty());
         assert_eq!(cfg.pipeline.batch_size, 64);
+    }
+
+    #[test]
+    fn defaults_validate() {
+        ServerConfig::default().validate().unwrap();
+    }
+
+    #[test]
+    fn zero_batch_size_rejected() {
+        let mut cfg = ServerConfig::default();
+        cfg.pipeline.batch_size = 0;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn huge_batch_size_rejected() {
+        let mut cfg = ServerConfig::default();
+        cfg.pipeline.batch_size = 200_000;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn empty_db_path_rejected() {
+        let mut cfg = ServerConfig::default();
+        cfg.storage.db_path = PathBuf::new();
+        assert!(cfg.validate().is_err());
     }
 }

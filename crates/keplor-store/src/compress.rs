@@ -54,10 +54,15 @@ impl ZstdCoder {
         result.map_err(|e| StoreError::Compression(e.to_string()))
     }
 
+    /// Maximum decompressed size (100 MB) — prevents OOM from malicious
+    /// zstd headers claiming extreme uncompressed sizes.
+    const MAX_DECOMPRESSED: usize = 100 * 1024 * 1024;
+
     /// Decompress bytes, using a trained dict if one exists for `key`.
     pub fn decompress(&self, data: &[u8], key: Option<&DictKey>) -> Result<Vec<u8>, StoreError> {
-        let capacity =
-            zstd::bulk::Decompressor::upper_bound(data).unwrap_or(data.len() * 4).max(64);
+        let capacity = zstd::bulk::Decompressor::upper_bound(data)
+            .unwrap_or(data.len() * 4)
+            .clamp(64, Self::MAX_DECOMPRESSED);
         let result = if let Some(dict_bytes) = key.and_then(|k| self.dicts.get(k)) {
             let mut dec = zstd::bulk::Decompressor::with_dictionary(dict_bytes)
                 .map_err(|e| StoreError::Compression(e.to_string()))?;

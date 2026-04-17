@@ -32,14 +32,25 @@ pub async fn ingest_single(
     state.pipeline.ingest(event).await.map(|resp| (StatusCode::CREATED, Json(resp)))
 }
 
+/// Maximum events per batch request.
+const MAX_BATCH_SIZE: usize = 10_000;
+
 /// `POST /v1/events/batch` — ingest a batch of events.
 ///
 /// Uses fire-and-forget writes: events are validated and queued for
 /// batched storage without awaiting individual flush confirmations.
+/// Events may be lost if the server crashes before the next flush.
 pub async fn ingest_batch(
     State(state): State<AppState>,
     Json(batch): Json<BatchRequest>,
-) -> (StatusCode, Json<BatchResponse>) {
+) -> Result<(StatusCode, Json<BatchResponse>), crate::error::ServerError> {
+    if batch.events.len() > MAX_BATCH_SIZE {
+        return Err(crate::error::ServerError::Validation(format!(
+            "batch size {} exceeds maximum {MAX_BATCH_SIZE}",
+            batch.events.len()
+        )));
+    }
+
     let mut results = Vec::with_capacity(batch.events.len());
     let mut accepted = 0usize;
     let mut rejected = 0usize;
@@ -58,7 +69,7 @@ pub async fn ingest_batch(
     }
 
     let status = if rejected == 0 { StatusCode::CREATED } else { StatusCode::MULTI_STATUS };
-    (status, Json(BatchResponse { results, accepted, rejected }))
+    Ok((status, Json(BatchResponse { results, accepted, rejected })))
 }
 
 // ── Query API ───────────────────────────────────────────────────────────

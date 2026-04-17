@@ -40,11 +40,23 @@ impl Pipeline {
     }
 
     /// Process a single ingestion event — durable write (awaits flush).
+    ///
+    /// Times out after 10 seconds to prevent indefinite hangs if the
+    /// batch writer stalls.
     pub async fn ingest(&self, event: IngestEvent) -> Result<IngestResponse, ServerError> {
         let (llm_event, req_bytes, resp_bytes, provider, model, cost) =
             self.process_event(event)?;
 
-        let id = self.writer.write(llm_event, req_bytes, resp_bytes).await?;
+        let id = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            self.writer.write(llm_event, req_bytes, resp_bytes),
+        )
+        .await
+        .map_err(|_| ServerError::Internal("write timed out after 10s".into()))?
+        .map_err(|e| {
+            metrics::counter!("keplor_events_errors_total", "stage" => "store").increment(1);
+            ServerError::from(e)
+        })?;
 
         self.emit_metrics(&provider, &model);
 
@@ -57,6 +69,9 @@ impl Pipeline {
     }
 
     /// Process and submit without awaiting flush — for batch endpoints.
+    ///
+    /// Events are queued for batched writes. If the queue is full, returns
+    /// an error. Events may be lost if the server crashes before flushing.
     pub fn ingest_fire_and_forget(
         &self,
         event: IngestEvent,
@@ -65,7 +80,10 @@ impl Pipeline {
             self.process_event(event)?;
 
         let id = llm_event.id;
-        self.writer.write_fire_and_forget(llm_event, req_bytes, resp_bytes)?;
+        self.writer.write_fire_and_forget(llm_event, req_bytes, resp_bytes).map_err(|e| {
+            metrics::counter!("keplor_events_errors_total", "stage" => "queue_full").increment(1);
+            ServerError::from(e)
+        })?;
 
         self.emit_metrics(&provider, &model);
 
@@ -84,7 +102,9 @@ impl Pipeline {
         &self,
         event: IngestEvent,
     ) -> Result<(LlmEvent, Bytes, Bytes, Provider, SmolStr, i64), ServerError> {
-        validate::validate(&event)?;
+        validate::validate(&event).inspect_err(|_| {
+            metrics::counter!("keplor_events_errors_total", "stage" => "validation").increment(1);
+        })?;
 
         let provider = normalize::normalize_provider(&event.provider);
         let model = normalize::normalize_model(&event.model);
@@ -92,17 +112,21 @@ impl Pipeline {
         let usage = usage_from_ingest(&event.usage);
         let cost = self.compute_cost(&provider, &model, &usage);
 
-        // Serialize bodies ONCE.
-        let req_bytes = event
-            .request_body
-            .as_ref()
-            .map(|v| Bytes::from(serde_json::to_vec(v).unwrap_or_default()))
-            .unwrap_or_default();
-        let resp_bytes = event
-            .response_body
-            .as_ref()
-            .map(|v| Bytes::from(serde_json::to_vec(v).unwrap_or_default()))
-            .unwrap_or_default();
+        // Serialize bodies ONCE — propagate errors instead of silently storing empty blobs.
+        let req_bytes = match &event.request_body {
+            Some(v) => Bytes::from(
+                serde_json::to_vec(v)
+                    .map_err(|e| ServerError::Json(format!("request body: {e}")))?,
+            ),
+            None => Bytes::new(),
+        };
+        let resp_bytes = match &event.response_body {
+            Some(v) => Bytes::from(
+                serde_json::to_vec(v)
+                    .map_err(|e| ServerError::Json(format!("response body: {e}")))?,
+            ),
+            None => Bytes::new(),
+        };
 
         let llm_event = build_llm_event(
             &event,
