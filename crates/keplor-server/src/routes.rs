@@ -5,13 +5,14 @@ use std::sync::Arc;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use axum::Json;
+use axum::{Extension, Json};
 use metrics_exporter_prometheus::PrometheusHandle;
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
 
 use keplor_store::{Cursor, EventFilter};
 
+use crate::auth::AuthenticatedKey;
 use crate::pipeline::Pipeline;
 use crate::schema::{BatchItemResult, BatchRequest, BatchResponse, IngestEvent, IngestResponse};
 
@@ -27,9 +28,15 @@ pub struct AppState {
 /// `POST /v1/events` — ingest a single event.
 pub async fn ingest_single(
     State(state): State<AppState>,
+    auth: Option<Extension<AuthenticatedKey>>,
     Json(event): Json<IngestEvent>,
 ) -> Result<(StatusCode, Json<IngestResponse>), impl IntoResponse> {
-    state.pipeline.ingest(event).await.map(|resp| (StatusCode::CREATED, Json(resp)))
+    let key_id = auth.map(|Extension(k)| k.key_id);
+    state
+        .pipeline
+        .ingest(event, key_id.as_deref())
+        .await
+        .map(|resp| (StatusCode::CREATED, Json(resp)))
 }
 
 /// Maximum events per batch request.
@@ -42,6 +49,7 @@ const MAX_BATCH_SIZE: usize = 10_000;
 /// Events may be lost if the server crashes before the next flush.
 pub async fn ingest_batch(
     State(state): State<AppState>,
+    auth: Option<Extension<AuthenticatedKey>>,
     Json(batch): Json<BatchRequest>,
 ) -> Result<(StatusCode, Json<BatchResponse>), crate::error::ServerError> {
     if batch.events.len() > MAX_BATCH_SIZE {
@@ -51,12 +59,13 @@ pub async fn ingest_batch(
         )));
     }
 
+    let key_id = auth.map(|Extension(k)| k.key_id);
     let mut results = Vec::with_capacity(batch.events.len());
     let mut accepted = 0usize;
     let mut rejected = 0usize;
 
     for event in batch.events {
-        match state.pipeline.ingest_fire_and_forget(event) {
+        match state.pipeline.ingest_fire_and_forget(event, key_id.as_deref()) {
             Ok(resp) => {
                 accepted += 1;
                 results.push(BatchItemResult::Ok(resp));

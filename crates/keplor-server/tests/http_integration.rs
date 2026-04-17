@@ -200,6 +200,46 @@ async fn validation_rejects_bad_input() {
 }
 
 #[tokio::test]
+async fn auth_key_attribution_overrides_spoofed_id() {
+    // Use explicit id:secret format.
+    let base = spawn_server(vec!["prod-svc:my-secret-key".into()]).await;
+    let client = reqwest::Client::new();
+
+    // Client tries to spoof api_key_id, but server should override it.
+    let resp = client
+        .post(format!("{base}/v1/events"))
+        .header("Authorization", "Bearer my-secret-key")
+        .json(&serde_json::json!({
+            "model": "gpt-4o",
+            "provider": "openai",
+            "api_key_id": "spoofed-id",
+            "user_id": "alice"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    // Small delay for batch flush.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    // Query and verify the api_key_id was set by the server, not the client.
+    let resp = client
+        .get(format!("{base}/v1/events?user_id=alice"))
+        .header("Authorization", "Bearer my-secret-key")
+        .send()
+        .await
+        .unwrap();
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let events = body["events"].as_array().unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0]["api_key_id"], "prod-svc",
+        "server should inject authenticated key id, not client-provided spoofed-id"
+    );
+}
+
+#[tokio::test]
 async fn metrics_endpoint_works() {
     let base = spawn_server(vec![]).await;
     let resp = reqwest::get(format!("{base}/metrics")).await.unwrap();

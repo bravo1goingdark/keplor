@@ -41,11 +41,18 @@ impl Pipeline {
 
     /// Process a single ingestion event — durable write (awaits flush).
     ///
+    /// When `authenticated_key_id` is `Some`, it overrides the
+    /// client-provided `api_key_id` to prevent spoofing.
+    ///
     /// Times out after 10 seconds to prevent indefinite hangs if the
     /// batch writer stalls.
-    pub async fn ingest(&self, event: IngestEvent) -> Result<IngestResponse, ServerError> {
+    pub async fn ingest(
+        &self,
+        event: IngestEvent,
+        authenticated_key_id: Option<&str>,
+    ) -> Result<IngestResponse, ServerError> {
         let (llm_event, req_bytes, resp_bytes, provider, model, cost) =
-            self.process_event(event)?;
+            self.process_event(event, authenticated_key_id)?;
 
         let id = tokio::time::timeout(
             std::time::Duration::from_secs(10),
@@ -70,14 +77,18 @@ impl Pipeline {
 
     /// Process and submit without awaiting flush — for batch endpoints.
     ///
+    /// When `authenticated_key_id` is `Some`, it overrides the
+    /// client-provided `api_key_id` to prevent spoofing.
+    ///
     /// Events are queued for batched writes. If the queue is full, returns
     /// an error. Events may be lost if the server crashes before flushing.
     pub fn ingest_fire_and_forget(
         &self,
         event: IngestEvent,
+        authenticated_key_id: Option<&str>,
     ) -> Result<IngestResponse, ServerError> {
         let (llm_event, req_bytes, resp_bytes, provider, model, cost) =
-            self.process_event(event)?;
+            self.process_event(event, authenticated_key_id)?;
 
         let id = llm_event.id;
         self.writer.write_fire_and_forget(llm_event, req_bytes, resp_bytes).map_err(|e| {
@@ -100,8 +111,14 @@ impl Pipeline {
     /// Returns `(LlmEvent, req_bytes, resp_bytes, provider, model, cost)`.
     fn process_event(
         &self,
-        event: IngestEvent,
+        mut event: IngestEvent,
+        authenticated_key_id: Option<&str>,
     ) -> Result<(LlmEvent, Bytes, Bytes, Provider, SmolStr, i64), ServerError> {
+        // Server-side key attribution: override client-provided api_key_id
+        // with the authenticated key identity to prevent spoofing.
+        if let Some(key_id) = authenticated_key_id {
+            event.api_key_id = Some(key_id.to_owned());
+        }
         validate::validate(&event).inspect_err(|_| {
             metrics::counter!("keplor_events_errors_total", "stage" => "validation").increment(1);
         })?;
@@ -309,7 +326,7 @@ mod tests {
         let pipeline = test_pipeline();
         let event: IngestEvent =
             serde_json::from_str(r#"{"model":"gpt-4o","provider":"openai"}"#).unwrap();
-        let resp = pipeline.ingest(event).await.unwrap();
+        let resp = pipeline.ingest(event, None).await.unwrap();
         assert!(!resp.id.is_empty());
         assert_eq!(resp.provider, "openai");
         assert_eq!(resp.model, "gpt-4o");
@@ -322,7 +339,7 @@ mod tests {
             r#"{"model":"gpt-4o","provider":"openai","usage":{"input_tokens":1000,"output_tokens":500}}"#,
         )
         .unwrap();
-        let resp = pipeline.ingest(event).await.unwrap();
+        let resp = pipeline.ingest(event, None).await.unwrap();
         assert!(resp.cost_nanodollars > 0, "cost should be > 0 for known model with usage");
     }
 
@@ -333,7 +350,7 @@ mod tests {
             r#"{"model":"totally-fake-model","provider":"openai","usage":{"input_tokens":1000}}"#,
         )
         .unwrap();
-        let resp = pipeline.ingest(event).await.unwrap();
+        let resp = pipeline.ingest(event, None).await.unwrap();
         assert_eq!(resp.cost_nanodollars, 0);
     }
 
@@ -342,7 +359,7 @@ mod tests {
         let pipeline = test_pipeline();
         let event: IngestEvent =
             serde_json::from_str(r#"{"model":"","provider":"openai"}"#).unwrap();
-        assert!(pipeline.ingest(event).await.is_err());
+        assert!(pipeline.ingest(event, None).await.is_err());
     }
 
     #[tokio::test]
@@ -356,7 +373,7 @@ mod tests {
             r#"{"model":"gpt-4o","provider":"openai","source":"litellm","user_id":"alice"}"#,
         )
         .unwrap();
-        let resp = pipeline.ingest(event).await.unwrap();
+        let resp = pipeline.ingest(event, None).await.unwrap();
 
         let id: EventId = resp.id.parse().unwrap();
         let loaded = store.get_event(&id).unwrap().expect("event should exist");
@@ -380,7 +397,7 @@ mod tests {
             r#"{"model":"gpt-4o","provider":"openai","timestamp":"2024-01-15T10:30:00Z"}"#,
         )
         .unwrap();
-        let resp = pipeline.ingest(event).await.unwrap();
+        let resp = pipeline.ingest(event, None).await.unwrap();
         let id: EventId = resp.id.parse().unwrap();
         let loaded = pipeline.store().get_event(&id).unwrap().unwrap();
         assert!(loaded.ts_ns > 1_705_000_000_000_000_000);
@@ -392,9 +409,32 @@ mod tests {
         let pipeline = test_pipeline();
         let event: IngestEvent =
             serde_json::from_str(r#"{"model":"gpt-4o","provider":"openai"}"#).unwrap();
-        let resp = pipeline.ingest_fire_and_forget(event).unwrap();
+        let resp = pipeline.ingest_fire_and_forget(event, None).unwrap();
         assert!(!resp.id.is_empty());
         // Give batch writer time to flush.
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    #[tokio::test]
+    async fn authenticated_key_overrides_client_api_key_id() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let writer = Arc::new(BatchWriter::new(Arc::clone(&store), BatchConfig::default()));
+        let catalog = Arc::new(Catalog::load_bundled().unwrap());
+        let pipeline = Pipeline::new(Arc::clone(&store), writer, catalog);
+
+        let event: IngestEvent = serde_json::from_str(
+            r#"{"model":"gpt-4o","provider":"openai","api_key_id":"spoofed-key","user_id":"alice"}"#,
+        )
+        .unwrap();
+
+        // Simulate server-side key attribution overriding client-provided value.
+        let resp = pipeline.ingest(event, Some("real-key")).await.unwrap();
+        let id: EventId = resp.id.parse().unwrap();
+        let loaded = store.get_event(&id).unwrap().expect("event should exist");
+        assert_eq!(
+            loaded.api_key_id.as_ref().map(|k| k.as_str()),
+            Some("real-key"),
+            "server-injected key should override client-provided api_key_id"
+        );
     }
 }
