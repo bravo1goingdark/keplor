@@ -25,6 +25,47 @@ pub struct GcStats {
     pub blobs_deleted: usize,
 }
 
+/// Lightweight event projection for the HTTP API.
+///
+/// Contains only the fields needed by the query response — reads 16
+/// columns instead of 42, avoiding allocation of hashes, error details,
+/// trace metadata, and other fields the API doesn't expose.
+#[derive(Debug, Clone)]
+pub struct EventSummary {
+    /// Primary key — time-sortable ULID.
+    pub id: keplor_core::EventId,
+    /// Wall-clock capture time in nanoseconds.
+    pub ts_ns: i64,
+    /// Caller-provided user id.
+    pub user_id: Option<String>,
+    /// Provider id key (e.g. `"openai"`).
+    pub provider: String,
+    /// Model name.
+    pub model: String,
+    /// Request endpoint.
+    pub endpoint: String,
+    /// HTTP status code.
+    pub http_status: Option<u16>,
+    /// Input tokens.
+    pub input_tokens: u32,
+    /// Output tokens.
+    pub output_tokens: u32,
+    /// Cache-read input tokens.
+    pub cache_read_input_tokens: u32,
+    /// Reasoning tokens.
+    pub reasoning_tokens: u32,
+    /// Cost in nanodollars.
+    pub cost_nanodollars: i64,
+    /// Time to first token (ms).
+    pub ttft_ms: Option<u32>,
+    /// Total latency (ms).
+    pub total_ms: u32,
+    /// Whether the request was streaming.
+    pub streaming: bool,
+    /// Ingestion source.
+    pub source: Option<String>,
+}
+
 /// Local SQLite store for LLM events and their payload blobs.
 ///
 /// Thread-safe: holds a `Mutex<Connection>`.
@@ -55,7 +96,9 @@ impl Store {
     fn init(conn: Connection) -> Result<Self, StoreError> {
         migrations::apply_pragmas(&conn)?;
         migrations::migrate(&conn)?;
-        Ok(Self { conn: Mutex::new(conn), coder: ZstdCoder::new() })
+        let mut coder = ZstdCoder::new();
+        Self::load_dicts(&conn, &mut coder)?;
+        Ok(Self { conn: Mutex::new(conn), coder })
     }
 
     /// Append an event with its raw request/response bodies.
@@ -256,12 +299,18 @@ impl Store {
                 }
 
                 if seen_shas.insert(sha) {
-                    let compressed = self.coder.compress(&comp.data, None)?;
+                    let dict_key = crate::compress::DictKey {
+                        provider: provider_key.to_owned(),
+                        component_type: comp.kind.as_str().to_owned(),
+                    };
+                    let has_dict = self.coder.has_dict(&dict_key);
+                    let compressed = self.coder.compress(&comp.data, Some(&dict_key))?;
                     unique_blobs.push(PreparedBlob {
                         sha,
                         component_type: comp.kind.as_str(),
                         uncompressed_len: comp.data.len(),
                         compressed,
+                        used_dict: has_dict,
                     });
                 }
             }
@@ -291,18 +340,26 @@ impl Store {
                     sha256, component_type, provider, compression, dict_id,
                     uncompressed_size, compressed_size, refcount, hit_count,
                     data, first_seen_at
-                 ) VALUES(?1, ?2, ?3, 'zstd_raw', NULL, ?4, ?5, 1, 0, ?6, strftime('%s','now'))
+                 ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, 0, ?8, strftime('%s','now'))
                  ON CONFLICT(sha256) DO UPDATE SET
                     refcount = refcount + 1,
                     hit_count = hit_count + 1",
             )?;
 
             // First pass: insert each unique blob once.
+            let provider_key = batch_events[0].provider_key;
             for blob in &unique_blobs {
+                let (compression, dict_id): (&str, Option<String>) = if blob.used_dict {
+                    ("zstd_dict", Some(format!("{}_{}", provider_key, blob.component_type)))
+                } else {
+                    ("zstd_raw", None)
+                };
                 blob_stmt.execute(params![
                     &blob.sha[..],
                     blob.component_type,
-                    batch_events[0].provider_key,
+                    provider_key,
+                    compression,
+                    dict_id,
                     blob.uncompressed_len as i64,
                     blob.compressed.len() as i64,
                     &blob.compressed[..],
@@ -431,13 +488,23 @@ impl Store {
         component_type: &str,
         provider: &str,
     ) -> Result<(), StoreError> {
-        let compressed = self.coder.compress(data, None)?;
+        let dict_key = crate::compress::DictKey {
+            provider: provider.to_owned(),
+            component_type: component_type.to_owned(),
+        };
+        let has_dict = self.coder.has_dict(&dict_key);
+        let compressed = self.coder.compress(data, Some(&dict_key))?;
+        let (compression, dict_id): (&str, Option<String>) = if has_dict {
+            ("zstd_dict", Some(format!("{provider}_{component_type}")))
+        } else {
+            ("zstd_raw", None)
+        };
         conn.execute(
             "INSERT INTO payload_blobs(
                 sha256, component_type, provider, compression, dict_id,
                 uncompressed_size, compressed_size, refcount, hit_count,
                 data, first_seen_at
-             ) VALUES(?1, ?2, ?3, 'zstd_raw', NULL, ?4, ?5, 1, 0, ?6, strftime('%s','now'))
+             ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, 0, ?8, strftime('%s','now'))
              ON CONFLICT(sha256) DO UPDATE SET
                 refcount = refcount + 1,
                 hit_count = hit_count + 1",
@@ -445,6 +512,8 @@ impl Store {
                 &sha[..],
                 component_type,
                 provider,
+                compression,
+                dict_id,
                 data.len() as i64,
                 compressed.len() as i64,
                 &compressed[..],
@@ -472,21 +541,28 @@ impl Store {
         let conn = self.conn.lock().map_err(|e| StoreError::Compression(e.to_string()))?;
         let id_bytes = event_id.as_ulid().to_bytes();
 
-        let compressed: Option<Vec<u8>> = conn
+        let row: Option<(Vec<u8>, String, String)> = conn
             .query_row(
-                "SELECT pb.data FROM event_components ec
+                "SELECT pb.data, pb.provider, pb.compression FROM event_components ec
                  JOIN payload_blobs pb ON pb.sha256 = ec.blob_sha256
                  WHERE ec.event_id = ?1 AND ec.component_type = ?2",
                 params![&id_bytes[..], component_type],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()?;
 
-        let Some(compressed) = compressed else {
+        let Some((compressed, provider, compression)) = row else {
             return Ok(None);
         };
 
-        let decompressed = self.coder.decompress(&compressed, None)?;
+        // Only use dict for blobs that were compressed with one.
+        // Old blobs (compression = 'zstd_raw') decompress without dict.
+        let dict_key = if compression == "zstd_dict" {
+            Some(crate::compress::DictKey { provider, component_type: component_type.to_owned() })
+        } else {
+            None
+        };
+        let decompressed = self.coder.decompress(&compressed, dict_key.as_ref())?;
         Ok(Some(Bytes::from(decompressed)))
     }
 
@@ -554,6 +630,167 @@ impl Store {
             events.push(row?);
         }
         Ok(events)
+    }
+
+    /// Narrow query returning only the fields needed by the HTTP API.
+    ///
+    /// Reads 16 columns instead of 42, avoiding allocation of unused
+    /// fields (hashes, error details, trace metadata, etc.).
+    pub fn query_summary(
+        &self,
+        filter: &EventFilter,
+        limit: u32,
+        cursor: Option<Cursor>,
+    ) -> Result<Vec<EventSummary>, StoreError> {
+        let conn = self.conn.lock().map_err(|e| StoreError::Compression(e.to_string()))?;
+
+        let mut sql = String::with_capacity(256);
+        sql.push_str(
+            "SELECT id, ts_ns, user_id, provider, model, endpoint, http_status, \
+             input_tokens, output_tokens, cache_read_input_tokens, reasoning_tokens, \
+             cost_nanodollars, latency_ttft_ms, latency_total_ms, streaming, source \
+             FROM llm_events WHERE 1=1",
+        );
+
+        let mut bind_storage: [Option<Box<dyn rusqlite::types::ToSql>>; 8] = Default::default();
+        let mut idx = 0usize;
+
+        macro_rules! add_filter {
+            ($cond:expr, $val:expr) => {
+                if let Some(ref v) = $val {
+                    idx += 1;
+                    sql.push_str(&format!(concat!(" AND ", $cond, " = ?{}"), idx));
+                    bind_storage[idx - 1] = Some(Box::new(v.to_string()));
+                }
+            };
+        }
+
+        add_filter!("user_id", filter.user_id);
+        add_filter!("api_key_id", filter.api_key_id);
+        add_filter!("model", filter.model);
+        add_filter!("provider", filter.provider);
+        add_filter!("source", filter.source);
+
+        if let Some(from) = filter.from_ts_ns {
+            idx += 1;
+            sql.push_str(&format!(" AND ts_ns >= ?{idx}"));
+            bind_storage[idx - 1] = Some(Box::new(from));
+        }
+        if let Some(to) = filter.to_ts_ns {
+            idx += 1;
+            sql.push_str(&format!(" AND ts_ns <= ?{idx}"));
+            bind_storage[idx - 1] = Some(Box::new(to));
+        }
+        if let Some(c) = cursor {
+            idx += 1;
+            sql.push_str(&format!(" AND ts_ns < ?{idx}"));
+            bind_storage[idx - 1] = Some(Box::new(c.0));
+        }
+
+        sql.push_str(" ORDER BY ts_ns DESC LIMIT ");
+        sql.push_str(&limit.to_string());
+
+        let mut stmt = conn.prepare_cached(&sql)?;
+        let params_ref: Vec<&dyn rusqlite::types::ToSql> = bind_storage[..idx]
+            .iter()
+            .map(|slot| slot.as_ref().map(|b| b.as_ref()).unwrap_or(&rusqlite::types::Null))
+            .collect();
+
+        let mut events = Vec::with_capacity(limit.min(256) as usize);
+        let rows = stmt.query_map(params_ref.as_slice(), row_to_summary)?;
+        for row in rows {
+            events.push(row?);
+        }
+        Ok(events)
+    }
+
+    /// Collect raw (uncompressed) payload samples for dictionary training.
+    ///
+    /// Returns up to `max_samples` decompressed blobs of the given
+    /// `component_type` and `provider`.
+    pub fn collect_dict_samples(
+        &self,
+        provider: &str,
+        component_type: &str,
+        max_samples: usize,
+    ) -> Result<Vec<Vec<u8>>, StoreError> {
+        let conn = self.conn.lock().map_err(|e| StoreError::Compression(e.to_string()))?;
+
+        let mut stmt = conn.prepare_cached(
+            "SELECT data FROM payload_blobs
+             WHERE provider = ?1 AND component_type = ?2
+             ORDER BY hit_count DESC
+             LIMIT ?3",
+        )?;
+
+        let rows = stmt.query_map(params![provider, component_type, max_samples as i64], |r| {
+            r.get::<_, Vec<u8>>(0)
+        })?;
+
+        let mut samples = Vec::with_capacity(max_samples);
+        for row in rows {
+            let compressed = row?;
+            let decompressed = self.coder.decompress(&compressed, None)?;
+            samples.push(decompressed);
+        }
+        Ok(samples)
+    }
+
+    /// Train a zstd dictionary from stored samples and persist it.
+    ///
+    /// Reads the most-referenced blobs of the given `(provider,
+    /// component_type)`, trains a dictionary, stores it in `zstd_dicts`,
+    /// and registers it in the coder for future compression.
+    ///
+    /// Returns the dict id on success, or `None` if too few samples.
+    pub fn train_dict(
+        &mut self,
+        provider: &str,
+        component_type: &str,
+        max_samples: usize,
+        dict_size: usize,
+    ) -> Result<Option<String>, StoreError> {
+        let samples = self.collect_dict_samples(provider, component_type, max_samples)?;
+        if samples.len() < 10 {
+            return Ok(None);
+        }
+
+        let sample_refs: Vec<&[u8]> = samples.iter().map(|s| s.as_slice()).collect();
+        let dict_bytes = zstd::dict::from_samples(&sample_refs, dict_size)
+            .map_err(|e| StoreError::Compression(format!("dict training failed: {e}")))?;
+
+        let dict_id = format!("{provider}_{component_type}");
+
+        let conn = self.conn.lock().map_err(|e| StoreError::Compression(e.to_string()))?;
+        conn.execute(
+            "INSERT OR REPLACE INTO zstd_dicts(id, provider, component_type, sample_count, created_at, data)
+             VALUES(?1, ?2, ?3, ?4, strftime('%s','now'), ?5)",
+            params![&dict_id, provider, component_type, samples.len() as i64, &dict_bytes],
+        )?;
+
+        let key = crate::compress::DictKey {
+            provider: provider.to_owned(),
+            component_type: component_type.to_owned(),
+        };
+        self.coder.register_dict(key, dict_bytes)?;
+
+        Ok(Some(dict_id))
+    }
+
+    /// Load all trained dictionaries from the `zstd_dicts` table.
+    ///
+    /// Called during [`Store::init`] to pre-populate the coder.
+    fn load_dicts(conn: &Connection, coder: &mut ZstdCoder) -> Result<(), StoreError> {
+        let mut stmt = conn.prepare("SELECT provider, component_type, data FROM zstd_dicts")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Vec<u8>>(2)?))
+        })?;
+        for row in rows {
+            let (provider, component_type, data) = row?;
+            let key = crate::compress::DictKey { provider, component_type };
+            coder.register_dict(key, data)?;
+        }
+        Ok(())
     }
 
     /// Roll up a day's events into `daily_rollups`.
@@ -661,6 +898,8 @@ struct PreparedBlob {
     component_type: &'static str,
     uncompressed_len: usize,
     compressed: Vec<u8>,
+    /// Whether a trained dict was used for compression.
+    used_dict: bool,
 }
 
 fn sha256_bytes(data: &[u8]) -> [u8; 32] {
@@ -713,6 +952,52 @@ mod col {
     pub const TRACE_ID: usize = 39;
     pub const SOURCE: usize = 40;
     pub const INGESTED_AT: usize = 41;
+}
+
+/// Column indices for the narrow `query_summary` SELECT.
+mod slim {
+    pub const ID: usize = 0;
+    pub const TS_NS: usize = 1;
+    pub const USER_ID: usize = 2;
+    pub const PROVIDER: usize = 3;
+    pub const MODEL: usize = 4;
+    pub const ENDPOINT: usize = 5;
+    pub const HTTP_STATUS: usize = 6;
+    pub const INPUT_TOKENS: usize = 7;
+    pub const OUTPUT_TOKENS: usize = 8;
+    pub const CACHE_READ: usize = 9;
+    pub const REASONING: usize = 10;
+    pub const COST: usize = 11;
+    pub const TTFT: usize = 12;
+    pub const TOTAL_MS: usize = 13;
+    pub const STREAMING: usize = 14;
+    pub const SOURCE: usize = 15;
+}
+
+fn row_to_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<EventSummary> {
+    let id_bytes: Vec<u8> = row.get(slim::ID)?;
+    let id_arr: [u8; 16] = id_bytes.try_into().map_err(|_| {
+        rusqlite::Error::InvalidColumnType(0, "id".into(), rusqlite::types::Type::Blob)
+    })?;
+
+    Ok(EventSummary {
+        id: keplor_core::EventId(ulid::Ulid::from_bytes(id_arr)),
+        ts_ns: row.get(slim::TS_NS)?,
+        user_id: row.get(slim::USER_ID)?,
+        provider: row.get(slim::PROVIDER)?,
+        model: row.get(slim::MODEL)?,
+        endpoint: row.get(slim::ENDPOINT)?,
+        http_status: row.get::<_, Option<i64>>(slim::HTTP_STATUS)?.map(|s| s as u16),
+        input_tokens: row.get::<_, i64>(slim::INPUT_TOKENS)? as u32,
+        output_tokens: row.get::<_, i64>(slim::OUTPUT_TOKENS)? as u32,
+        cache_read_input_tokens: row.get::<_, i64>(slim::CACHE_READ)? as u32,
+        reasoning_tokens: row.get::<_, i64>(slim::REASONING)? as u32,
+        cost_nanodollars: row.get(slim::COST)?,
+        ttft_ms: row.get::<_, Option<i64>>(slim::TTFT)?.map(|v| v as u32),
+        total_ms: row.get::<_, i64>(slim::TOTAL_MS)? as u32,
+        streaming: row.get::<_, i64>(slim::STREAMING)? != 0,
+        source: row.get(slim::SOURCE)?,
+    })
 }
 
 fn row_to_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<LlmEvent> {
@@ -992,5 +1277,58 @@ mod tests {
         let store = Store::open_in_memory().unwrap();
         let result = store.get_event(&EventId::new()).unwrap();
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn query_summary_returns_correct_fields() {
+        let store = Store::open_in_memory().unwrap();
+        let event = test_event();
+        let req = test_req_body();
+        let resp = test_resp_body();
+
+        store.append_event(&event, &req, &resp).unwrap();
+
+        let filter = EventFilter { user_id: Some(SmolStr::new("user_1")), ..Default::default() };
+        let results = store.query_summary(&filter, 10, None).unwrap();
+        assert_eq!(results.len(), 1);
+
+        let s = &results[0];
+        assert_eq!(s.ts_ns, event.ts_ns);
+        assert_eq!(s.provider, "openai");
+        assert_eq!(s.model, "gpt-4o");
+        assert_eq!(s.input_tokens, 100);
+        assert_eq!(s.output_tokens, 50);
+        assert_eq!(s.cost_nanodollars, 750_000);
+        assert_eq!(s.total_ms, 300);
+        assert_eq!(s.ttft_ms, Some(25));
+        assert!(s.streaming);
+    }
+
+    #[test]
+    fn train_dict_from_samples() {
+        let mut store = Store::open_in_memory().unwrap();
+
+        // Insert events with 20 distinct system prompts (need >= 10 unique blobs).
+        for i in 0..20 {
+            let mut event = test_event();
+            event.id = EventId::new();
+            event.ts_ns += i as i64;
+
+            let sys = format!("You are assistant variant {i}. Help the user with task {i}.");
+            let v: serde_json::Value = serde_json::from_str(&format!(
+                r#"{{"messages":[{{"role":"system","content":{sys_json}}},{{"role":"user","content":"Q{i}"}}]}}"#,
+                sys_json = serde_json::to_string(&sys).unwrap()
+            ))
+            .unwrap();
+            let req = Bytes::from(serde_json::to_vec(&v).unwrap());
+            let resp = test_resp_body();
+            store.append_event(&event, &req, &resp).unwrap();
+        }
+
+        let result = store.train_dict("openai", "system_prompt", 100, 4096);
+        assert!(result.is_ok());
+        let dict_id = result.unwrap();
+        assert!(dict_id.is_some(), "should have enough samples to train");
+        assert_eq!(dict_id.unwrap(), "openai_system_prompt");
     }
 }

@@ -25,4 +25,4 @@ pub use components::ComponentType;
 pub use compress::ZstdCoder;
 pub use error::StoreError;
 pub use filter::{Cursor, EventFilter};
-pub use store::{GcStats, Store};
+pub use store::{EventSummary, GcStats, Store};

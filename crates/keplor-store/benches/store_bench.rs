@@ -158,11 +158,17 @@ fn bench_query(c: &mut Criterion) {
         keplor_store::EventFilter { user_id: Some(SmolStr::new("user_1")), ..Default::default() };
 
     let mut group = c.benchmark_group("query");
-    group.bench_function("no_filter_limit50", |b| {
+    group.bench_function("full_no_filter_limit50", |b| {
         b.iter(|| black_box(store.query(&filter_none, 50, None).unwrap()));
     });
-    group.bench_function("user_filter_limit50", |b| {
+    group.bench_function("full_user_filter_limit50", |b| {
         b.iter(|| black_box(store.query(&filter_user, 50, None).unwrap()));
+    });
+    group.bench_function("summary_no_filter_limit50", |b| {
+        b.iter(|| black_box(store.query_summary(&filter_none, 50, None).unwrap()));
+    });
+    group.bench_function("summary_user_filter_limit50", |b| {
+        b.iter(|| black_box(store.query_summary(&filter_user, 50, None).unwrap()));
     });
     group.finish();
 }

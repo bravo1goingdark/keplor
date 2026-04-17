@@ -68,6 +68,12 @@ impl ZstdCoder {
         result.map_err(|e| StoreError::Compression(e.to_string()))
     }
 
+    /// Check whether a trained dictionary exists for this key.
+    #[must_use]
+    pub fn has_dict(&self, key: &DictKey) -> bool {
+        self.dicts.contains_key(key)
+    }
+
     /// Register a trained dictionary.
     pub fn register_dict(&mut self, key: DictKey, dict_bytes: Vec<u8>) -> Result<(), StoreError> {
         Arc::get_mut(&mut self.dicts)

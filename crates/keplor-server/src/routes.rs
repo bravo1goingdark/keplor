@@ -140,13 +140,14 @@ pub async fn query_events(
 
     let cursor = params.cursor.map(Cursor);
 
-    // Run the blocking SQLite query on a dedicated thread to avoid
-    // starving tokio worker threads under concurrent load.
+    // Use the narrow query path — reads only the 16 columns the API
+    // needs instead of all 42 columns.
     let store = state.pipeline.store_arc();
-    let events = tokio::task::spawn_blocking(move || store.query(&filter, limit + 1, cursor))
-        .await
-        .map_err(|e| crate::error::ServerError::Internal(e.to_string()))?
-        .map_err(crate::error::ServerError::from)?;
+    let events =
+        tokio::task::spawn_blocking(move || store.query_summary(&filter, limit + 1, cursor))
+            .await
+            .map_err(|e| crate::error::ServerError::Internal(e.to_string()))?
+            .map_err(crate::error::ServerError::from)?;
 
     let has_more = events.len() > limit as usize;
     let page: Vec<_> = events.into_iter().take(limit as usize).collect();
@@ -154,28 +155,25 @@ pub async fn query_events(
 
     let responses: Vec<EventResponse> = page
         .into_iter()
-        .map(|e| {
-            use keplor_core::EventFlags;
-            EventResponse {
-                id: e.id.to_string(),
-                timestamp: e.ts_ns,
-                model: e.model.to_string(),
-                provider: e.provider.id_key().to_owned(),
-                usage: UsageResponse {
-                    input_tokens: e.usage.input_tokens,
-                    output_tokens: e.usage.output_tokens,
-                    cache_read_input_tokens: e.usage.cache_read_input_tokens,
-                    reasoning_tokens: e.usage.reasoning_tokens,
-                },
-                cost_nanodollars: e.cost_nanodollars,
-                latency_total_ms: e.latency.total_ms,
-                latency_ttft_ms: e.latency.ttft_ms,
-                http_status: e.http_status,
-                source: e.source.map(|s| s.to_string()),
-                user_id: e.user_id.map(|u| u.as_str().to_owned()),
-                endpoint: e.endpoint.to_string(),
-                streaming: e.flags.contains(EventFlags::STREAMING),
-            }
+        .map(|e| EventResponse {
+            id: e.id.to_string(),
+            timestamp: e.ts_ns,
+            model: e.model,
+            provider: e.provider,
+            usage: UsageResponse {
+                input_tokens: e.input_tokens,
+                output_tokens: e.output_tokens,
+                cache_read_input_tokens: e.cache_read_input_tokens,
+                reasoning_tokens: e.reasoning_tokens,
+            },
+            cost_nanodollars: e.cost_nanodollars,
+            latency_total_ms: e.total_ms,
+            latency_ttft_ms: e.ttft_ms,
+            http_status: e.http_status,
+            source: e.source,
+            user_id: e.user_id,
+            endpoint: e.endpoint,
+            streaming: e.streaming,
         })
         .collect();
 
