@@ -17,6 +17,8 @@ pub struct EventFilter {
     pub model: Option<SmolStr>,
     /// Only events from this provider.
     pub provider: Option<SmolStr>,
+    /// Only events from this ingestion source.
+    pub source: Option<SmolStr>,
     /// Only events on or after this timestamp (nanoseconds).
     pub from_ts_ns: Option<i64>,
     /// Only events on or before this timestamp (nanoseconds).

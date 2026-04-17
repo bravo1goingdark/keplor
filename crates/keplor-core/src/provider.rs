@@ -77,9 +77,10 @@ impl Provider {
 
     /// Stable string key for the provider — lowercase, no punctuation.
     /// Used as the serialisation discriminator and for storage / metrics
-    /// labels.
+    /// labels.  Returns `&'static str` for all known providers, enabling
+    /// zero-allocation metrics label usage.
     #[must_use]
-    pub fn id_key(&self) -> &str {
+    pub fn id_key(&self) -> &'static str {
         match self {
             Self::OpenAI => "openai",
             Self::Anthropic => "anthropic",
@@ -111,6 +112,60 @@ impl Provider {
             // bearer-style `Authorization`.  Bedrock signs with AWS SigV4
             // but the header is still `authorization`.
             _ => "authorization",
+        }
+    }
+
+    /// Parse a provider from its stable `id_key` string (exact match).
+    ///
+    /// Unknown strings become [`Provider::OpenAICompatible`].
+    #[must_use]
+    pub fn from_id_key(s: &str) -> Self {
+        match s {
+            "openai" => Self::OpenAI,
+            "anthropic" => Self::Anthropic,
+            "gemini" => Self::Gemini,
+            "gemini_vertex" => Self::GeminiVertex,
+            "bedrock" => Self::Bedrock,
+            "azure_openai" => Self::AzureOpenAI,
+            "mistral" => Self::Mistral,
+            "groq" => Self::Groq,
+            "xai" => Self::XAi,
+            "deepseek" => Self::DeepSeek,
+            "cohere" => Self::Cohere,
+            "ollama" => Self::Ollama,
+            other => Self::OpenAICompatible { base_url: Arc::from(other) },
+        }
+    }
+
+    /// Case-insensitive parse without allocating a lowercase copy.
+    #[must_use]
+    pub fn from_id_key_ignore_case(s: &str) -> Self {
+        if s.eq_ignore_ascii_case("openai") {
+            Self::OpenAI
+        } else if s.eq_ignore_ascii_case("anthropic") {
+            Self::Anthropic
+        } else if s.eq_ignore_ascii_case("gemini") {
+            Self::Gemini
+        } else if s.eq_ignore_ascii_case("gemini_vertex") {
+            Self::GeminiVertex
+        } else if s.eq_ignore_ascii_case("bedrock") {
+            Self::Bedrock
+        } else if s.eq_ignore_ascii_case("azure_openai") {
+            Self::AzureOpenAI
+        } else if s.eq_ignore_ascii_case("mistral") {
+            Self::Mistral
+        } else if s.eq_ignore_ascii_case("groq") {
+            Self::Groq
+        } else if s.eq_ignore_ascii_case("xai") {
+            Self::XAi
+        } else if s.eq_ignore_ascii_case("deepseek") {
+            Self::DeepSeek
+        } else if s.eq_ignore_ascii_case("cohere") {
+            Self::Cohere
+        } else if s.eq_ignore_ascii_case("ollama") {
+            Self::Ollama
+        } else {
+            Self::OpenAICompatible { base_url: Arc::from(s) }
         }
     }
 
@@ -247,6 +302,29 @@ mod tests {
         keys.sort_unstable();
         keys.dedup();
         assert_eq!(keys.len(), len_before, "duplicate id_key");
+    }
+
+    #[test]
+    fn from_id_key_roundtrip() {
+        let known = [
+            Provider::OpenAI,
+            Provider::Anthropic,
+            Provider::Gemini,
+            Provider::GeminiVertex,
+            Provider::Bedrock,
+            Provider::AzureOpenAI,
+            Provider::Mistral,
+            Provider::Groq,
+            Provider::XAi,
+            Provider::DeepSeek,
+            Provider::Cohere,
+            Provider::Ollama,
+        ];
+        for p in &known {
+            assert_eq!(&Provider::from_id_key(p.id_key()), p);
+        }
+        let compat = Provider::from_id_key("https://custom.example.com");
+        assert!(matches!(compat, Provider::OpenAICompatible { .. }));
     }
 
     #[test]

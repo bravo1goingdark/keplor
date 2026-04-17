@@ -43,6 +43,14 @@ impl ModelKey {
         Self(SmolStr::new(raw.to_ascii_lowercase()))
     }
 
+    /// Wrap a pre-normalised (lowercase, trimmed) model string.
+    ///
+    /// Skips the `to_ascii_lowercase()` that [`ModelKey::new`] performs.
+    #[must_use]
+    pub fn from_normalized(s: SmolStr) -> Self {
+        Self(s)
+    }
+
     /// The normalised key as a string slice.
     #[must_use]
     pub fn as_str(&self) -> &str {

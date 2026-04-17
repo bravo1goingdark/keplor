@@ -1,0 +1,202 @@
+//! End-to-end HTTP integration tests.
+
+#![allow(clippy::unwrap_used)]
+
+use std::sync::Arc;
+
+use keplor_pricing::Catalog;
+use keplor_server::auth::ApiKeySet;
+use keplor_server::config::ServerConfig;
+use keplor_server::server::install_metrics_recorder;
+use keplor_server::{Pipeline, PipelineServer};
+use keplor_store::{BatchConfig, BatchWriter, Store};
+use reqwest::StatusCode;
+
+async fn spawn_server(api_keys: Vec<String>) -> String {
+    let store = Arc::new(Store::open_in_memory().unwrap());
+    let writer = Arc::new(BatchWriter::new(Arc::clone(&store), BatchConfig::default()));
+    let catalog = Arc::new(Catalog::load_bundled().unwrap());
+    let pipeline = Pipeline::new(store, writer, catalog);
+
+    let keys = ApiKeySet::new(api_keys);
+    let config = ServerConfig::default();
+    let metrics_handle = install_metrics_recorder();
+    let server = PipelineServer::new(pipeline, keys, &config, metrics_handle);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let base = format!("http://{addr}");
+
+    tokio::spawn(async move {
+        server.run_on(listener).await.unwrap();
+    });
+
+    // Give server a moment to start.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    base
+}
+
+#[tokio::test]
+async fn health_returns_ok() {
+    let base = spawn_server(vec![]).await;
+    let resp = reqwest::get(format!("{base}/health")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["status"], "ok");
+    assert_eq!(body["db"], "connected");
+}
+
+#[tokio::test]
+async fn ingest_single_event() {
+    let base = spawn_server(vec![]).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("{base}/v1/events"))
+        .json(&serde_json::json!({
+            "model": "gpt-4o",
+            "provider": "openai",
+            "usage": {"input_tokens": 1000, "output_tokens": 500},
+            "source": "test"
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(!body["id"].as_str().unwrap().is_empty());
+    assert!(body["cost_nanodollars"].as_i64().unwrap() > 0);
+    assert_eq!(body["provider"], "openai");
+}
+
+#[tokio::test]
+async fn ingest_batch() {
+    let base = spawn_server(vec![]).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("{base}/v1/events/batch"))
+        .json(&serde_json::json!({
+            "events": [
+                {"model": "gpt-4o", "provider": "openai"},
+                {"model": "claude-sonnet-4-20250514", "provider": "anthropic"}
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["accepted"], 2);
+    assert_eq!(body["rejected"], 0);
+}
+
+#[tokio::test]
+async fn ingest_and_query() {
+    let base = spawn_server(vec![]).await;
+    let client = reqwest::Client::new();
+
+    // Ingest.
+    client
+        .post(format!("{base}/v1/events"))
+        .json(&serde_json::json!({
+            "model": "gpt-4o",
+            "provider": "openai",
+            "user_id": "alice",
+            "source": "test-harness"
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    // Small delay for batch flush.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // Query all.
+    let resp = client.get(format!("{base}/v1/events")).send().await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(!body["events"].as_array().unwrap().is_empty());
+
+    // Query with user filter.
+    let resp = client.get(format!("{base}/v1/events?user_id=alice")).send().await.unwrap();
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let events = body["events"].as_array().unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["user_id"], "alice");
+
+    // Query with non-matching filter.
+    let resp = client.get(format!("{base}/v1/events?user_id=bob")).send().await.unwrap();
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(body["events"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn auth_rejects_bad_key() {
+    let base = spawn_server(vec!["secret123".into()]).await;
+    let client = reqwest::Client::new();
+
+    // No auth header.
+    let resp = client
+        .post(format!("{base}/v1/events"))
+        .json(&serde_json::json!({"model": "gpt-4o", "provider": "openai"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    // Wrong key.
+    let resp = client
+        .post(format!("{base}/v1/events"))
+        .header("Authorization", "Bearer wrongkey")
+        .json(&serde_json::json!({"model": "gpt-4o", "provider": "openai"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    // Correct key.
+    let resp = client
+        .post(format!("{base}/v1/events"))
+        .header("Authorization", "Bearer secret123")
+        .json(&serde_json::json!({"model": "gpt-4o", "provider": "openai"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+}
+
+#[tokio::test]
+async fn validation_rejects_bad_input() {
+    let base = spawn_server(vec![]).await;
+    let client = reqwest::Client::new();
+
+    // Empty model.
+    let resp = client
+        .post(format!("{base}/v1/events"))
+        .json(&serde_json::json!({"model": "", "provider": "openai"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    // Missing required fields.
+    let resp = client
+        .post(format!("{base}/v1/events"))
+        .json(&serde_json::json!({"model": "gpt-4o"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn metrics_endpoint_works() {
+    let base = spawn_server(vec![]).await;
+    let resp = reqwest::get(format!("{base}/metrics")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let content_type = resp.headers().get("content-type").unwrap().to_str().unwrap();
+    assert!(content_type.contains("text/plain"));
+}

@@ -29,4 +29,9 @@ reqwest = { workspace = true, optional = true }
 tokio   = { workspace = true, optional = true, features = ["fs"] }
 
 [dev-dependencies]
-proptest = "1"
+proptest  = "1"
+criterion = { workspace = true }
+
+[[bench]]
+name    = "pricing_bench"
+harness = false

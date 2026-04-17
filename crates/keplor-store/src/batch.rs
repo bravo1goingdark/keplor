@@ -25,7 +25,7 @@ pub struct BatchConfig {
 
 impl Default for BatchConfig {
     fn default() -> Self {
-        Self { batch_size: 64, flush_interval: Duration::from_millis(10), channel_capacity: 4096 }
+        Self { batch_size: 256, flush_interval: Duration::from_millis(50), channel_capacity: 8192 }
     }
 }
 
@@ -104,12 +104,12 @@ async fn flush_loop(store: Arc<Store>, mut rx: mpsc::Receiver<WriteRequest>, con
                             }
                         }
                         if buffer.len() >= config.batch_size {
-                            flush(&store, &mut buffer);
+                            flush(&store, &mut buffer).await;
                         }
                     },
                     None => {
                         if !buffer.is_empty() {
-                            flush(&store, &mut buffer);
+                            flush(&store, &mut buffer).await;
                         }
                         return;
                     },
@@ -117,37 +117,44 @@ async fn flush_loop(store: Arc<Store>, mut rx: mpsc::Receiver<WriteRequest>, con
             },
             _ = interval.tick() => {
                 if !buffer.is_empty() {
-                    flush(&store, &mut buffer);
+                    flush(&store, &mut buffer).await;
                 }
             },
         }
     }
 }
 
-fn flush(store: &Store, buffer: &mut Vec<WriteRequest>) {
-    let mut pending = std::mem::take(buffer);
+/// Flush buffered writes via `spawn_blocking` so the synchronous SQLite
+/// I/O never blocks a tokio worker thread.
+async fn flush(store: &Arc<Store>, buffer: &mut Vec<WriteRequest>) {
+    let pending = std::mem::take(buffer);
 
-    let batch: Vec<(LlmEvent, Bytes, Bytes)> = pending
-        .iter()
-        .map(|r| (r.event.clone(), r.req_body.clone(), r.resp_body.clone()))
-        .collect();
+    let mut senders: Vec<Option<tokio::sync::oneshot::Sender<Result<EventId, StoreError>>>> =
+        Vec::with_capacity(pending.len());
+    let mut batch: Vec<(LlmEvent, Bytes, Bytes)> = Vec::with_capacity(pending.len());
 
-    let result = store.append_batch(&batch);
+    for req in pending {
+        senders.push(req.result_tx);
+        batch.push((req.event, req.req_body, req.resp_body));
+    }
+
+    let store = Arc::clone(store);
+    let result = tokio::task::spawn_blocking(move || store.append_batch(&batch))
+        .await
+        .unwrap_or_else(|e| Err(StoreError::Compression(e.to_string())));
 
     match result {
         Ok(ids) => {
-            for (req, id) in pending.drain(..).zip(ids) {
-                if let Some(tx) = req.result_tx {
+            for (tx, id) in senders.into_iter().zip(ids) {
+                if let Some(tx) = tx {
                     let _ = tx.send(Ok(id));
                 }
             }
         },
         Err(e) => {
             let msg = e.to_string();
-            for req in pending.drain(..) {
-                if let Some(tx) = req.result_tx {
-                    let _ = tx.send(Err(StoreError::Compression(msg.clone())));
-                }
+            for tx in senders.into_iter().flatten() {
+                let _ = tx.send(Err(StoreError::Compression(msg.clone())));
             }
         },
     }

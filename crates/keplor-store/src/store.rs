@@ -8,9 +8,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 use smol_str::SmolStr;
 
-use keplor_core::{
-    EventFlags, EventId, Latencies, LlmEvent, PayloadRef, Provider, ProviderError, Usage,
-};
+use keplor_core::{EventFlags, EventId, Latencies, LlmEvent, Provider, ProviderError, Usage};
 
 use crate::components::{split_request, split_response, ComponentType};
 use crate::compress::ZstdCoder;
@@ -117,7 +115,8 @@ impl Store {
                 streaming, tool_calls, reasoning, stream_incomplete,
                 error_type, error_message,
                 request_sha256, response_sha256, request_blob_id, response_blob_id,
-                client_ip, user_agent, request_id, trace_id
+                client_ip, user_agent, request_id, trace_id,
+                source, ingested_at
              ) VALUES(
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7,
                 ?8, ?9, ?10, ?11, ?12, ?13,
@@ -126,7 +125,8 @@ impl Store {
                 ?27, ?28, ?29, ?30,
                 ?31, ?32,
                 ?33, ?34, ?35, ?36,
-                ?37, ?38, ?39, ?40
+                ?37, ?38, ?39, ?40,
+                ?41, ?42
              )",
             params![
                 event.id.as_ulid().to_bytes().as_slice(),
@@ -169,6 +169,8 @@ impl Store {
                 event.user_agent.as_deref(),
                 event.request_id.as_deref(),
                 event.trace_id.map(|t| t.to_string()),
+                event.source.as_deref(),
+                event.ingested_at,
             ],
         )?;
 
@@ -220,8 +222,18 @@ impl Store {
         let mut batch_events: Vec<BatchEvent<'_>> = Vec::with_capacity(events.len());
 
         for (event, req_body, resp_body) in events {
-            let request_sha = sha256_bytes(req_body);
-            let response_sha = sha256_bytes(resp_body);
+            // Reuse pre-computed SHAs from LlmEvent when available (non-zero),
+            // avoiding redundant SHA-256 computations on the hot path.
+            let request_sha = if event.request_sha256 != [0u8; 32] {
+                event.request_sha256
+            } else {
+                sha256_bytes(req_body)
+            };
+            let response_sha = if event.response_sha256 != [0u8; 32] {
+                event.response_sha256
+            } else {
+                sha256_bytes(resp_body)
+            };
             let provider_key = event.provider.id_key();
 
             let req_components = split_request(&event.provider, req_body);
@@ -329,7 +341,8 @@ impl Store {
                     streaming, tool_calls, reasoning, stream_incomplete,
                     error_type, error_message,
                     request_sha256, response_sha256, request_blob_id, response_blob_id,
-                    client_ip, user_agent, request_id, trace_id
+                    client_ip, user_agent, request_id, trace_id,
+                    source, ingested_at
                  ) VALUES(
                     ?1, ?2, ?3, ?4, ?5, ?6, ?7,
                     ?8, ?9, ?10, ?11, ?12, ?13,
@@ -338,7 +351,8 @@ impl Store {
                     ?27, ?28, ?29, ?30,
                     ?31, ?32,
                     ?33, ?34, ?35, ?36,
-                    ?37, ?38, ?39, ?40
+                    ?37, ?38, ?39, ?40,
+                    ?41, ?42
                  )",
             )?;
 
@@ -385,6 +399,8 @@ impl Store {
                     e.user_agent.as_deref(),
                     e.request_id.as_deref(),
                     e.trace_id.map(|t| t.to_string()),
+                    e.source.as_deref(),
+                    e.ingested_at,
                 ])?;
             }
         }
@@ -406,8 +422,7 @@ impl Store {
         Ok(batch_events.iter().map(|be| be.event.id).collect())
     }
 
-    /// Check existence first (cheap), skip compression on dedup hits.
-    /// On miss: compress then INSERT ON CONFLICT for race safety.
+    /// Single-trip INSERT ON CONFLICT: compress + insert, dedup on conflict.
     fn upsert_blob(
         &self,
         conn: &Connection,
@@ -416,39 +431,25 @@ impl Store {
         component_type: &str,
         provider: &str,
     ) -> Result<(), StoreError> {
-        let exists: bool = conn
-            .query_row("SELECT 1 FROM payload_blobs WHERE sha256 = ?1", [&sha[..]], |_| Ok(true))
-            .optional()?
-            .unwrap_or(false);
-
-        if exists {
-            conn.execute(
-                "UPDATE payload_blobs SET refcount = refcount + 1, hit_count = hit_count + 1
-                 WHERE sha256 = ?1",
-                [&sha[..]],
-            )?;
-        } else {
-            let compressed = self.coder.compress(data, None)?;
-            conn.execute(
-                "INSERT INTO payload_blobs(
-                    sha256, component_type, provider, compression, dict_id,
-                    uncompressed_size, compressed_size, refcount, hit_count,
-                    data, first_seen_at
-                 ) VALUES(?1, ?2, ?3, 'zstd_raw', NULL, ?4, ?5, 1, 0, ?6, strftime('%s','now'))
-                 ON CONFLICT(sha256) DO UPDATE SET
-                    refcount = refcount + 1,
-                    hit_count = hit_count + 1",
-                params![
-                    &sha[..],
-                    component_type,
-                    provider,
-                    data.len() as i64,
-                    compressed.len() as i64,
-                    &compressed[..],
-                ],
-            )?;
-        }
-
+        let compressed = self.coder.compress(data, None)?;
+        conn.execute(
+            "INSERT INTO payload_blobs(
+                sha256, component_type, provider, compression, dict_id,
+                uncompressed_size, compressed_size, refcount, hit_count,
+                data, first_seen_at
+             ) VALUES(?1, ?2, ?3, 'zstd_raw', NULL, ?4, ?5, 1, 0, ?6, strftime('%s','now'))
+             ON CONFLICT(sha256) DO UPDATE SET
+                refcount = refcount + 1,
+                hit_count = hit_count + 1",
+            params![
+                &sha[..],
+                component_type,
+                provider,
+                data.len() as i64,
+                compressed.len() as i64,
+                &compressed[..],
+            ],
+        )?;
         Ok(())
     }
 
@@ -502,8 +503,8 @@ impl Store {
         sql.push_str("SELECT * FROM llm_events WHERE 1=1");
 
         // Fixed-size storage for bind values avoids heap allocation per
-        // filter predicate.  Maximum 7 predicates (6 filter fields + cursor).
-        let mut bind_storage: [Option<Box<dyn rusqlite::types::ToSql>>; 7] = Default::default();
+        // filter predicate.  Maximum 8 predicates (7 filter fields + cursor).
+        let mut bind_storage: [Option<Box<dyn rusqlite::types::ToSql>>; 8] = Default::default();
         let mut idx = 0usize;
 
         macro_rules! add_filter {
@@ -520,6 +521,7 @@ impl Store {
         add_filter!("api_key_id", filter.api_key_id);
         add_filter!("model", filter.model);
         add_filter!("provider", filter.provider);
+        add_filter!("source", filter.source);
 
         if let Some(from) = filter.from_ts_ns {
             idx += 1;
@@ -667,102 +669,130 @@ fn sha256_bytes(data: &[u8]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
+/// Column indices for SELECT * FROM llm_events.  Using positional access
+/// avoids a per-column string lookup on every row.
+mod col {
+    pub const ID: usize = 0;
+    pub const TS_NS: usize = 1;
+    pub const USER_ID: usize = 2;
+    pub const API_KEY_ID: usize = 3;
+    pub const ORG_ID: usize = 4;
+    pub const PROJECT_ID: usize = 5;
+    pub const ROUTE_ID: usize = 6;
+    pub const PROVIDER: usize = 7;
+    pub const MODEL: usize = 8;
+    pub const MODEL_FAMILY: usize = 9;
+    pub const ENDPOINT: usize = 10;
+    pub const METHOD: usize = 11;
+    pub const HTTP_STATUS: usize = 12;
+    pub const INPUT_TOKENS: usize = 13;
+    pub const OUTPUT_TOKENS: usize = 14;
+    pub const CACHE_READ: usize = 15;
+    pub const CACHE_CREATION: usize = 16;
+    pub const REASONING: usize = 17;
+    pub const AUDIO_IN: usize = 18;
+    pub const AUDIO_OUT: usize = 19;
+    pub const IMAGE: usize = 20;
+    pub const TOOL_USE: usize = 21;
+    pub const COST: usize = 22;
+    pub const TTFT: usize = 23;
+    pub const TOTAL_MS: usize = 24;
+    pub const CLOSE_MS: usize = 25;
+    pub const STREAMING: usize = 26;
+    pub const TOOL_CALLS: usize = 27;
+    pub const REASONING_FLAG: usize = 28;
+    pub const INCOMPLETE: usize = 29;
+    pub const ERR_TYPE: usize = 30;
+    pub const ERR_MSG: usize = 31;
+    pub const REQ_SHA: usize = 32;
+    pub const RESP_SHA: usize = 33;
+    // 34, 35 = request_blob_id, response_blob_id (not read by row_to_event)
+    pub const CLIENT_IP: usize = 36;
+    pub const USER_AGENT: usize = 37;
+    pub const REQ_ID: usize = 38;
+    pub const TRACE_ID: usize = 39;
+    pub const SOURCE: usize = 40;
+    pub const INGESTED_AT: usize = 41;
+}
+
 fn row_to_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<LlmEvent> {
-    let id_bytes: Vec<u8> = row.get("id")?;
+    let id_bytes: Vec<u8> = row.get(col::ID)?;
     let id_arr: [u8; 16] = id_bytes.try_into().map_err(|_| {
         rusqlite::Error::InvalidColumnType(0, "id".into(), rusqlite::types::Type::Blob)
     })?;
 
-    let provider_str: String = row.get("provider")?;
-    let method_str: String = row.get("method")?;
+    let provider_str: String = row.get(col::PROVIDER)?;
+    let method_str: String = row.get(col::METHOD)?;
 
-    let error_type: Option<String> = row.get("error_type")?;
-    let error_message: Option<String> = row.get("error_message")?;
+    let error_type: Option<String> = row.get(col::ERR_TYPE)?;
+    let error_message: Option<String> = row.get(col::ERR_MSG)?;
 
     let flags = {
         let mut f = EventFlags::empty();
-        if row.get::<_, i64>("streaming")? != 0 {
+        if row.get::<_, i64>(col::STREAMING)? != 0 {
             f |= EventFlags::STREAMING;
         }
-        if row.get::<_, i64>("tool_calls")? != 0 {
+        if row.get::<_, i64>(col::TOOL_CALLS)? != 0 {
             f |= EventFlags::TOOL_CALLS;
         }
-        if row.get::<_, i64>("reasoning")? != 0 {
+        if row.get::<_, i64>(col::REASONING_FLAG)? != 0 {
             f |= EventFlags::REASONING;
         }
-        if row.get::<_, i64>("stream_incomplete")? != 0 {
+        if row.get::<_, i64>(col::INCOMPLETE)? != 0 {
             f |= EventFlags::STREAM_INCOMPLETE;
         }
         f
     };
 
-    let request_sha256: Vec<u8> = row.get("request_sha256")?;
-    let response_sha256: Vec<u8> = row.get("response_sha256")?;
+    let request_sha256: Vec<u8> = row.get(col::REQ_SHA)?;
+    let response_sha256: Vec<u8> = row.get(col::RESP_SHA)?;
 
-    let client_ip_str: Option<String> = row.get("client_ip")?;
-    let trace_id_str: Option<String> = row.get("trace_id")?;
+    let client_ip_str: Option<String> = row.get(col::CLIENT_IP)?;
+    let trace_id_str: Option<String> = row.get(col::TRACE_ID)?;
 
     Ok(LlmEvent {
         id: EventId(ulid::Ulid::from_bytes(id_arr)),
-        ts_ns: row.get("ts_ns")?,
-        user_id: row.get::<_, Option<String>>("user_id")?.map(|s| s.as_str().into()),
-        api_key_id: row.get::<_, Option<String>>("api_key_id")?.map(|s| s.as_str().into()),
-        org_id: row.get::<_, Option<String>>("org_id")?.map(|s| s.as_str().into()),
-        project_id: row.get::<_, Option<String>>("project_id")?.map(|s| s.as_str().into()),
-        route_id: row.get::<_, Option<String>>("route_id")?.unwrap_or_default().as_str().into(),
-        provider: provider_from_str(&provider_str),
-        model: SmolStr::new(row.get::<_, String>("model")?),
-        model_family: row.get::<_, Option<String>>("model_family")?.map(SmolStr::new),
-        endpoint: SmolStr::new(row.get::<_, String>("endpoint")?),
+        ts_ns: row.get(col::TS_NS)?,
+        user_id: row.get::<_, Option<String>>(col::USER_ID)?.map(|s| s.as_str().into()),
+        api_key_id: row.get::<_, Option<String>>(col::API_KEY_ID)?.map(|s| s.as_str().into()),
+        org_id: row.get::<_, Option<String>>(col::ORG_ID)?.map(|s| s.as_str().into()),
+        project_id: row.get::<_, Option<String>>(col::PROJECT_ID)?.map(|s| s.as_str().into()),
+        route_id: row.get::<_, Option<String>>(col::ROUTE_ID)?.unwrap_or_default().as_str().into(),
+        provider: Provider::from_id_key(&provider_str),
+        model: SmolStr::new(row.get::<_, String>(col::MODEL)?),
+        model_family: row.get::<_, Option<String>>(col::MODEL_FAMILY)?.map(SmolStr::new),
+        endpoint: SmolStr::new(row.get::<_, String>(col::ENDPOINT)?),
         method: http::Method::from_bytes(method_str.as_bytes()).unwrap_or(http::Method::POST),
-        http_status: row.get::<_, Option<i64>>("http_status")?.map(|s| s as u16),
+        http_status: row.get::<_, Option<i64>>(col::HTTP_STATUS)?.map(|s| s as u16),
         usage: Usage {
-            input_tokens: row.get::<_, i64>("input_tokens")? as u32,
-            output_tokens: row.get::<_, i64>("output_tokens")? as u32,
-            cache_read_input_tokens: row.get::<_, i64>("cache_read_input_tokens")? as u32,
-            cache_creation_input_tokens: row.get::<_, i64>("cache_creation_input_tokens")? as u32,
-            reasoning_tokens: row.get::<_, i64>("reasoning_tokens")? as u32,
-            audio_input_tokens: row.get::<_, i64>("audio_input_tokens")? as u32,
-            audio_output_tokens: row.get::<_, i64>("audio_output_tokens")? as u32,
-            image_tokens: row.get::<_, i64>("image_tokens")? as u32,
-            tool_use_tokens: row.get::<_, i64>("tool_use_tokens")? as u32,
+            input_tokens: row.get::<_, i64>(col::INPUT_TOKENS)? as u32,
+            output_tokens: row.get::<_, i64>(col::OUTPUT_TOKENS)? as u32,
+            cache_read_input_tokens: row.get::<_, i64>(col::CACHE_READ)? as u32,
+            cache_creation_input_tokens: row.get::<_, i64>(col::CACHE_CREATION)? as u32,
+            reasoning_tokens: row.get::<_, i64>(col::REASONING)? as u32,
+            audio_input_tokens: row.get::<_, i64>(col::AUDIO_IN)? as u32,
+            audio_output_tokens: row.get::<_, i64>(col::AUDIO_OUT)? as u32,
+            image_tokens: row.get::<_, i64>(col::IMAGE)? as u32,
+            tool_use_tokens: row.get::<_, i64>(col::TOOL_USE)? as u32,
             ..Usage::default()
         },
-        cost_nanodollars: row.get("cost_nanodollars")?,
+        cost_nanodollars: row.get(col::COST)?,
         latency: Latencies {
-            ttft_ms: row.get::<_, Option<i64>>("latency_ttft_ms")?.map(|v| v as u32),
-            total_ms: row.get::<_, i64>("latency_total_ms")? as u32,
-            time_to_close_ms: row.get::<_, Option<i64>>("time_to_close_ms")?.map(|v| v as u32),
+            ttft_ms: row.get::<_, Option<i64>>(col::TTFT)?.map(|v| v as u32),
+            total_ms: row.get::<_, i64>(col::TOTAL_MS)? as u32,
+            time_to_close_ms: row.get::<_, Option<i64>>(col::CLOSE_MS)?.map(|v| v as u32),
         },
         flags,
         error: error_type.map(|t| error_from_stored(&t, error_message.as_deref())),
-        request_ref: PayloadRef::empty_inline(),
-        response_ref: PayloadRef::empty_inline(),
         request_sha256: request_sha256.try_into().unwrap_or([0u8; 32]),
         response_sha256: response_sha256.try_into().unwrap_or([0u8; 32]),
         client_ip: client_ip_str.and_then(|s| s.parse().ok()),
-        user_agent: row.get::<_, Option<String>>("user_agent")?.map(SmolStr::new),
-        request_id: row.get::<_, Option<String>>("request_id")?.map(SmolStr::new),
+        user_agent: row.get::<_, Option<String>>(col::USER_AGENT)?.map(SmolStr::new),
+        request_id: row.get::<_, Option<String>>(col::REQ_ID)?.map(SmolStr::new),
         trace_id: trace_id_str.and_then(|s| s.parse().ok()),
+        source: row.get::<_, Option<String>>(col::SOURCE)?.map(SmolStr::new),
+        ingested_at: row.get::<_, Option<i64>>(col::INGESTED_AT)?.unwrap_or(0),
     })
-}
-
-fn provider_from_str(s: &str) -> Provider {
-    match s {
-        "openai" => Provider::OpenAI,
-        "anthropic" => Provider::Anthropic,
-        "gemini" => Provider::Gemini,
-        "gemini_vertex" => Provider::GeminiVertex,
-        "bedrock" => Provider::Bedrock,
-        "azure_openai" => Provider::AzureOpenAI,
-        "mistral" => Provider::Mistral,
-        "groq" => Provider::Groq,
-        "xai" => Provider::XAi,
-        "deepseek" => Provider::DeepSeek,
-        "cohere" => Provider::Cohere,
-        "ollama" => Provider::Ollama,
-        other => Provider::OpenAICompatible { base_url: std::sync::Arc::from(other) },
-    }
 }
 
 fn error_type_str(e: &ProviderError) -> &'static str {
@@ -817,14 +847,14 @@ mod tests {
             latency: Latencies { ttft_ms: Some(25), total_ms: 300, time_to_close_ms: None },
             flags: EventFlags::STREAMING,
             error: None,
-            request_ref: PayloadRef::empty_inline(),
-            response_ref: PayloadRef::empty_inline(),
             request_sha256: [0u8; 32],
             response_sha256: [0u8; 32],
             client_ip: Some("127.0.0.1".parse().unwrap()),
             user_agent: Some(SmolStr::new("test/1.0")),
             request_id: Some(SmolStr::new("req_abc")),
             trace_id: None,
+            source: None,
+            ingested_at: 0,
         }
     }
 

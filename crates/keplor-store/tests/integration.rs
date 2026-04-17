@@ -30,14 +30,14 @@ fn make_event(i: usize) -> LlmEvent {
         latency: Latencies { ttft_ms: Some(25), total_ms: 300, time_to_close_ms: None },
         flags: EventFlags::STREAMING,
         error: None,
-        request_ref: PayloadRef::empty_inline(),
-        response_ref: PayloadRef::empty_inline(),
         request_sha256: [0u8; 32],
         response_sha256: [0u8; 32],
         client_ip: None,
         user_agent: None,
         request_id: None,
         trace_id: None,
+        source: None,
+        ingested_at: 0,
     }
 }
 

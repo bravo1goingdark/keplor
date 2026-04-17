@@ -29,8 +29,13 @@ ulid        = { workspace = true }
 http        = "1"
 tracing     = { workspace = true }
 zstd        = { workspace = true }
-tokio       = { workspace = true, optional = true, features = ["sync", "time", "rt"] }
+tokio       = { workspace = true, optional = true, features = ["sync", "time", "rt", "macros"] }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
-rand  = "0.8"
+tokio     = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
+rand      = "0.8"
+criterion = { workspace = true }
+
+[[bench]]
+name    = "store_bench"
+harness = false

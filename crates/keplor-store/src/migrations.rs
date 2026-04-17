@@ -5,7 +5,8 @@ use rusqlite::Connection;
 use crate::error::StoreError;
 
 /// All migrations in order.  Each entry is `(version, sql)`.
-static MIGRATIONS: &[(u32, &str)] = &[(1, MIGRATION_0001)];
+static MIGRATIONS: &[(u32, &str)] =
+    &[(1, MIGRATION_0001), (2, MIGRATION_0002), (3, MIGRATION_0003)];
 
 const MIGRATION_0001: &str = r"
 CREATE TABLE IF NOT EXISTS schema_version(
@@ -81,6 +82,17 @@ CREATE TABLE daily_rollups (
 ) STRICT;
 ";
 
+const MIGRATION_0002: &str = r"
+ALTER TABLE llm_events ADD COLUMN source TEXT;
+ALTER TABLE llm_events ADD COLUMN ingested_at INTEGER;
+CREATE INDEX idx_events_source ON llm_events(source);
+";
+
+const MIGRATION_0003: &str = r"
+CREATE INDEX IF NOT EXISTS idx_events_provider_ts ON llm_events(provider, ts_ns);
+CREATE INDEX IF NOT EXISTS idx_events_source_ts ON llm_events(source, ts_ns);
+";
+
 /// Apply all unapplied migrations.
 pub(crate) fn migrate(conn: &Connection) -> Result<(), StoreError> {
     conn.execute_batch(
@@ -118,7 +130,9 @@ pub(crate) fn apply_pragmas(conn: &Connection) -> Result<(), StoreError> {
         "PRAGMA journal_mode=WAL;
          PRAGMA synchronous=NORMAL;
          PRAGMA mmap_size=268435456;
-         PRAGMA busy_timeout=5000;",
+         PRAGMA busy_timeout=5000;
+         PRAGMA cache_size=-64000;
+         PRAGMA temp_store=MEMORY;",
     )?;
     Ok(())
 }
@@ -133,7 +147,7 @@ mod tests {
         migrate(&conn).unwrap();
         let ver: u32 =
             conn.query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(ver, 1);
+        assert_eq!(ver, 3);
     }
 
     #[test]
@@ -143,7 +157,7 @@ mod tests {
         migrate(&conn).unwrap();
         let ver: u32 =
             conn.query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(ver, 1);
+        assert_eq!(ver, 3);
     }
 
     #[test]

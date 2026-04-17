@@ -15,8 +15,8 @@ use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
 
 use crate::{
-    ApiKeyId, CoreError, EventFlags, EventId, OrgId, PayloadRef, ProjectId, Provider,
-    ProviderError, RouteId, Usage, UserId,
+    ApiKeyId, CoreError, EventFlags, EventId, OrgId, ProjectId, Provider, ProviderError, RouteId,
+    Usage, UserId,
 };
 
 /// The canonical captured-request record.  One row in `llm_events`.
@@ -59,13 +59,7 @@ pub struct LlmEvent {
     pub flags: EventFlags,
     /// Normalised upstream error, if any.
     pub error: Option<ProviderError>,
-    /// Pointer to the captured request body.
-    pub request_ref: PayloadRef,
-    /// Pointer to the captured response body.
-    pub response_ref: PayloadRef,
-    /// SHA-256 of the raw (pre-compression) request bytes.  Stored
-    /// alongside [`LlmEvent::request_ref`] so integrity checks don't
-    /// require decompression.
+    /// SHA-256 of the raw (pre-compression) request bytes.
     pub request_sha256: [u8; 32],
     /// SHA-256 of the raw response bytes.
     pub response_sha256: [u8; 32],
@@ -78,6 +72,11 @@ pub struct LlmEvent {
     pub request_id: Option<SmolStr>,
     /// W3C trace context id, if the request carried one.
     pub trace_id: Option<TraceId>,
+    /// Identifier for the system that sent this event (e.g. `"litellm"`,
+    /// `"openrouter"`, `"custom-gateway"`).
+    pub source: Option<SmolStr>,
+    /// Wall-clock time in nanoseconds when Keplor ingested this event.
+    pub ingested_at: i64,
 }
 
 /// Three-dimensional latency breakdown.
@@ -234,14 +233,14 @@ mod tests {
             latency: Latencies::default(),
             flags: EventFlags::empty(),
             error: None,
-            request_ref: PayloadRef::empty_inline(),
-            response_ref: PayloadRef::empty_inline(),
             request_sha256: [0u8; 32],
             response_sha256: [0u8; 32],
             client_ip: None,
             user_agent: None,
             request_id: None,
             trace_id: None,
+            source: None,
+            ingested_at: 0,
         };
         let e2 = e.clone();
         assert_eq!(e.id, e2.id);

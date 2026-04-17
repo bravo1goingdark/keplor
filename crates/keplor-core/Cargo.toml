@@ -13,21 +13,14 @@ publish      = { workspace = true }
 workspace = true
 
 [dependencies]
-# Workspace-pinned (extend features where this crate needs more).
 thiserror  = { workspace = true }
 serde      = { workspace = true, features = ["derive", "rc"] }
 serde_json = { workspace = true }
-bytes      = { workspace = true, features = ["serde"] }
 ulid       = { workspace = true, features = ["serde"] }
-sha2       = { workspace = true }
 
-# Crate-local deps (not yet promoted to the workspace deps table; kept here
-# until another crate also needs them, per CLAUDE.md workspace-dep rules).
 http     = "1"
 smol_str = { version = "0.3", features = ["serde"] }
 bitflags = { version = "2", features = ["serde"] }
-url      = { version = "2", features = ["serde"] }
 hex      = "0.4"
 
 [dev-dependencies]
-insta = { workspace = true }
