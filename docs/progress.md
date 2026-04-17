@@ -19,6 +19,87 @@ Format for each entry:
 
 <!-- Append entries below this line. Most recent on top. -->
 
+## 2026-04-17 — Phase 1 complete
+
+### What was built
+
+`keplor-core` filled in, 10 modules:
+
+| Module         | Public items                                                                             |
+|----------------|------------------------------------------------------------------------------------------|
+| `id`           | `EventId(Ulid)`, `UserId`, `ApiKeyId`, `OrgId`, `ProjectId`, `RouteId`, `ProviderId`     |
+| `provider`     | `Provider` enum + `canonical_host`, `id_key`, `auth_header_name`, `from_host_path`       |
+| `usage`        | `Usage` + `merge`, `total_billable_input_tokens`, `total_output_tokens`                  |
+| `cost`         | `Cost(i64)` nanodollars + `Display`, `Add`/`Sub`/`AddAssign`/`SubAssign`/`Neg`/`Sum`     |
+| `error`        | `CoreError`, `ProviderError` + `from_provider_response`                                  |
+| `payload_ref`  | `PayloadRef`, `PayloadStorage`, `Compression`, `BlobId`, `DictId`                        |
+| `flags`        | `EventFlags` bitflags                                                                    |
+| `sanitize`     | `sanitize_headers` (whitelist + hard denylist)                                           |
+| `event`        | `LlmEvent`, `Latencies`, `TraceId` (32-hex-char serde)                                   |
+| `lib`          | Flat re-exports; `#![deny(missing_docs)]`                                                |
+
+### Acceptance
+
+- `cargo test -p keplor-core --locked` → **68 passed**, 0 failed.
+- `cargo clippy -p keplor-core --all-targets --locked -- -D warnings` → green.
+- `cargo fmt --all -- --check` → green.
+- `cargo clippy --workspace --all-targets --locked -- -D warnings` → green (stub crates untouched).
+- No other crate modified.
+
+### Test coverage by required area
+
+| Required                                     | Tests |
+|----------------------------------------------|-------|
+| `Usage::merge` (saturating, delta-accum)     | 3     |
+| `Usage::total_billable_input_tokens`         | 4 (OpenAI/Azure, Anthropic/Bedrock, Gemini+Vertex, Ollama + 5 others) |
+| `ProviderError::from_provider_response`      | 11 (OpenAI 429/400/context/filter, Anthropic nested, overloaded, Bedrock `__type`, Gemini `status`, Cohere text, Ollama, non-JSON, UTF-8 truncation) |
+| `Provider::from_host_path` battery           | 1 table-test × 17 hosts                                              |
+| `sanitize_headers` battery                   | 5 (strips auth/keys/cookies/SigV4, preserves whitelist, rejects unknown, multi-value preserved, denylist self-check) |
+
+Plus rail tests for `Cost` display / arithmetic / saturation (10), `TraceId`
+round-trip (5), `EventFlags` (4), `PayloadRef` (4), ID round-trips (6),
+`Latencies` (2), `LlmEvent` clone smoke (1).
+
+### Deviations / notes
+
+- **Promoted `serde_json` from dev-deps to runtime deps** of `keplor-core`
+  for `ProviderError::from_provider_response`'s best-effort JSON error
+  parser. The phase spec implies this without saying it explicitly. The
+  normaliser is pure logic — no I/O — and fits the "anchor of the
+  dependency graph" constraint.
+- **`LlmEvent` is not serde-derived.** `http::Method` has no stable serde
+  impl; adding one would couple the wire format to an upstream crate
+  version. Phase 3 (storage) adds a dedicated `StoredEvent` wire type
+  that maps method → `SmolStr`.
+- **Four deps kept crate-local** (not promoted to `[workspace.dependencies]`,
+  per CLAUDE.md rule): `http`, `smol_str`, `bitflags`, `url`, `hex`. They
+  will move to workspace-level in a future phase once a second crate
+  uses them — at which point they need the user's sign-off.
+- **`ProviderId` interpretation.** The phase spec lists it as an ID type,
+  which is ambiguous given the existing `Provider` enum. Implemented as a
+  stable `SmolStr` storage key (`"openai"`, `"anthropic"`, …) so
+  historical events keep a stable join key even if new variants land in
+  the `Provider` enum.
+- **`cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))`** at
+  the crate root — the workspace lints ban `.unwrap()` in runtime code,
+  but tests are allowed to panic freely. Applied via `cfg_attr` so it
+  does not affect the production build.
+- **`#![deny(missing_docs)]`** at crate root enforces every public item
+  has rustdoc.
+
+### Deferred to later phases
+
+- The `sanitize_headers` whitelist is a safe starter set; provider-specific
+  response headers (full OpenAI `openai-*` response series, full Groq
+  `x-groq-*`, Azure `x-ms-*`) will be extended in phase 5 alongside the
+  provider adapters that surface them.
+- `ProviderError::from_provider_response` has a best-effort `context_limit`
+  extractor but doesn't yet try every provider's quirky limit-reporting
+  path — good enough for phase 2's cost tests, extended per-provider in
+  phase 5/7.
+
+---
+
 ## 2026-04-17 — Phase 0 complete
 
 ### What was built
