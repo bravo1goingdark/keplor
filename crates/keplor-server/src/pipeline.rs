@@ -51,6 +51,7 @@ impl Pipeline {
         event: IngestEvent,
         authenticated_key_id: Option<&str>,
     ) -> Result<IngestResponse, ServerError> {
+        let start = std::time::Instant::now();
         let (llm_event, req_bytes, resp_bytes, provider, model, cost) =
             self.process_event(event, authenticated_key_id)?;
 
@@ -65,6 +66,8 @@ impl Pipeline {
             ServerError::from(e)
         })?;
 
+        let elapsed = start.elapsed();
+        metrics::histogram!("keplor_ingest_duration_seconds").record(elapsed.as_secs_f64());
         self.emit_metrics(&provider, &model);
 
         Ok(IngestResponse {
@@ -162,6 +165,11 @@ impl Pipeline {
     /// Shared store handle for `spawn_blocking` closures.
     pub fn store_arc(&self) -> Arc<Store> {
         Arc::clone(&self.store)
+    }
+
+    /// Shared batch writer handle (for shutdown draining).
+    pub fn writer_arc(&self) -> Arc<BatchWriter> {
+        Arc::clone(&self.writer)
     }
 
     #[inline]

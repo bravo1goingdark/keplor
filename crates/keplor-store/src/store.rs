@@ -1267,6 +1267,16 @@ impl Store {
         )?;
         Ok(total)
     }
+
+    /// Run a WAL checkpoint to truncate the write-ahead log.
+    ///
+    /// Prevents the WAL file from growing unbounded under sustained
+    /// write load. Safe to call while readers are active.
+    pub fn wal_checkpoint(&self) -> Result<(), StoreError> {
+        let conn = self.write_conn()?;
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+        Ok(())
+    }
 }
 
 struct PreparedBlob {

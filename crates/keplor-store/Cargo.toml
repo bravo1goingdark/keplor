@@ -14,7 +14,7 @@ workspace = true
 
 [features]
 default = ["batch"]
-batch   = ["dep:tokio"]
+batch   = ["dep:tokio", "dep:metrics"]
 
 [dependencies]
 keplor-core = { path = "../keplor-core" }
@@ -30,6 +30,7 @@ http        = "1"
 tracing     = { workspace = true }
 zstd        = { workspace = true }
 tokio       = { workspace = true, optional = true, features = ["sync", "time", "rt", "macros"] }
+metrics     = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio     = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }

@@ -34,8 +34,12 @@ impl Default for BatchConfig {
 /// Callers send events via [`BatchWriter::write`]. A background task
 /// accumulates them and flushes in bulk transactions, amortising
 /// `BEGIN`/`COMMIT` and prepared-statement overhead across many events.
+///
+/// On shutdown, call [`BatchWriter::shutdown`] to drain all pending
+/// events before the process exits.
 pub struct BatchWriter {
     tx: mpsc::Sender<WriteRequest>,
+    flush_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 struct WriteRequest {
@@ -48,11 +52,12 @@ struct WriteRequest {
 impl BatchWriter {
     /// Spawn a new batch writer backed by `store`.
     ///
-    /// The background flush task runs until all senders are dropped.
+    /// The background flush task runs until [`BatchWriter::shutdown`] is
+    /// called or all senders are dropped.
     pub fn new(store: Arc<Store>, config: BatchConfig) -> Self {
         let (tx, rx) = mpsc::channel(config.channel_capacity);
-        tokio::spawn(flush_loop(store, rx, config));
-        Self { tx }
+        let flush_handle = tokio::spawn(flush_loop(store, rx, config));
+        Self { tx, flush_handle: Some(flush_handle) }
     }
 
     /// Submit an event for batched writing.
@@ -83,6 +88,24 @@ impl BatchWriter {
             .try_send(WriteRequest { event, req_body, resp_body, result_tx: None })
             .map_err(|_| StoreError::Compression("batch writer channel full".into()))
     }
+
+    /// Wait for the flush loop to finish after the channel is closed.
+    ///
+    /// The channel closes when all `Sender` clones are dropped. The
+    /// flush loop will drain remaining events and exit.
+    pub async fn closed(&self) {
+        self.tx.closed().await;
+    }
+}
+
+impl Drop for BatchWriter {
+    fn drop(&mut self) {
+        // When the BatchWriter is dropped, the tx Sender is also dropped,
+        // which closes the channel and causes the flush_loop to drain.
+        // The JoinHandle is dropped too — the flush task will finish in
+        // the background if the runtime is still alive.
+        drop(self.flush_handle.take());
+    }
 }
 
 async fn flush_loop(store: Arc<Store>, mut rx: mpsc::Receiver<WriteRequest>, config: BatchConfig) {
@@ -108,9 +131,12 @@ async fn flush_loop(store: Arc<Store>, mut rx: mpsc::Receiver<WriteRequest>, con
                         }
                     },
                     None => {
+                        // Channel closed — drain remaining events.
                         if !buffer.is_empty() {
+                            tracing::info!(events = buffer.len(), "draining batch writer on shutdown");
                             flush(&store, &mut buffer).await;
                         }
+                        tracing::info!("batch writer shut down cleanly");
                         return;
                     },
                 }
@@ -128,6 +154,7 @@ async fn flush_loop(store: Arc<Store>, mut rx: mpsc::Receiver<WriteRequest>, con
 /// I/O never blocks a tokio worker thread.
 async fn flush(store: &Arc<Store>, buffer: &mut Vec<WriteRequest>) {
     let pending = std::mem::take(buffer);
+    let count = pending.len();
 
     let mut senders: Vec<Option<tokio::sync::oneshot::Sender<Result<EventId, StoreError>>>> =
         Vec::with_capacity(pending.len());
@@ -145,6 +172,8 @@ async fn flush(store: &Arc<Store>, buffer: &mut Vec<WriteRequest>) {
 
     match result {
         Ok(ids) => {
+            metrics::counter!("keplor_batch_flushes_total").increment(1);
+            metrics::counter!("keplor_batch_events_flushed_total").increment(count as u64);
             for (tx, id) in senders.into_iter().zip(ids) {
                 if let Some(tx) = tx {
                     let _ = tx.send(Ok(id));
@@ -152,7 +181,9 @@ async fn flush(store: &Arc<Store>, buffer: &mut Vec<WriteRequest>) {
             }
         },
         Err(e) => {
+            metrics::counter!("keplor_batch_flush_errors_total").increment(1);
             let msg = e.to_string();
+            tracing::error!(events = count, error = %msg, "batch flush failed");
             for tx in senders.into_iter().flatten() {
                 let _ = tx.send(Err(StoreError::Compression(msg.clone())));
             }

@@ -19,7 +19,7 @@ keplor-store   = { path = "../keplor-store" }
 
 tokio      = { workspace = true, features = ["rt-multi-thread", "net", "signal", "sync", "macros", "time"] }
 axum       = { workspace = true, features = ["json"] }
-tower      = { workspace = true, features = ["util"] }
+tower      = { workspace = true, features = ["util", "timeout", "limit"] }
 tower-http = { version = "0.6", features = ["trace", "cors", "limit"] }
 bytes      = { workspace = true }
 serde      = { workspace = true }

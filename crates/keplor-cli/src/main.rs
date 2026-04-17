@@ -15,6 +15,9 @@ enum Cli {
         /// Path to config file (TOML).
         #[arg(short, long, default_value = "keplor.toml")]
         config: PathBuf,
+        /// Emit structured JSON logs (for log aggregation systems).
+        #[arg(long)]
+        json_logs: bool,
     },
     /// Run database migrations.
     Migrate {
@@ -73,7 +76,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli {
-        Cli::Run { config } => run_server(config),
+        Cli::Run { config, json_logs } => run_server(config, json_logs),
         Cli::Migrate { db } => migrate(db),
         Cli::Query { user_id, model, provider, source, limit, db } => {
             query(db, user_id, model, provider, source, limit)
@@ -84,8 +87,8 @@ fn main() -> Result<()> {
     }
 }
 
-fn run_server(config_path: PathBuf) -> Result<()> {
-    init_tracing();
+fn run_server(config_path: PathBuf, json_logs: bool) -> Result<()> {
+    init_tracing(json_logs);
 
     let config = if config_path.exists() {
         keplor_server::ServerConfig::load(&config_path)
@@ -146,7 +149,7 @@ fn run_server(config_path: PathBuf) -> Result<()> {
 }
 
 fn migrate(db: PathBuf) -> Result<()> {
-    init_tracing();
+    init_tracing(false);
     let _store = keplor_store::Store::open(&db)
         .with_context(|| format!("failed to open/migrate db at {}", db.display()))?;
     println!("migrations applied to {}", db.display());
@@ -231,7 +234,7 @@ fn stats(db: PathBuf) -> Result<()> {
 }
 
 fn gc(db: PathBuf, older_than_days: u32) -> Result<()> {
-    init_tracing();
+    init_tracing(false);
     let store = keplor_store::Store::open(&db)
         .with_context(|| format!("failed to open db at {}", db.display()))?;
 
@@ -252,7 +255,7 @@ fn gc(db: PathBuf, older_than_days: u32) -> Result<()> {
 }
 
 fn rollup(db: PathBuf, days: u32) -> Result<()> {
-    init_tracing();
+    init_tracing(false);
     let store = keplor_store::Store::open(&db)
         .with_context(|| format!("failed to open db at {}", db.display()))?;
 
@@ -271,8 +274,12 @@ fn rollup(db: PathBuf, days: u32) -> Result<()> {
     Ok(())
 }
 
-fn init_tracing() {
+fn init_tracing(json: bool) {
     use tracing_subscriber::EnvFilter;
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    tracing_subscriber::fmt().with_env_filter(filter).init();
+    if json {
+        tracing_subscriber::fmt().json().with_env_filter(filter).init();
+    } else {
+        tracing_subscriber::fmt().with_env_filter(filter).init();
+    }
 }

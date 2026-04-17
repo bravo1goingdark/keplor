@@ -25,13 +25,22 @@ pub struct ServerConfig {
 pub struct ListenConfig {
     /// Address to bind to.
     pub listen_addr: SocketAddr,
-    /// Graceful shutdown timeout in seconds.
+    /// Graceful shutdown timeout in seconds (drain batch writer + checkpoint).
     pub shutdown_timeout_secs: u64,
+    /// Per-request timeout in seconds. Slow requests are dropped with 408.
+    pub request_timeout_secs: u64,
+    /// Maximum concurrent connections. Beyond this, requests queue.
+    pub max_connections: usize,
 }
 
 impl Default for ListenConfig {
     fn default() -> Self {
-        Self { listen_addr: ([0, 0, 0, 0], 8080).into(), shutdown_timeout_secs: 25 }
+        Self {
+            listen_addr: ([0, 0, 0, 0], 8080).into(),
+            shutdown_timeout_secs: 25,
+            request_timeout_secs: 30,
+            max_connections: 10_000,
+        }
     }
 }
 
@@ -41,11 +50,15 @@ impl Default for ListenConfig {
 pub struct StorageConfig {
     /// Path to the SQLite database file.
     pub db_path: PathBuf,
+    /// Automatic GC: delete events older than this many days. 0 = disabled.
+    pub retention_days: u64,
+    /// WAL checkpoint interval in seconds. 0 = disabled.
+    pub wal_checkpoint_secs: u64,
 }
 
 impl Default for StorageConfig {
     fn default() -> Self {
-        Self { db_path: PathBuf::from("keplor.db") }
+        Self { db_path: PathBuf::from("keplor.db"), retention_days: 90, wal_checkpoint_secs: 300 }
     }
 }
 
