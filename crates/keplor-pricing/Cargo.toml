@@ -12,6 +12,21 @@ publish      = { workspace = true }
 [lints]
 workspace = true
 
+[features]
+default = ["fetch"]
+fetch   = ["dep:reqwest", "dep:tokio"]
+
 [dependencies]
+keplor-core = { path = "../keplor-core" }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+smol_str    = { version = "0.3", features = ["serde"] }
+thiserror   = { workspace = true }
+tracing     = { workspace = true }
+
+# Optional: only needed for `Catalog::fetch_latest`.
+reqwest = { workspace = true, optional = true }
+tokio   = { workspace = true, optional = true, features = ["fs"] }
 
 [dev-dependencies]
+proptest = "1"

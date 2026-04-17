@@ -1,0 +1,11 @@
+{
+  "description": "GPT-4o standard request, no caching",
+  "provider": "openai",
+  "model": "gpt-4o",
+  "usage": {
+    "input_tokens": 2048,
+    "output_tokens": 512
+  },
+  "opts": {},
+  "expected_cost_nanodollars": 10240000
+}

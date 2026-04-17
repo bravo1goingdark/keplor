@@ -1,0 +1,12 @@
+{
+  "description": "GPT-4o with 50% cached read (OpenAI Responses API discounted)",
+  "provider": "openai",
+  "model": "gpt-4o",
+  "usage": {
+    "input_tokens": 2048,
+    "output_tokens": 512,
+    "cache_read_input_tokens": 1024
+  },
+  "opts": {},
+  "expected_cost_nanodollars": 8960000
+}

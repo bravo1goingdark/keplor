@@ -1,0 +1,13 @@
+{
+  "description": "Claude Sonnet 4 with cache read + cache write (Anthropic semantics)",
+  "provider": "anthropic",
+  "model": "claude-sonnet-4-20250514",
+  "usage": {
+    "input_tokens": 500,
+    "output_tokens": 200,
+    "cache_read_input_tokens": 2000,
+    "cache_creation_input_tokens": 300
+  },
+  "opts": {},
+  "expected_cost_nanodollars": 6225000
+}

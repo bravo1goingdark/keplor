@@ -19,6 +19,85 @@ Format for each entry:
 
 <!-- Append entries below this line. Most recent on top. -->
 
+## 2026-04-17 — Phase 2 complete
+
+### What was built
+
+`keplor-pricing` filled in, 4 modules + xtask subcommand:
+
+| Module      | Public items                                                                                        |
+|-------------|-----------------------------------------------------------------------------------------------------|
+| `model`     | `ModelPricing`, `dollars_to_nanos`, internal `RawEntry` serde parser                                |
+| `catalog`   | `Catalog` (`load_bundled`, `load_from_disk`, `fetch_latest`), `ModelKey`, version consts             |
+| `compute`   | `compute_cost`, `CostOpts`, `ServiceTier`, `InferenceGeo`, `CacheTtl`, `ContextBucket`              |
+| `error`     | `PricingError` (Parse, ModelNotFound, Io, Fetch)                                                    |
+
+Plus `cargo xtask refresh-catalog` downloads the latest LiteLLM JSON, updates
+the bundled snapshot + version constants, and re-runs the test suite.
+
+### Acceptance
+
+- `cargo test -p keplor-pricing` → **63 passed** (38 unit + 13 integration/property + 12 doctests), 0 failed.
+- `cargo clippy --workspace --all-targets -- -D warnings` → green.
+- `cargo fmt --all -- --check` → green.
+- `cargo test --workspace` → **128 passed**, 0 failed.
+- Bundled catalog: 1.4 MB JSON (2671 model entries from LiteLLM).
+- Catalog version: `44c992416cfab1d911299ed6d57fa6ad974af1a7` (2026-04-16).
+- Binary size contribution: 1.4 MB raw JSON embedded via `include_bytes!`
+  in `.rodata`.  `cargo-bloat` not installed locally; keplor-cli stub
+  doesn't depend on keplor-pricing yet so the catalog doesn't appear in
+  the binary.  Actual contribution measurable starting phase 6 (CLI MVP).
+
+### Test coverage by required area
+
+| Required                                             | Tests |
+|------------------------------------------------------|-------|
+| `compute_cost` monotonicity (proptest per dimension)  | 5 (input, output, reasoning, cache_read_anthropic, batch ≤ standard) |
+| `compute_cost` non-negativity (proptest)             | 1                                                                     |
+| Fixture-based cost verification                      | 7 (GPT-4o std/cached/batch, Claude Sonnet cached/1hr-cache, Bedrock, Gemini Flash) |
+| Anthropic vs OpenAI cache semantics                  | 6 (unit tests in compute.rs)                                         |
+| Above-200k context tier (Anthropic)                  | 1                                                                     |
+| Reasoning token billing (dedicated + fallback)       | 2                                                                     |
+| Audio / video / search billing                       | 3                                                                     |
+| Geo multiplier (applied + not-applied for US)        | 2                                                                     |
+| Catalog loading + lookup + fallback                  | 10 (bundled loads, exact, case-insensitive, date-suffix, prefix, unprefixed, not-found, lookup_or_err, caching/batch fields) |
+| ModelPricing parsing from LiteLLM JSON               | 5 (minimal, caching, search flat/tiered, JsonInt string)             |
+| `dollars_to_nanos` precision                         | 2                                                                     |
+| Doctests on `compute_cost`, `Catalog`, `ModelKey`, etc. | 12 (incl. Anthropic 1hr, Bedrock, Gemini thoughts)                  |
+
+### Deviations / notes
+
+- **`inference_geo_multiplier` not in LiteLLM JSON.** The field exists in
+  `ModelPricing` as `Option<f64>` (defaults to `None`) for future
+  user-config overlay. Cost engine applies it correctly when set.
+- **`search_context_cost_per_query` is an object in LiteLLM** with
+  `{low, medium, high}` tiers.  Parsed via serde untagged enum; we use
+  the medium value as the default rate.
+- **`input_cost_per_image` stored but not wired into `compute_cost`.**
+  `Usage` tracks `image_tokens` (token count), not image count.
+  The per-image rate needs an `image_count` field — deferred to phase 5
+  provider adapters.
+- **`aliases` field is `Vec<SmolStr>`, always empty from LiteLLM.**
+  The catalog auto-indexes both the full key (`openai/gpt-4o`) and the
+  unprefixed form (`gpt-4o`) when they don't collide. User-defined
+  aliases are a future extension.
+- **Date-suffix stripping** uses a strict regex-like pattern
+  (`-YYYY-MM-DD` or `-YYYYMMDD`) to avoid collapsing model families
+  (e.g. `gpt-4o-mini-2024-07-18` → `gpt-4o-mini`, NOT `gpt-4o`).
+- **`smol_str` added as crate-local dep** (same version as keplor-core).
+  Will promote to workspace-level when a third crate uses it.
+- **`proptest` added as dev-dep** (crate-local, version 1).
+
+### Deferred to later phases
+
+- `input_cost_per_image` wiring (needs image-count field in `Usage` — phase 5).
+- Priority/flex tier pricing (OpenAI `_priority` / `_flex` fields exist in
+  LiteLLM but are not yet wired; `ServiceTier` enum is ready).
+- Hot-reload integration with `arc-swap` in the proxy (phase 4/6).
+- `cargo bloat` detailed crate-level breakdown (phase 11).
+
+---
+
 ## 2026-04-17 — Phase 1 complete
 
 ### What was built

@@ -1,0 +1,14 @@
+{
+  "description": "Anthropic cache-write with 1-hour TTL surcharge",
+  "provider": "anthropic",
+  "model": "claude-sonnet-4-20250514",
+  "usage": {
+    "input_tokens": 500,
+    "output_tokens": 200,
+    "cache_creation_input_tokens": 300
+  },
+  "opts": {
+    "cache_ttl": "hours1"
+  },
+  "expected_cost_nanodollars": 6300000
+}

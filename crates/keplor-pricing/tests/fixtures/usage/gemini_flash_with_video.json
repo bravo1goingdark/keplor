@@ -1,0 +1,11 @@
+{
+  "description": "Gemini 2.0 Flash with video input",
+  "provider": "gemini",
+  "model": "gemini/gemini-2.0-flash",
+  "usage": {
+    "input_tokens": 10000,
+    "output_tokens": 500
+  },
+  "opts": {},
+  "expected_cost_nanodollars": 1200000
+}

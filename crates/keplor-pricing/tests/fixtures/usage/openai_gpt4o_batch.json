@@ -1,0 +1,13 @@
+{
+  "description": "GPT-4o batch mode (50% discount)",
+  "provider": "openai",
+  "model": "gpt-4o",
+  "usage": {
+    "input_tokens": 2048,
+    "output_tokens": 512
+  },
+  "opts": {
+    "is_batch": true
+  },
+  "expected_cost_nanodollars": 5120000
+}
