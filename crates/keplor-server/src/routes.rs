@@ -91,6 +91,14 @@ pub struct EventQuery {
     pub from: Option<i64>,
     /// Events on or before this epoch nanosecond timestamp.
     pub to: Option<i64>,
+    /// Only events with http_status >= this value.
+    pub status_min: Option<u16>,
+    /// Only events with http_status < this value.
+    pub status_max: Option<u16>,
+    /// Filter by metadata user_tag value.
+    pub user_tag: Option<String>,
+    /// Filter by metadata session_tag value.
+    pub session_tag: Option<String>,
     /// Maximum results (default 50, max 1000).
     pub limit: Option<u32>,
     /// Cursor for pagination (ts_ns of last item from previous page).
@@ -150,6 +158,10 @@ pub async fn query_events(
         source: params.source.map(SmolStr::new),
         from_ts_ns: params.from,
         to_ts_ns: params.to,
+        http_status_min: params.status_min,
+        http_status_max: params.status_max,
+        meta_user_tag: params.user_tag.map(SmolStr::new),
+        meta_session_tag: params.session_tag.map(SmolStr::new),
     };
 
     let cursor = params.cursor.map(Cursor);

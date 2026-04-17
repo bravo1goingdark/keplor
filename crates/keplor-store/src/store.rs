@@ -725,7 +725,7 @@ impl Store {
              FROM llm_events WHERE 1=1",
         );
 
-        let mut bind_storage: [Option<Box<dyn rusqlite::types::ToSql>>; 8] = Default::default();
+        let mut bind_storage: [Option<Box<dyn rusqlite::types::ToSql>>; 12] = Default::default();
         let mut idx = 0usize;
 
         macro_rules! add_filter {
@@ -753,6 +753,26 @@ impl Store {
             idx += 1;
             sql.push_str(&format!(" AND ts_ns <= ?{idx}"));
             bind_storage[idx - 1] = Some(Box::new(to));
+        }
+        if let Some(min) = filter.http_status_min {
+            idx += 1;
+            sql.push_str(&format!(" AND http_status >= ?{idx}"));
+            bind_storage[idx - 1] = Some(Box::new(i64::from(min)));
+        }
+        if let Some(max) = filter.http_status_max {
+            idx += 1;
+            sql.push_str(&format!(" AND http_status < ?{idx}"));
+            bind_storage[idx - 1] = Some(Box::new(i64::from(max)));
+        }
+        if let Some(ref tag) = filter.meta_user_tag {
+            idx += 1;
+            sql.push_str(&format!(" AND json_extract(metadata_json, '$.user_tag') = ?{idx}"));
+            bind_storage[idx - 1] = Some(Box::new(tag.to_string()));
+        }
+        if let Some(ref tag) = filter.meta_session_tag {
+            idx += 1;
+            sql.push_str(&format!(" AND json_extract(metadata_json, '$.session_tag') = ?{idx}"));
+            bind_storage[idx - 1] = Some(Box::new(tag.to_string()));
         }
         if let Some(c) = cursor {
             idx += 1;

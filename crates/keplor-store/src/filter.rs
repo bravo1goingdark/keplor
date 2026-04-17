@@ -23,4 +23,12 @@ pub struct EventFilter {
     pub from_ts_ns: Option<i64>,
     /// Only events on or before this timestamp (nanoseconds).
     pub to_ts_ns: Option<i64>,
+    /// Only events with http_status >= this value.
+    pub http_status_min: Option<u16>,
+    /// Only events with http_status < this value.
+    pub http_status_max: Option<u16>,
+    /// Only events whose `metadata_json` contains this value at `$.user_tag`.
+    pub meta_user_tag: Option<SmolStr>,
+    /// Only events whose `metadata_json` contains this value at `$.session_tag`.
+    pub meta_session_tag: Option<SmolStr>,
 }

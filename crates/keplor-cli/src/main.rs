@@ -172,6 +172,7 @@ fn query(
         source: source.map(smol_str::SmolStr::new),
         from_ts_ns: None,
         to_ts_ns: None,
+        ..Default::default()
     };
 
     let events = store.query(&filter, limit, None).context("query failed")?;
