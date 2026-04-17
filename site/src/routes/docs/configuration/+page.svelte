@@ -15,12 +15,16 @@
 [server]
 listen_addr = "0.0.0.0:8080"
 shutdown_timeout_secs = 25
+request_timeout_secs = 30
+max_connections = 10000
 
 [storage]
 db_path = "/var/lib/keplor/keplor.db"
+retention_days = 90
+wal_checkpoint_secs = 300
 
 [auth]
-api_keys = ["sk-keplor-prod-abc123", "sk-keplor-prod-def456"]
+api_keys = ["prod-svc:sk-prod-abc123", "staging:sk-staging-def456"]
 
 [pipeline]
 batch_size = 128
@@ -31,7 +35,9 @@ max_body_bytes = 10485760</code></pre>
   <thead><tr><th>Key</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
   <tbody>
     <tr><td><code>listen_addr</code></td><td>string</td><td><code>"0.0.0.0:8080"</code></td><td>Bind address</td></tr>
-    <tr><td><code>shutdown_timeout_secs</code></td><td>u64</td><td><code>25</code></td><td>Graceful shutdown timeout</td></tr>
+    <tr><td><code>shutdown_timeout_secs</code></td><td>u64</td><td><code>25</code></td><td>Graceful shutdown timeout (drain + checkpoint)</td></tr>
+    <tr><td><code>request_timeout_secs</code></td><td>u64</td><td><code>30</code></td><td>Per-request timeout</td></tr>
+    <tr><td><code>max_connections</code></td><td>usize</td><td><code>10000</code></td><td>Maximum concurrent connections</td></tr>
   </tbody>
 </table>
 
@@ -40,6 +46,8 @@ max_body_bytes = 10485760</code></pre>
   <thead><tr><th>Key</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
   <tbody>
     <tr><td><code>db_path</code></td><td>string</td><td><code>"keplor.db"</code></td><td>SQLite database path</td></tr>
+    <tr><td><code>retention_days</code></td><td>u64</td><td><code>90</code></td><td>Auto-GC events older than this (0 = disabled)</td></tr>
+    <tr><td><code>wal_checkpoint_secs</code></td><td>u64</td><td><code>300</code></td><td>WAL truncation interval (0 = disabled)</td></tr>
   </tbody>
 </table>
 
@@ -47,7 +55,7 @@ max_body_bytes = 10485760</code></pre>
 <table>
   <thead><tr><th>Key</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
   <tbody>
-    <tr><td><code>api_keys</code></td><td>string[]</td><td><code>[]</code></td><td>Valid API keys. Empty = open access (warning logged).</td></tr>
+    <tr><td><code>api_keys</code></td><td>string[]</td><td><code>[]</code></td><td>API keys (<code>id:secret</code> or bare secret). Empty = open access.</td></tr>
   </tbody>
 </table>
 

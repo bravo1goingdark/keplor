@@ -366,6 +366,38 @@
 <h3>LiteLLM callback</h3>
 <Pre code={litellmCallback} />
 
+<h2 id="operations">Production operations</h2>
+
+<h3>Configuration</h3>
+<Pre code={'[server]\nlisten_addr = "0.0.0.0:8080"\nshutdown_timeout_secs = 25       # drain batch writer + WAL checkpoint\nrequest_timeout_secs = 30        # per-request timeout\nmax_connections = 10000          # concurrent connection limit\n\n[storage]\ndb_path = "keplor.db"\nretention_days = 90              # auto-GC (0 = disabled)\nwal_checkpoint_secs = 300        # WAL truncation interval\n\n[auth]\napi_keys = ["prod-svc:sk-abc"]   # empty = open mode\n\n[pipeline]\nbatch_size = 64\nmax_body_bytes = 10485760        # 10 MB'} />
+<p>Override any field with <code>KEPLOR_&lt;SECTION&gt;_&lt;FIELD&gt;</code> environment variables.</p>
+
+<h3>JSON structured logging</h3>
+<Pre code="$ keplor run --json-logs" />
+<p>Emits newline-delimited JSON for log aggregation (Loki, Datadog, CloudWatch).</p>
+
+<h3>Graceful shutdown</h3>
+<p>On SIGINT/SIGTERM, Keplor stops accepting connections, drains the batch writer (flushes all pending events), runs a WAL checkpoint, and exits. Drain waits up to <code>shutdown_timeout_secs</code>.</p>
+
+<h3>Automated GC</h3>
+<p>When <code>retention_days</code> is set, an hourly background task deletes events older than the retention window and removes orphaned blobs. Set to <code>0</code> to disable.</p>
+
+<h2 id="metrics">Prometheus metrics</h2>
+<p>Scrape <code>GET /metrics</code> (no auth required).</p>
+<table>
+  <thead><tr><th>Metric</th><th>Type</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td><code>keplor_events_ingested_total</code></td><td>counter</td><td>Events ingested by provider</td></tr>
+    <tr><td><code>keplor_events_errors_total</code></td><td>counter</td><td>Errors by stage (validation, store, queue_full)</td></tr>
+    <tr><td><code>keplor_ingest_duration_seconds</code></td><td>histogram</td><td>End-to-end ingest latency (p50/p95/p99)</td></tr>
+    <tr><td><code>keplor_batch_flushes_total</code></td><td>counter</td><td>Batch flush operations</td></tr>
+    <tr><td><code>keplor_batch_events_flushed_total</code></td><td>counter</td><td>Events written to SQLite</td></tr>
+    <tr><td><code>keplor_batch_flush_errors_total</code></td><td>counter</td><td>Batch flush failures</td></tr>
+    <tr><td><code>keplor_auth_successes_total</code></td><td>counter</td><td>Successful auth attempts</td></tr>
+    <tr><td><code>keplor_auth_failures_total</code></td><td>counter</td><td>Auth failures (missing or invalid)</td></tr>
+  </tbody>
+</table>
+
 <h2 id="next">Next steps</h2>
 <p>
   <a href="{base}/docs/api-reference">API Reference</a> &mdash; all endpoints, parameters, and response shapes.<br />

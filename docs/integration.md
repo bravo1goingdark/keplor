@@ -470,10 +470,14 @@ If the model is not in the pricing catalog, cost is `0`. The event is still stor
 ```toml
 [server]
 listen_addr = "0.0.0.0:8080"      # default
-shutdown_timeout_secs = 25          # default
+shutdown_timeout_secs = 25          # drain batch writer + WAL checkpoint on stop
+request_timeout_secs = 30           # per-request timeout (slow clients dropped)
+max_connections = 10000             # concurrent connection limit
 
 [storage]
-db_path = "keplor.db"              # default (SQLite file)
+db_path = "keplor.db"              # SQLite file path
+retention_days = 90                 # auto-GC events older than this (0 = disabled)
+wal_checkpoint_secs = 300           # WAL truncation interval (0 = disabled)
 
 [auth]
 api_keys = []                       # default (open mode)
@@ -490,9 +494,28 @@ Any config field can be overridden with `KEPLOR_<SECTION>_<FIELD>`:
 ```bash
 KEPLOR_SERVER_LISTEN_ADDR=0.0.0.0:9000
 KEPLOR_STORAGE_DB_PATH=/data/keplor.db
+KEPLOR_STORAGE_RETENTION_DAYS=30
 KEPLOR_PIPELINE_BATCH_SIZE=128
 KEPLOR_AUTH_API_KEYS=prod-svc:sk-abc,staging-svc:sk-xyz
 ```
+
+### JSON Structured Logging
+
+For log aggregation systems (Loki, Datadog, CloudWatch), start with:
+
+```bash
+keplor run --json-logs
+```
+
+### Graceful Shutdown
+
+On SIGINT/SIGTERM, Keplor:
+1. Stops accepting new connections
+2. Drains the batch writer (flushes all pending events to SQLite)
+3. Runs a final WAL checkpoint
+4. Exits cleanly
+
+The drain step waits up to `shutdown_timeout_secs`. If it times out, a warning is logged and some events may be lost.
 
 ---
 
@@ -699,5 +722,34 @@ Keplor exposes the following metrics at `GET /metrics`:
 |--------|------|--------|-------------|
 | `keplor_events_ingested_total` | counter | `provider` | Total events ingested |
 | `keplor_events_errors_total` | counter | `stage` | Ingestion errors by stage (`validation`, `store`, `queue_full`) |
+| `keplor_ingest_duration_seconds` | histogram | | End-to-end ingest latency (p50/p95/p99) |
+| `keplor_batch_flushes_total` | counter | | Batch flush operations completed |
+| `keplor_batch_events_flushed_total` | counter | | Total events written to SQLite |
+| `keplor_batch_flush_errors_total` | counter | | Batch flush failures |
 | `keplor_auth_successes_total` | counter | | Successful auth attempts |
 | `keplor_auth_failures_total` | counter | `reason` | Failed auth attempts (`missing`, `invalid`) |
+
+---
+
+## Operations
+
+### Automated Garbage Collection
+
+When `storage.retention_days` is set (default: 90), Keplor runs hourly GC that:
+- Deletes events older than the retention window
+- Decrements blob refcounts and removes orphaned blobs
+- Logs the count of deleted events and blobs
+
+Set to `0` to disable (you can still run `keplor gc --older-than-days N` manually).
+
+### WAL Checkpointing
+
+SQLite WAL mode can accumulate a large write-ahead log under sustained write load. Keplor automatically runs `PRAGMA wal_checkpoint(TRUNCATE)` every `storage.wal_checkpoint_secs` (default: 300 seconds) and on shutdown.
+
+### Monitoring
+
+For production, point your Prometheus scraper at `GET /metrics` and set up alerts on:
+- `rate(keplor_events_errors_total[5m]) > 0` — ingestion failures
+- `rate(keplor_batch_flush_errors_total[5m]) > 0` — storage write failures
+- `rate(keplor_auth_failures_total[5m]) > 10` — auth brute-force attempts
+- `histogram_quantile(0.99, keplor_ingest_duration_seconds)` — p99 latency
