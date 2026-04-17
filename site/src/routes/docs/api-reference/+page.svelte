@@ -34,6 +34,42 @@
   "has_more": false
 }`;
 
+  const quotaResponse = `{
+  "cost_nanodollars": 48250000,
+  "event_count": 137
+}`;
+
+  const rollupsResponse = `{
+  "rollups": [{
+    "day": 1700006400,
+    "user_id": "user-123",
+    "api_key_id": "key-abc",
+    "provider": "openai",
+    "model": "gpt-4o",
+    "event_count": 42,
+    "error_count": 1,
+    "input_tokens": 21000,
+    "output_tokens": 8400,
+    "cache_read_input_tokens": 5000,
+    "cache_creation_input_tokens": 0,
+    "cost_nanodollars": 18750000
+  }]
+}`;
+
+  const statsResponse = `{
+  "stats": [{
+    "provider": "openai",
+    "model": "gpt-4o",
+    "event_count": 137,
+    "error_count": 3,
+    "input_tokens": 68500,
+    "output_tokens": 27400,
+    "cache_read_input_tokens": 12000,
+    "cache_creation_input_tokens": 0,
+    "cost_nanodollars": 48250000
+  }]
+}`;
+
   const healthResponse = `{"status": "ok", "version": "0.1.0", "db": "connected"}`;
 
   const errorResponse = `{"error": "validation: model must not be empty"}`;
@@ -115,6 +151,59 @@ keplor_events_ingested_total{provider="openai"} 42`;
 
 <h3>Response <code>200 OK</code></h3>
 <Pre code={queryResponse} />
+
+<h2 id="quota"><span class="method method-get">GET</span> /v1/quota</h2>
+<p>Real-time cost and event count from the event table. At least one of <code>user_id</code> or <code>api_key_id</code> is required.</p>
+
+<h3>Query parameters</h3>
+<table>
+  <thead><tr><th>Param</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td><code>user_id</code></td><td>string</td><td>no*</td><td>Filter by user</td></tr>
+    <tr><td><code>api_key_id</code></td><td>string</td><td>no*</td><td>Filter by API key</td></tr>
+    <tr><td><code>from</code></td><td>i64</td><td>yes</td><td>Events on or after this epoch ns</td></tr>
+  </tbody>
+</table>
+<p class="text-sm text-text-muted">* At least one of <code>user_id</code> or <code>api_key_id</code> must be provided.</p>
+
+<h3>Response <code>200 OK</code></h3>
+<Pre code={quotaResponse} />
+
+<h2 id="rollups"><span class="method method-get">GET</span> /v1/rollups</h2>
+<p>Pre-aggregated daily rollup rows broken down by provider and model. The background rollup task refreshes every 60 seconds.</p>
+
+<h3>Query parameters</h3>
+<table>
+  <thead><tr><th>Param</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td><code>user_id</code></td><td>string</td><td>no</td><td>Filter by user</td></tr>
+    <tr><td><code>api_key_id</code></td><td>string</td><td>no</td><td>Filter by API key</td></tr>
+    <tr><td><code>from</code></td><td>i64</td><td>yes</td><td>Start epoch ns (converted to day boundary)</td></tr>
+    <tr><td><code>to</code></td><td>i64</td><td>yes</td><td>End epoch ns (converted to day boundary)</td></tr>
+  </tbody>
+</table>
+
+<h3>Response <code>200 OK</code></h3>
+<Pre code={rollupsResponse} />
+
+<h2 id="stats"><span class="method method-get">GET</span> /v1/stats</h2>
+<p>Aggregated period statistics summed from daily rollups. Optionally group by model for per-model cost breakdowns.</p>
+
+<h3>Query parameters</h3>
+<table>
+  <thead><tr><th>Param</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td><code>user_id</code></td><td>string</td><td>no</td><td>Filter by user</td></tr>
+    <tr><td><code>api_key_id</code></td><td>string</td><td>no</td><td>Filter by API key</td></tr>
+    <tr><td><code>from</code></td><td>i64</td><td>yes</td><td>Start epoch ns</td></tr>
+    <tr><td><code>to</code></td><td>i64</td><td>yes</td><td>End epoch ns</td></tr>
+    <tr><td><code>provider</code></td><td>string</td><td>no</td><td>Filter by provider</td></tr>
+    <tr><td><code>group_by</code></td><td>string</td><td>no</td><td>Set to <code>"model"</code> to group by provider + model</td></tr>
+  </tbody>
+</table>
+
+<h3>Response <code>200 OK</code></h3>
+<Pre code={statsResponse} />
 
 <h2 id="health"><span class="method method-get">GET</span> /health</h2>
 <p>Liveness probe. Returns <code>200</code> when healthy, <code>503</code> when degraded.</p>

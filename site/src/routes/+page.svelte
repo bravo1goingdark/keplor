@@ -57,8 +57,8 @@ resp = requests.post(
       </h1>
 
       <p class="text-[18px] leading-[1.55] text-ink-muted max-w-[52ch] mb-10 animate-in-delay-1">
-        One binary captures every request and response across 13 providers.
-        Compressed, deduplicated, queryable. Nothing else needed.
+        One binary captures every LLM call, computes cost from a 2,263-model
+        pricing catalog, and serves real-time aggregations. Nothing else needed.
       </p>
 
       <div class="flex items-center gap-6 animate-in-delay-2">
@@ -79,7 +79,7 @@ resp = requests.post(
     <div class="grid md:grid-cols-3 gap-x-8 gap-y-12">
       {#each [
         { n: '01', title: 'Full request/response capture', desc: 'Every prompt and completion stored with zstd compression. System prompts and tool schemas deduplicated by content hash. Trained dictionaries for 5x ratios.' },
-        { n: '02', title: 'Query and filter', desc: 'REST API with cursor pagination. Filter by user, model, provider, source, or time range. Sub-100 microsecond reads. Cost computed automatically as metadata.' },
+        { n: '02', title: 'Cost accounting & aggregation', desc: 'Automatic cost from a 2,263-model pricing catalog. Daily rollups, real-time quota checks, and period statistics — all via REST. Filter by user, model, provider, or time range.' },
         { n: '03', title: 'Zero dependencies', desc: 'A single static binary under 10 MB. SQLite for storage. No containers, no runtime, no cloud account. Just run it.' },
       ] as { n, title, desc }}
         <div>
@@ -120,13 +120,34 @@ resp = requests.post(
   </div>
 </section>
 
+<!-- Aggregation -->
+<section class="px-6 md:px-20" style="padding-top: clamp(96px, 12vw, 160px); padding-bottom: clamp(96px, 12vw, 160px);">
+  <div class="max-w-[1280px] mx-auto">
+    <p class="text-[12px] uppercase tracking-[0.12em] text-ink-muted mb-6">Aggregation</p>
+
+    <div class="grid md:grid-cols-3 gap-x-8 gap-y-12">
+      {#each [
+        { n: '01', title: 'Real-time quota', desc: 'GET /v1/quota returns cost and event count for any user or API key since a given timestamp. Sub-millisecond, hits the event table directly.' },
+        { n: '02', title: 'Daily rollups', desc: 'GET /v1/rollups returns pre-aggregated daily breakdowns by provider and model. Background task refreshes every 60 seconds.' },
+        { n: '03', title: 'Period statistics', desc: 'GET /v1/stats sums rollups across a date range. Optional group-by model for per-model cost breakdowns.' },
+      ] as { n, title, desc }}
+        <div>
+          <span class="font-serif text-[15px] text-ink-muted">{n}</span>
+          <h3 class="text-[17px] font-medium mt-2 mb-2">{title}</h3>
+          <p class="text-[15px] text-ink-muted leading-[1.65] max-w-[58ch]">{desc}</p>
+        </div>
+      {/each}
+    </div>
+  </div>
+</section>
+
 <!-- Numbers -->
 <section class="px-6 md:px-20" style="padding-top: clamp(96px, 12vw, 160px); padding-bottom: clamp(96px, 12vw, 160px);">
   <div class="max-w-[1280px] mx-auto grid grid-cols-2 md:grid-cols-4 gap-y-10">
     {#each [
       { n: '<10 MB', l: 'Binary size' },
       { n: '368K/s', l: 'Events throughput' },
-      { n: '13', l: 'Providers supported' },
+      { n: '2,263', l: 'Models priced' },
       { n: '<1 ms', l: 'Ingestion overhead' },
     ] as { n, l }}
       <div>
