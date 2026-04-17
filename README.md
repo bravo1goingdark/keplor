@@ -29,15 +29,6 @@ Point your LLM SDK at `https://localhost:8443` (base URL override), make a few r
 ```bash
 keplor stats --last 24h
 ```
-
-## Architecture
-
-See [docs/architecture.md](docs/architecture.md).
-
-## Development roadmap
-
-See [docs/phases/](docs/phases/) for the 12-phase build plan.
-
 ## License
 
 Apache-2.0.
