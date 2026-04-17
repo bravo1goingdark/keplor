@@ -1,0 +1,116 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/keplor-core",
+    "crates/keplor-providers",
+    "crates/keplor-proxy",
+    "crates/keplor-store",
+    "crates/keplor-pricing",
+    "crates/keplor-telemetry",
+    "crates/keplor-cli",
+    "xtask",
+]
+
+[workspace.package]
+version      = "0.0.0"
+edition      = "2021"
+rust-version = "1.82"
+license      = "Apache-2.0"
+repository   = "https://github.com/bravo1goingdark/keplor"
+authors      = ["Keplor contributors"]
+publish      = false
+
+# Lints applied to every member crate via `[lints] workspace = true`.
+# Aligns with CLAUDE.md: no unsafe, no .unwrap()/.expect() on runtime paths.
+[workspace.lints.rust]
+unsafe_code       = "deny"
+rust_2018_idioms  = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"
+
+# Release profile tuned for a <10 MB static musl binary.
+# Phase 0 gate: 12 MB.  Tightens to 10 MB at phase 11.
+[profile.release]
+opt-level     = "z"
+lto           = "fat"
+codegen-units = 1
+panic         = "abort"
+strip         = "symbols"
+debug         = false
+incremental   = false
+
+# Dev + test profiles keep unwind panics so `#[should_panic]` tests work and
+# backtraces are usable.  Only release aborts.
+[profile.dev]
+opt-level = 0
+
+[profile.test]
+opt-level = 0
+
+# Pinned once here; every crate uses `{ workspace = true }`.
+# Any new workspace dep requires human confirmation per CLAUDE.md.
+[workspace.dependencies]
+# --- async runtime + HTTP stack ----------------------------------------------
+tokio                  = { version = "1" }
+hyper                  = { version = "1" }
+axum                   = { version = "0.8" }
+tower                  = { version = "0.5" }
+hyper-rustls           = { version = "0.27" }
+reqwest                = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }
+
+# --- TLS ---------------------------------------------------------------------
+# aws-lc-rs is the crypto provider; ring is deliberately not enabled.
+rustls                 = { version = "0.23", default-features = false, features = ["std", "tls12", "aws-lc-rs", "logging"] }
+
+# --- bytes + body ------------------------------------------------------------
+bytes                  = { version = "1" }
+http-body-util         = { version = "0.1" }
+
+# --- streaming parsers -------------------------------------------------------
+eventsource-stream     = { version = "0.2" }
+aws-smithy-eventstream = { version = "0.60" }
+
+# --- storage + compression ---------------------------------------------------
+rusqlite               = { version = "0.32", features = ["bundled"] }
+zstd                   = { version = "0.13" }
+
+# --- serde / json ------------------------------------------------------------
+serde                  = { version = "1", features = ["derive"] }
+serde_json             = { version = "1" }
+sonic-rs               = { version = "0.5" }
+
+# --- observability -----------------------------------------------------------
+tracing                     = { version = "0.1" }
+tracing-subscriber          = { version = "0.3" }
+metrics                     = { version = "0.24" }
+metrics-exporter-prometheus = { version = "0.16" }
+opentelemetry               = { version = "0.27" }
+# HTTP/protobuf over gRPC/tonic: saves ~1 MB binary size.
+opentelemetry-otlp          = { version = "0.27", default-features = false, features = ["http-proto", "reqwest-client"] }
+
+# --- CLI + config ------------------------------------------------------------
+clap    = { version = "4.5", features = ["derive", "env"] }
+figment = { version = "0.10", features = ["toml", "env"] }
+
+# --- errors ------------------------------------------------------------------
+thiserror = { version = "2" }
+anyhow    = { version = "1" }
+
+# --- ids + hashing -----------------------------------------------------------
+ulid = { version = "1" }
+sha2 = { version = "0.10" }
+
+# --- tokenizers --------------------------------------------------------------
+tiktoken-rs = { version = "0.6" }
+tokenizers  = { version = "0.20" }
+
+# --- secrets -----------------------------------------------------------------
+secrecy  = { version = "0.10" }
+zeroize  = { version = "1" }
+
+# --- dev-only (workspace-level for uniform versions) -------------------------
+wiremock  = { version = "0.6" }
+insta     = { version = "1" }
+criterion = { version = "0.5" }

@@ -1,0 +1,106 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+  # Keep cargo registry + git caches between jobs.
+  CARGO_NET_RETRY: 10
+  RUSTUP_MAX_RETRIES: 10
+
+jobs:
+  # ---- 1. formatting --------------------------------------------------------
+  fmt:
+    name: cargo fmt --check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.93.0"
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  # ---- 2. clippy + check ----------------------------------------------------
+  clippy:
+    name: clippy -D warnings
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.93.0"
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo check --workspace --all-targets --locked
+
+  # ---- 3. tests -------------------------------------------------------------
+  test:
+    name: cargo test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.93.0"
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo nextest run --workspace --locked
+
+  # ---- 4. supply-chain audit -----------------------------------------------
+  deny:
+    name: cargo deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+          arguments: --all-features
+
+  # ---- 5. static musl build + size gate -------------------------------------
+  musl-size:
+    name: musl build + 12 MB gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.93.0"
+          targets: x86_64-unknown-linux-musl
+      - name: Install musl toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+      - uses: Swatinem/rust-cache@v2
+      - name: Build release musl
+        run: cargo build --release --locked --target x86_64-unknown-linux-musl -p keplor-cli
+      - name: Enforce 12 MB binary-size gate
+        run: |
+          bin=target/x86_64-unknown-linux-musl/release/keplor
+          ls -lh "$bin"
+          size=$(stat -c '%s' "$bin")
+          echo "raw bytes: $size"
+          limit=$((12 * 1024 * 1024))
+          if [ "$size" -gt "$limit" ]; then
+            echo "::error::keplor binary $size bytes exceeds 12 MB gate ($limit)"
+            exit 1
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: keplor-x86_64-musl
+          path: target/x86_64-unknown-linux-musl/release/keplor
+          if-no-files-found: error
+          retention-days: 7

@@ -1,0 +1,40 @@
+msrv = "1.82"
+
+# A proxy tees streaming bodies; a few helpers are naturally long.
+cognitive-complexity-threshold = 30
+too-many-arguments-threshold   = 8
+
+# Keep error types small, but the provider enum is unavoidably wide.
+large-error-threshold = 256
+
+# Documentation: allow common provider/product names without backticks.
+doc-valid-idents = [
+    "..",
+    "OpenAI",
+    "Anthropic",
+    "Gemini",
+    "Bedrock",
+    "Azure",
+    "Mistral",
+    "Groq",
+    "DeepSeek",
+    "Cohere",
+    "Ollama",
+    "xAI",
+    "LiteLLM",
+    "OpenTelemetry",
+    "OpenInference",
+    "Langfuse",
+    "ClickHouse",
+    "PostgreSQL",
+    "SQLite",
+    "OTLP",
+    "SSE",
+    "NDJSON",
+    "JSON",
+    "HTTP",
+    "HTTPS",
+    "TLS",
+    "YAML",
+    "zstd",
+]

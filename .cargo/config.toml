@@ -1,0 +1,20 @@
+# Cargo overrides shared by every Keplor contributor.
+# Release profile lives in the workspace Cargo.toml (single source of truth).
+
+[alias]
+# `cargo xtask <sub>` — run the xtask helper crate.
+xtask = "run --package xtask --release --"
+
+# Convenience for CI and developers.
+ci-check = "check --workspace --all-targets --locked"
+ci-clippy = "clippy --workspace --all-targets --locked -- -D warnings"
+
+[build]
+# Don't override jobs; let cargo pick (= number of CPUs).
+
+# Enable crt-static for musl builds so the binary is fully self-contained.
+[target.x86_64-unknown-linux-musl]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-unknown-linux-musl]
+rustflags = ["-C", "target-feature=+crt-static"]

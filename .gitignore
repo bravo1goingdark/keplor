@@ -1,0 +1,44 @@
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+Cargo.lock.bak
+
+# Data / local state
+*.db
+*.db-wal
+*.db-shm
+/var/
+/data/
+
+# Secrets — never commit
+*.pem
+*.key
+*.crt
+.env
+.env.*
+!.env.example
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Build artifacts
+*.tar.gz
+*.tgz
+/dist/
+/release/
+
+# Coverage
+*.profraw
+/coverage/
+
+# Fuzzing corpora (keep seeds committed, artifacts not)
+fuzz/corpus/
+fuzz/artifacts/
+
+# Claude Code local state
+.claude/settings.local.json

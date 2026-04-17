@@ -1,0 +1,57 @@
+# cargo-deny configuration for Keplor.
+# Aim: keep the dependency graph auditable and under a small, permissive
+# set of OSI-approved licenses compatible with Apache-2.0 redistribution.
+
+[graph]
+targets = [
+    { triple = "x86_64-unknown-linux-musl" },
+    { triple = "x86_64-unknown-linux-gnu" },
+    { triple = "aarch64-unknown-linux-musl" },
+    { triple = "aarch64-unknown-linux-gnu" },
+]
+all-features = false
+
+[advisories]
+version = 2
+yanked  = "deny"
+ignore  = []
+
+[licenses]
+version             = 2
+confidence-threshold = 0.8
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "MPL-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "CC0-1.0",
+    "Unlicense",
+    "0BSD",
+    "OpenSSL",
+]
+exceptions = []
+
+[bans]
+multiple-versions = "warn"
+wildcards         = "warn"
+# Prevent silent re-introduction of the legacy TLS / runtime stacks.
+deny = [
+    { name = "openssl" },
+    { name = "openssl-sys" },
+    { name = "async-std" },
+    { name = "rusoto_core" },
+    # aws-lc-rs is the chosen crypto provider for rustls; ring is banned
+    # everywhere, including transitively.
+    { name = "ring" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git      = "deny"
+allow-registry   = ["https://github.com/rust-lang/crates.io-index"]

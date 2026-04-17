@@ -1,0 +1,21 @@
+[package]
+name         = "keplor-cli"
+description  = "The `keplor` binary: run, stats, admin, doctor."
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+repository   = { workspace = true }
+authors      = { workspace = true }
+publish      = { workspace = true }
+
+[[bin]]
+name = "keplor"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+
+[dev-dependencies]
