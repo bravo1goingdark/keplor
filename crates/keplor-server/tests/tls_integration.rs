@@ -56,11 +56,13 @@ async fn spawn_tls_server(certs: &CertPair) -> String {
     let pipeline = Pipeline::new(store, writer, catalog);
 
     let keys = ApiKeySet::new(vec![]);
-    let mut config = ServerConfig::default();
-    config.tls = Some(TlsConfig {
-        cert_path: certs.cert_file.path().to_path_buf(),
-        key_path: certs.key_file.path().to_path_buf(),
-    });
+    let config = ServerConfig {
+        tls: Some(TlsConfig {
+            cert_path: certs.cert_file.path().to_path_buf(),
+            key_path: certs.key_file.path().to_path_buf(),
+        }),
+        ..Default::default()
+    };
 
     let metrics_handle = install_metrics_recorder();
     let server = PipelineServer::new(pipeline, keys, &config, metrics_handle);
