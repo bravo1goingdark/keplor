@@ -3,9 +3,9 @@
   let { children } = $props();
 </script>
 
-<div class="max-w-[1280px] mx-auto px-6 md:px-20 pt-12 pb-20 flex gap-16">
+<div class="max-w-[1280px] mx-auto px-6 md:px-20 flex gap-16 h-[calc(100vh-3.5rem)] overflow-hidden">
   <DocsSidebar />
-  <article class="flex-1 min-w-0 prose-custom">
+  <article class="flex-1 min-w-0 prose-custom overflow-y-auto pt-12 pb-20">
     {@render children()}
   </article>
 </div>
