@@ -3,16 +3,21 @@
 //! Stores compressed payload blobs in any S3-compatible object store:
 //! Cloudflare R2, MinIO, AWS S3, DigitalOcean Spaces, etc.
 //!
+//! Uses the `object_store` crate (Apache Arrow project) which relies on
+//! `aws-lc-rs` for TLS — no `ring` dependency.
+//!
 //! Blobs are keyed by their SHA-256 hex string (64 chars).  PUTs are
 //! naturally idempotent (same content → same key → safe overwrite),
 //! giving free deduplication without coordination.
 //!
 //! Requires the `s3` feature flag.
 
+use std::sync::Arc;
+
 use bytes::Bytes;
-use s3::bucket::Bucket;
-use s3::creds::Credentials;
-use s3::region::Region;
+use object_store::aws::AmazonS3Builder;
+use object_store::path::Path as ObjectPath;
+use object_store::{ObjectStore, ObjectStoreExt};
 
 use super::{BlobMeta, BlobStore};
 use crate::error::StoreError;
@@ -48,7 +53,7 @@ pub struct S3BlobConfig {
 /// which runs on a dedicated thread pool — never on a tokio worker thread.
 /// Calling these methods directly from an async context will panic.
 pub struct S3BlobStore {
-    bucket: Box<Bucket>,
+    client: Arc<dyn ObjectStore>,
     prefix: String,
     /// Tokio runtime handle for running async S3 ops from sync context.
     rt: tokio::runtime::Handle,
@@ -56,11 +61,7 @@ pub struct S3BlobStore {
 
 impl std::fmt::Debug for S3BlobStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("S3BlobStore")
-            .field("bucket", &self.bucket.name())
-            .field("region", &self.bucket.region().to_string())
-            .field("prefix", &self.prefix)
-            .finish()
+        f.debug_struct("S3BlobStore").field("prefix", &self.prefix).finish_non_exhaustive()
     }
 }
 
@@ -71,101 +72,91 @@ impl S3BlobStore {
     /// operations are async but the [`BlobStore`] trait is synchronous
     /// (called from `spawn_blocking` contexts).
     pub fn new(config: &S3BlobConfig, rt: tokio::runtime::Handle) -> Result<Self, StoreError> {
-        let region =
-            Region::Custom { region: config.region.clone(), endpoint: config.endpoint.clone() };
-
-        let credentials = Credentials::new(
-            Some(&config.access_key_id),
-            Some(&config.secret_access_key),
-            None,
-            None,
-            None,
-        )
-        .map_err(|e| StoreError::BlobS3(format!("credentials: {e}")))?;
-
-        let mut bucket = Bucket::new(&config.bucket, region, credentials)
-            .map_err(|e| StoreError::BlobS3(format!("bucket init: {e}")))?;
+        let mut builder = AmazonS3Builder::new()
+            .with_bucket_name(&config.bucket)
+            .with_endpoint(&config.endpoint)
+            .with_region(&config.region)
+            .with_access_key_id(&config.access_key_id)
+            .with_secret_access_key(&config.secret_access_key)
+            .with_allow_http(config.endpoint.starts_with("http://"));
 
         if config.path_style {
-            bucket = bucket.with_path_style();
+            builder = builder.with_virtual_hosted_style_request(false);
         }
 
-        Ok(Self { bucket, prefix: config.prefix.clone(), rt })
+        let client =
+            builder.build().map_err(|e| StoreError::BlobS3(format!("S3 client init: {e}")))?;
+
+        Ok(Self { client: Arc::new(client), prefix: config.prefix.clone(), rt })
     }
 
-    /// Build the object key for a given SHA-256 hash.
-    fn key(&self, sha256: &[u8; 32]) -> String {
+    /// Build the object path for a given SHA-256 hash.
+    fn path(&self, sha256: &[u8; 32]) -> ObjectPath {
         let hex = crate::store::sha256_hex(sha256);
         if self.prefix.is_empty() {
-            hex
+            ObjectPath::from(hex)
         } else {
-            format!("{}{hex}", self.prefix)
+            ObjectPath::from(format!("{}{hex}", self.prefix))
         }
     }
 
-    /// Test connectivity by performing a HEAD request on the bucket.
+    /// Test connectivity by attempting a HEAD on a probe key.
+    ///
+    /// A `NotFound` error is expected and counts as success (the bucket
+    /// is reachable). Any other error indicates a connectivity problem.
     pub fn check_connectivity(&self) -> Result<(), StoreError> {
-        self.rt
-            .block_on(async { self.bucket.head_object("/").await })
-            .map(|_| ())
-            .map_err(|e| StoreError::BlobS3(format!("connectivity check failed: {e}")))
+        let probe = ObjectPath::from("__keplor_probe__");
+        let result = self.rt.block_on(async { self.client.head(&probe).await });
+        match result {
+            Ok(_) | Err(object_store::Error::NotFound { .. }) => Ok(()),
+            Err(e) => Err(StoreError::BlobS3(format!("connectivity check failed: {e}"))),
+        }
     }
 }
 
 impl BlobStore for S3BlobStore {
     fn put(&self, sha256: &[u8; 32], data: &[u8], _meta: BlobMeta<'_>) -> Result<(), StoreError> {
-        let key = self.key(sha256);
+        let path = self.path(sha256);
+        let payload = Bytes::copy_from_slice(data);
         self.rt
-            .block_on(async { self.bucket.put_object(&key, data).await })
-            .map_err(|e| StoreError::BlobS3(format!("PUT {key}: {e}")))?;
+            .block_on(async { self.client.put(&path, payload.into()).await })
+            .map_err(|e| StoreError::BlobS3(format!("PUT {path}: {e}")))?;
         Ok(())
     }
 
     fn get(&self, sha256: &[u8; 32]) -> Result<Option<Bytes>, StoreError> {
-        let key = self.key(sha256);
-        let result = self.rt.block_on(async { self.bucket.get_object(&key).await });
+        let path = self.path(sha256);
+        let result = self.rt.block_on(async { self.client.get(&path).await });
 
         match result {
             Ok(resp) => {
-                if resp.status_code() == 404 {
-                    Ok(None)
-                } else {
-                    Ok(Some(Bytes::from(resp.to_vec())))
-                }
+                let data = self
+                    .rt
+                    .block_on(async { resp.bytes().await })
+                    .map_err(|e| StoreError::BlobS3(format!("GET read {path}: {e}")))?;
+                Ok(Some(data))
             },
-            Err(e) => {
-                let msg = e.to_string();
-                if msg.contains("404") || msg.contains("NoSuchKey") {
-                    Ok(None)
-                } else {
-                    Err(StoreError::BlobS3(format!("GET {key}: {e}")))
-                }
-            },
+            Err(object_store::Error::NotFound { .. }) => Ok(None),
+            Err(e) => Err(StoreError::BlobS3(format!("GET {path}: {e}"))),
         }
     }
 
     fn delete(&self, sha256: &[u8; 32]) -> Result<(), StoreError> {
-        let key = self.key(sha256);
+        let path = self.path(sha256);
         self.rt
-            .block_on(async { self.bucket.delete_object(&key).await })
-            .map_err(|e| StoreError::BlobS3(format!("DELETE {key}: {e}")))?;
+            .block_on(async { self.client.delete(&path).await })
+            .map_err(|e| StoreError::BlobS3(format!("DELETE {path}: {e}")))?;
         Ok(())
     }
 
     fn exists(&self, sha256: &[u8; 32]) -> Result<bool, StoreError> {
-        let key = self.key(sha256);
-        let result = self.rt.block_on(async { self.bucket.head_object(&key).await });
+        let path = self.path(sha256);
+        let result = self.rt.block_on(async { self.client.head(&path).await });
 
         match result {
             Ok(_) => Ok(true),
-            Err(e) => {
-                let msg = e.to_string();
-                if msg.contains("404") || msg.contains("NoSuchKey") {
-                    Ok(false)
-                } else {
-                    Err(StoreError::BlobS3(format!("HEAD {key}: {e}")))
-                }
-            },
+            Err(object_store::Error::NotFound { .. }) => Ok(false),
+            Err(e) => Err(StoreError::BlobS3(format!("HEAD {path}: {e}"))),
         }
     }
 }

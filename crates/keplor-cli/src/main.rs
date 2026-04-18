@@ -117,16 +117,44 @@ fn run_server(config_path: PathBuf, json_logs: bool) -> Result<()> {
         // Install Prometheus recorder (must be before any metrics calls).
         let metrics_handle = keplor_server::install_metrics_recorder();
 
-        // Open storage.
-        let store = Arc::new(
-            keplor_store::Store::open_with_pool_size(
-                &config.storage.db_path,
-                config.storage.read_pool_size,
-            )
-            .with_context(|| {
-                format!("failed to open db at {}", config.storage.db_path.display())
-            })?,
-        );
+        // Open storage, optionally with external blob store.
+        let store = {
+            let db_path = &config.storage.db_path;
+            let pool_size = config.storage.read_pool_size;
+
+            #[cfg(feature = "s3")]
+            let mut store = if let Some(ref blob_cfg) = config.blob_storage {
+                let s3 = keplor_store::blob::s3::S3BlobStore::new(
+                    blob_cfg,
+                    tokio::runtime::Handle::current(),
+                )
+                .with_context(|| "failed to initialize S3 blob store")?;
+                tracing::info!(
+                    bucket = blob_cfg.bucket,
+                    endpoint = blob_cfg.endpoint,
+                    "external blob store configured"
+                );
+                keplor_store::Store::open_with_blob_store(db_path, pool_size, Box::new(s3))
+                    .with_context(|| format!("failed to open db at {}", db_path.display()))?
+            } else {
+                keplor_store::Store::open_with_pool_size(db_path, pool_size)
+                    .with_context(|| format!("failed to open db at {}", db_path.display()))?
+            };
+
+            #[cfg(not(feature = "s3"))]
+            let mut store = keplor_store::Store::open_with_pool_size(db_path, pool_size)
+                .with_context(|| format!("failed to open db at {}", db_path.display()))?;
+
+            if config.storage.blob_offload_threshold_mb > 0 {
+                store.set_offload_threshold_mb(config.storage.blob_offload_threshold_mb);
+                tracing::info!(
+                    threshold_mb = config.storage.blob_offload_threshold_mb,
+                    "smart blob offloading enabled"
+                );
+            }
+
+            Arc::new(store)
+        };
 
         // Spawn batch writer.
         let batch_config = keplor_store::BatchConfig {

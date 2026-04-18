@@ -84,6 +84,10 @@ pub struct StorageConfig {
     pub read_pool_size: usize,
     /// GC run interval in seconds. Default: 3600 (1 hour). 0 = disabled.
     pub gc_interval_secs: u64,
+    /// Auto-offload blobs to external store when SQLite exceeds this size
+    /// (in MB).  Requires `[blob_storage]` to be configured.
+    /// 0 = manual mode (always use external store if configured, else embedded).
+    pub blob_offload_threshold_mb: u64,
 }
 
 impl Default for StorageConfig {
@@ -95,6 +99,7 @@ impl Default for StorageConfig {
             max_db_size_mb: 0,
             read_pool_size: 4,
             gc_interval_secs: 3600,
+            blob_offload_threshold_mb: 0,
         }
     }
 }

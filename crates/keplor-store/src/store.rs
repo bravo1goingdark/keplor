@@ -7,7 +7,7 @@
 //! bytes are stored externally.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 use bytes::Bytes;
@@ -186,6 +186,12 @@ pub struct Store {
     coder: ZstdCoder,
     /// External blob store.  `None` = embedded mode (blobs in SQLite).
     blob_store: Option<Box<dyn BlobStore>>,
+    /// When > 0 and `blob_store` is Some, auto-offload new blobs to
+    /// external store when SQLite exceeds this size in bytes.
+    offload_threshold_bytes: u64,
+    /// True when SQLite has exceeded `offload_threshold_bytes`.
+    /// Re-evaluated on each batch flush.
+    offloading_active: AtomicBool,
 }
 
 impl std::fmt::Debug for Store {
@@ -246,6 +252,45 @@ impl Store {
         self.blob_store.is_some()
     }
 
+    /// Set the SQLite size threshold (in MB) for automatic blob offloading.
+    ///
+    /// When `threshold_mb > 0` and an external blob store is configured,
+    /// new blobs are written to the external store once SQLite exceeds
+    /// this size.  When GC brings the database back under the threshold,
+    /// new blobs go back to SQLite.  Set to `0` to disable (manual mode).
+    pub fn set_offload_threshold_mb(&mut self, threshold_mb: u64) {
+        self.offload_threshold_bytes = threshold_mb * 1024 * 1024;
+    }
+
+    /// Re-evaluate whether blob offloading should be active.
+    ///
+    /// Called once per batch flush.  Checks `db_size_bytes()` against
+    /// the configured threshold and flips the `offloading_active` flag.
+    fn refresh_offload_state(&self) {
+        if self.offload_threshold_bytes == 0 || self.blob_store.is_none() {
+            return;
+        }
+        let active =
+            self.db_size_bytes().map(|size| size >= self.offload_threshold_bytes).unwrap_or(false);
+        self.offloading_active.store(active, Ordering::Relaxed);
+    }
+
+    /// Whether blobs should currently go to the external store.
+    ///
+    /// True when: blob_store is configured AND either (a) no threshold
+    /// is set (always external) or (b) threshold is set and SQLite
+    /// exceeds it.
+    fn should_use_external_blobs(&self) -> bool {
+        if self.blob_store.is_none() {
+            return false;
+        }
+        if self.offload_threshold_bytes == 0 {
+            // No threshold = always external when configured.
+            return true;
+        }
+        self.offloading_active.load(Ordering::Relaxed)
+    }
+
     fn init(
         write_conn: Connection,
         opener: &dyn ConnOpener,
@@ -270,6 +315,8 @@ impl Store {
             read_idx: AtomicUsize::new(0),
             coder,
             blob_store,
+            offload_threshold_bytes: 0,
+            offloading_active: AtomicBool::new(false),
         })
     }
 
@@ -537,12 +584,16 @@ impl Store {
         }
 
         // ── Lock + single transaction ─────────────────────────────────
+        // Re-evaluate offload state before each batch flush.
+        self.refresh_offload_state();
+        let use_external = self.should_use_external_blobs();
+
         let conn = self.write_conn()?;
         let tx = conn.unchecked_transaction()?;
 
         // Insert unique blobs with ON CONFLICT for cross-batch dedup.
         {
-            if let Some(ref blob_store) = self.blob_store {
+            if let Some(blob_store) = self.blob_store.as_ref().filter(|_| use_external) {
                 // External mode: metadata only in SQLite, data via BlobStore.
                 let mut blob_stmt = tx.prepare_cached(
                     "INSERT INTO payload_blobs(
@@ -739,7 +790,9 @@ impl Store {
             ("zstd_raw", None)
         };
 
-        if let Some(ref blob_store) = self.blob_store {
+        if let Some(blob_store) =
+            self.blob_store.as_ref().filter(|_| self.should_use_external_blobs())
+        {
             // External mode: metadata in SQLite, data via BlobStore.
             conn.execute(
                 "INSERT INTO payload_blobs(

@@ -9,7 +9,7 @@ targets = [
     { triple = "aarch64-unknown-linux-musl" },
     { triple = "aarch64-unknown-linux-gnu" },
 ]
-all-features = false
+all-features = true
 
 [advisories]
 version = 2
@@ -51,9 +51,10 @@ deny = [
     { name = "openssl-sys" },
     { name = "async-std" },
     { name = "rusoto_core" },
-    # aws-lc-rs is the chosen crypto provider for rustls; ring is banned
-    # everywhere, including transitively.
-    { name = "ring" },
+    # aws-lc-rs is the chosen crypto provider for rustls.  ring is banned
+    # for TLS, but object_store uses it internally for S3 content-MD5.
+    # We allow it only as a transitive dep of object_store.
+    { name = "ring", wrappers = ["object_store", "rustls", "rustls-webpki"] },
 ]
 
 [sources]
