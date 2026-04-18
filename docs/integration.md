@@ -556,6 +556,7 @@ db_path = "keplor.db"              # SQLite file path
 retention_days = 90                 # legacy global GC (0 = disabled; prefer [retention] tiers)
 wal_checkpoint_secs = 300           # WAL truncation interval (0 = disabled)
 gc_interval_secs = 3600            # how often GC runs (0 = disabled)
+blob_offload_threshold_mb = 0      # auto-offload when SQLite exceeds this (0 = manual)
 
 [auth]
 api_keys = []                       # simple format (open mode when empty)
@@ -688,6 +689,30 @@ When events are deleted (via retention GC or the DELETE API), Keplor:
 2. If the count reaches zero, deletes the blob from the object store
 
 Failed external deletes are logged as warnings but don't block GC. Orphaned blobs in S3 waste storage but don't cause correctness issues.
+
+#### Smart routing (automatic offloading)
+
+Set `blob_offload_threshold_mb` to start in SQLite and offload automatically when the database grows:
+
+```toml
+[storage]
+blob_offload_threshold_mb = 500   # stay in SQLite until 500 MB
+
+[blob_storage]
+bucket = "keplor-blobs"
+endpoint = "https://<account-id>.r2.cloudflarestorage.com"
+region = "auto"
+access_key_id = "..."
+secret_access_key = "..."
+```
+
+| Threshold | Behavior |
+|-----------|----------|
+| `0` (default) | All new blobs go to external store when `[blob_storage]` is configured |
+| `> 0` | Embedded until SQLite exceeds threshold, then auto-offload |
+| No `[blob_storage]` | Always embedded regardless of threshold |
+
+Keplor re-evaluates the SQLite size on each batch flush (~50ms). When GC shrinks the database back below the threshold, new blobs return to SQLite. Old blobs stay where they were written — the hybrid reader handles both seamlessly.
 
 #### Migration from embedded to S3
 

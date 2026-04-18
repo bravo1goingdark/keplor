@@ -76,7 +76,8 @@ $ cp target/release/keplor /usr/local/bin/" />
 
 <h2 id="next">Next steps</h2>
 <p>
+  <a href="{base}/docs/integration">Integration Guide</a> &mdash; Python, Node.js, LiteLLM, S3/R2 setup, tiered retention.<br />
   <a href="{base}/docs/api-reference">API Reference</a> &mdash; full endpoint docs.<br />
-  <a href="{base}/docs/configuration">Configuration</a> &mdash; auth, storage, tuning.<br />
+  <a href="{base}/docs/configuration">Configuration</a> &mdash; auth, blob storage, retention tiers, tuning.<br />
   <a href="{base}/docs/cli">CLI Reference</a> &mdash; all commands.
 </p>

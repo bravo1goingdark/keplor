@@ -19,6 +19,8 @@ db_path = "/var/lib/keplor/keplor.db"   # SQLite database path
 # max_db_size_mb = 0               # max database size in MB (0 = unlimited)
                                     # returns HTTP 507 when exceeded
 # read_pool_size = 4               # number of SQLite read connections (1-64)
+# blob_offload_threshold_mb = 0    # auto-offload blobs to S3/R2 when SQLite
+                                    # exceeds this size (0 = manual mode)
 
 # ── Authentication ───────────────────────────────────────────────────────
 # When empty, all endpoints are open (no auth required).

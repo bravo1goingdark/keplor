@@ -25,6 +25,7 @@ wal_checkpoint_secs = 300
 max_db_size_mb = 0           # 0 = unlimited
 read_pool_size = 4           # SQLite read connections (1-64)
 gc_interval_secs = 3600     # how often GC runs (0 = disabled)
+blob_offload_threshold_mb = 0  # auto-offload when SQLite exceeds this (0 = manual)
 
 [auth]
 api_keys = ["prod-svc:sk-prod-abc123", "staging:sk-staging-def456"]
@@ -100,6 +101,7 @@ burst = 200
     <tr><td><code>max_db_size_mb</code></td><td>u64</td><td><code>0</code></td><td>Max database size in MB (0 = unlimited). Returns HTTP 507 when exceeded.</td></tr>
     <tr><td><code>read_pool_size</code></td><td>usize</td><td><code>4</code></td><td>Number of SQLite read connections (range: 1&ndash;64)</td></tr>
     <tr><td><code>gc_interval_secs</code></td><td>u64</td><td><code>3600</code></td><td>How often GC runs in seconds (0 = disabled)</td></tr>
+    <tr><td><code>blob_offload_threshold_mb</code></td><td>u64</td><td><code>0</code></td><td>Auto-offload blobs to external store when SQLite exceeds this size (0 = manual mode). Requires <code>[blob_storage]</code>.</td></tr>
   </tbody>
 </table>
 
@@ -126,15 +128,29 @@ burst = 200
 <h2 id="blob-storage">[blob_storage] (optional, --features s3)</h2>
 <p>Offload request/response body blobs to an S3-compatible object store (Cloudflare R2, MinIO, AWS S3). Event metadata stays in SQLite; only the heavy compressed payloads move.</p>
 <table>
-  <thead><tr><th>Key</th><th>Type</th><th>Description</th></tr></thead>
+  <thead><tr><th>Key</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
   <tbody>
-    <tr><td><code>bucket</code></td><td>string</td><td>Bucket name</td></tr>
-    <tr><td><code>endpoint</code></td><td>string</td><td>S3 endpoint URL</td></tr>
-    <tr><td><code>region</code></td><td>string</td><td>Region (<code>"auto"</code> for R2, <code>"us-east-1"</code> for AWS)</td></tr>
-    <tr><td><code>access_key_id</code></td><td>string</td><td>Access key</td></tr>
-    <tr><td><code>secret_access_key</code></td><td>string</td><td>Secret key</td></tr>
-    <tr><td><code>prefix</code></td><td>string</td><td>Optional key prefix (e.g. <code>"blobs/"</code>)</td></tr>
-    <tr><td><code>path_style</code></td><td>bool</td><td>Use path-style addressing (required for MinIO)</td></tr>
+    <tr><td><code>bucket</code></td><td>string</td><td></td><td>Bucket name</td></tr>
+    <tr><td><code>endpoint</code></td><td>string</td><td></td><td>S3 endpoint URL</td></tr>
+    <tr><td><code>region</code></td><td>string</td><td></td><td>Region (<code>"auto"</code> for R2, <code>"us-east-1"</code> for AWS)</td></tr>
+    <tr><td><code>access_key_id</code></td><td>string</td><td></td><td>Access key</td></tr>
+    <tr><td><code>secret_access_key</code></td><td>string</td><td></td><td>Secret key</td></tr>
+    <tr><td><code>prefix</code></td><td>string</td><td><code>""</code></td><td>Optional key prefix (e.g. <code>"blobs/"</code>)</td></tr>
+    <tr><td><code>path_style</code></td><td>bool</td><td><code>false</code></td><td>Use path-style addressing (required for MinIO)</td></tr>
+  </tbody>
+</table>
+
+<h3>Smart blob routing</h3>
+<p>By default, when <code>[blob_storage]</code> is configured, <strong>all</strong> new blobs go to the external store. To start with SQLite and offload only when the database grows large, set <code>blob_offload_threshold_mb</code>:</p>
+<pre><code>[storage]
+blob_offload_threshold_mb = 500   # stay in SQLite until 500 MB, then offload</code></pre>
+<p>Keplor re-evaluates the SQLite size on each batch flush (~every 50ms). When the DB exceeds the threshold, new blobs go to S3/R2. When GC brings it back below, blobs return to SQLite. Old blobs stay where they were written &mdash; the hybrid reader handles both seamlessly.</p>
+<table>
+  <thead><tr><th>Threshold</th><th>Behavior</th></tr></thead>
+  <tbody>
+    <tr><td><code>0</code> (default)</td><td>All new blobs go to external store when <code>[blob_storage]</code> is set</td></tr>
+    <tr><td><code>&gt; 0</code></td><td>Embedded until SQLite exceeds threshold, then auto-offload</td></tr>
+    <tr><td>No <code>[blob_storage]</code></td><td>Always embedded regardless of threshold</td></tr>
   </tbody>
 </table>
 

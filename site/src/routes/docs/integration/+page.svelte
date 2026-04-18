@@ -424,6 +424,11 @@ tier = "pro"</code></pre>
 
 <p>Blobs are keyed by SHA-256 hash, so identical payloads (repeated system prompts) are naturally deduplicated. GC automatically deletes orphaned blobs from the external store when events expire.</p>
 
+<h4>Smart routing</h4>
+<p>Don't want to offload immediately? Set a SQLite size threshold &mdash; blobs stay in SQLite until the database grows past it, then automatically route to S3/R2:</p>
+<Pre code={'[storage]\nblob_offload_threshold_mb = 500   # embedded until 500 MB, then auto-offload\n\n[blob_storage]\nbucket = "keplor-blobs"\nendpoint = "https://<account-id>.r2.cloudflarestorage.com"\nregion = "auto"\naccess_key_id = "..."\nsecret_access_key = "..."'} />
+<p>Keplor checks the DB size on each batch flush. When GC shrinks the database back below the threshold, new blobs go back to SQLite. Old blobs stay where they were written &mdash; the hybrid reader handles both.</p>
+
 <p>Build command: <code>cargo build --release --features mimalloc,s3</code></p>
 
 <h3>JSON structured logging</h3>
@@ -434,7 +439,8 @@ tier = "pro"</code></pre>
 <p>On SIGINT/SIGTERM, Keplor stops accepting connections, drains the batch writer (flushes all pending events), runs a WAL checkpoint, and exits. Drain waits up to <code>shutdown_timeout_secs</code>.</p>
 
 <h3>Automated GC</h3>
-<p>When <code>retention_days</code> is set, an hourly background task deletes events older than the retention window and removes orphaned blobs. Set to <code>0</code> to disable.</p>
+<p>Keplor runs tiered garbage collection every <code>gc_interval_secs</code> (default: 1 hour). Each configured retention tier gets its own pass &mdash; free-tier events older than 7 days are deleted independently of pro-tier events at 90 days. Orphaned blobs are removed from both SQLite and external storage (S3/R2) automatically.</p>
+<p>Set <code>gc_interval_secs = 0</code> to disable. You can still run <code>keplor gc --older-than-days N</code> manually.</p>
 
 <h2 id="metrics">Prometheus metrics</h2>
 <p>Scrape <code>GET /metrics</code> (no auth required).</p>
