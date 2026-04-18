@@ -52,10 +52,9 @@ impl RateLimiter {
         let burst = self.config.burst as f64;
         let rps = self.config.requests_per_second;
 
-        let bucket = buckets.entry(SmolStr::new(key)).or_insert(TokenBucket {
-            tokens: burst,
-            last_refill: now,
-        });
+        let bucket = buckets
+            .entry(SmolStr::new(key))
+            .or_insert(TokenBucket { tokens: burst, last_refill: now });
 
         // Refill tokens based on elapsed time.
         let elapsed = now.duration_since(bucket.last_refill).as_secs_f64();

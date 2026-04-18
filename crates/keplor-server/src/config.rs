@@ -187,16 +187,10 @@ impl ServerConfig {
         }
         if let Some(tls) = &self.tls {
             if !tls.cert_path.exists() {
-                return Err(format!(
-                    "tls.cert_path does not exist: {}",
-                    tls.cert_path.display()
-                ));
+                return Err(format!("tls.cert_path does not exist: {}", tls.cert_path.display()));
             }
             if !tls.key_path.exists() {
-                return Err(format!(
-                    "tls.key_path does not exist: {}",
-                    tls.key_path.display()
-                ));
+                return Err(format!("tls.key_path does not exist: {}", tls.key_path.display()));
             }
         }
         Ok(())

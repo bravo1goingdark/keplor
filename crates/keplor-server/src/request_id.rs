@@ -18,10 +18,7 @@ static X_REQUEST_ID: HeaderName = HeaderName::from_static("x-request-id");
 pub struct RequestId(pub SmolStr);
 
 /// Middleware that reads or generates `X-Request-Id` and propagates it.
-pub async fn propagate_request_id(
-    mut req: Request<axum::body::Body>,
-    next: Next,
-) -> Response {
+pub async fn propagate_request_id(mut req: Request<axum::body::Body>, next: Next) -> Response {
     let id = req
         .headers()
         .get(&X_REQUEST_ID)

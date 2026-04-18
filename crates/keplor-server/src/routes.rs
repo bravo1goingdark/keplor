@@ -33,10 +33,8 @@ pub async fn ingest_single(
     Json(event): Json<IngestEvent>,
 ) -> Result<(StatusCode, Json<IngestResponse>), impl IntoResponse> {
     let key_id = auth.map(|Extension(k)| k.key_id);
-    let idempotency_key = headers
-        .get("idempotency-key")
-        .and_then(|v| v.to_str().ok())
-        .map(String::from);
+    let idempotency_key =
+        headers.get("idempotency-key").and_then(|v| v.to_str().ok()).map(String::from);
     state
         .pipeline
         .ingest(event, key_id.as_deref(), idempotency_key.as_deref())
@@ -473,14 +471,16 @@ fn ns_to_day_epoch(ns: i64) -> i64 {
 /// `GET /health` — liveness probe with DB and queue status.
 pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
     let store = state.pipeline.store_arc();
-    let db_ok = tokio::task::spawn_blocking(move || store.health_probe().is_ok())
-        .await
-        .unwrap_or(false);
+    let db_ok =
+        tokio::task::spawn_blocking(move || store.health_probe().is_ok()).await.unwrap_or(false);
 
     let queue_depth = state.pipeline.queue_depth();
     let queue_capacity = state.pipeline.queue_capacity();
-    let queue_pct =
-        if queue_capacity > 0 { (queue_depth as f64 / queue_capacity as f64 * 100.0) as u32 } else { 0 };
+    let queue_pct = if queue_capacity > 0 {
+        (queue_depth as f64 / queue_capacity as f64 * 100.0) as u32
+    } else {
+        0
+    };
 
     let status = if db_ok { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE };
     (

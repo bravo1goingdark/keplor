@@ -129,9 +129,7 @@ impl PipelineServer {
                     |e| panic!("failed to open key {}: {e}", tls.key_path.display()),
                 ));
 
-            let certs: Vec<_> = rustls_pemfile::certs(cert_file)
-                .filter_map(|c| c.ok())
-                .collect();
+            let certs: Vec<_> = rustls_pemfile::certs(cert_file).filter_map(|c| c.ok()).collect();
             let key = rustls_pemfile::private_key(key_file)
                 .ok()
                 .flatten()
@@ -205,9 +203,7 @@ impl PipelineServer {
                 .with_graceful_shutdown(shutdown_signal())
                 .await?;
         } else {
-            axum::serve(listener, self.router)
-                .with_graceful_shutdown(shutdown_signal())
-                .await?;
+            axum::serve(listener, self.router).with_graceful_shutdown(shutdown_signal()).await?;
         }
 
         // ── Post-shutdown cleanup ────────────────────────────────

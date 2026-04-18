@@ -51,9 +51,7 @@ pub fn validate(event: &IngestEvent) -> Result<(), ServerError> {
     // Timestamp bounds.
     if let Some(TimestampInput::EpochNanos(ns)) = &event.timestamp {
         if *ns < MIN_TS_NS {
-            return Err(ServerError::Validation(
-                "timestamp is before 2020-01-01".into(),
-            ));
+            return Err(ServerError::Validation("timestamp is before 2020-01-01".into()));
         }
         // Reject timestamps more than 24h in the future.
         let now_ns = std::time::SystemTime::now()
@@ -120,9 +118,7 @@ fn validate_tokens(u: &crate::schema::IngestUsage) -> Result<(), ServerError> {
 fn check_len(value: Option<&str>, name: &str, max: usize) -> Result<(), ServerError> {
     if let Some(v) = value {
         if v.len() > max {
-            return Err(ServerError::Validation(format!(
-                "{name} exceeds {max} characters"
-            )));
+            return Err(ServerError::Validation(format!("{name} exceeds {max} characters")));
         }
     }
     Ok(())
