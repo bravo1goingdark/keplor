@@ -1,5 +1,9 @@
 //! The `keplor` binary — LLM log aggregation pipeline.
 
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -160,7 +164,11 @@ fn run_server(config_path: PathBuf, json_logs: bool) -> Result<()> {
         }
 
         // Build and run server.
-        let keys = keplor_server::auth::ApiKeySet::new(config.auth.api_keys.clone());
+        let keys = keplor_server::auth::ApiKeySet::from_config(
+            config.auth.api_keys.clone(),
+            config.auth.api_key_entries.clone(),
+            &config.retention.default_tier,
+        );
         let server = keplor_server::PipelineServer::new(pipeline, keys, &config, metrics_handle);
 
         tracing::info!("keplor starting");

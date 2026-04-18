@@ -25,6 +25,11 @@ pub struct ServerConfig {
     pub cors: CorsConfig,
     /// Optional TLS configuration. When present, the server listens with TLS.
     pub tls: Option<TlsConfig>,
+    /// Retention tier configuration.
+    pub retention: RetentionConfig,
+    /// Optional S3-compatible blob storage for request/response bodies.
+    #[cfg(feature = "s3")]
+    pub blob_storage: Option<keplor_store::blob::s3::S3BlobConfig>,
 }
 
 /// TLS configuration for HTTPS listeners.
@@ -77,6 +82,8 @@ pub struct StorageConfig {
     pub max_db_size_mb: u64,
     /// Number of read connections in the pool. Default: 4.
     pub read_pool_size: usize,
+    /// GC run interval in seconds. Default: 3600 (1 hour). 0 = disabled.
+    pub gc_interval_secs: u64,
 }
 
 impl Default for StorageConfig {
@@ -87,17 +94,112 @@ impl Default for StorageConfig {
             wal_checkpoint_secs: 300,
             max_db_size_mb: 0,
             read_pool_size: 4,
+            gc_interval_secs: 3600,
         }
     }
 }
 
 /// Authentication configuration.
+///
+/// API keys can be specified in two formats:
+///
+/// **Simple format** (backward compatible):
+/// ```toml
+/// api_keys = ["prod:sk-abc123", "sk-bare-secret"]
+/// ```
+///
+/// **Extended format** (with tier):
+/// ```toml
+/// [[auth.api_key_entries]]
+/// id = "prod"
+/// secret = "sk-abc123"
+/// tier = "pro"
+///
+/// [[auth.api_key_entries]]
+/// id = "dev"
+/// secret = "sk-xyz789"
+/// tier = "free"
+/// ```
+///
+/// When both are provided, they are merged.  Simple-format keys
+/// default to the `default_tier` from `[retention]`.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct AuthConfig {
-    /// API keys that are allowed to ingest events.
-    /// When empty, authentication is disabled (open access).
+    /// Simple API keys (`"id:secret"` or `"secret"`).
+    /// These default to the `default_tier` from retention config.
     pub api_keys: Vec<String>,
+
+    /// Extended API key entries with explicit tier assignment.
+    pub api_key_entries: Vec<ApiKeyEntry>,
+}
+
+/// An API key entry with an explicit tier.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ApiKeyEntry {
+    /// Key identifier (shown in logs, stored in `api_key_id`).
+    pub id: String,
+    /// The secret value used in `Authorization: Bearer <secret>`.
+    pub secret: String,
+    /// Retention tier name (e.g. `"free"`, `"pro"`, `"team"`).
+    /// Defaults to `"free"` if omitted.
+    #[serde(default = "default_tier_name")]
+    pub tier: String,
+}
+
+fn default_tier_name() -> String {
+    "free".to_owned()
+}
+
+/// Retention tier configuration.
+///
+/// Defines named tiers with per-tier retention durations.  API keys
+/// are mapped to tiers via [`AuthConfig`].  GC runs one pass per tier.
+///
+/// ```toml
+/// [retention]
+/// default_tier = "free"
+///
+/// [[retention.tiers]]
+/// name = "free"
+/// days = 7
+///
+/// [[retention.tiers]]
+/// name = "pro"
+/// days = 90
+///
+/// [[retention.tiers]]
+/// name = "team"
+/// days = 180
+/// ```
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct RetentionConfig {
+    /// Tier name assigned to keys without an explicit tier.
+    pub default_tier: String,
+    /// Named retention tiers.
+    pub tiers: Vec<RetentionTier>,
+}
+
+impl Default for RetentionConfig {
+    fn default() -> Self {
+        Self {
+            default_tier: "free".to_owned(),
+            tiers: vec![
+                RetentionTier { name: "free".to_owned(), days: 7 },
+                RetentionTier { name: "pro".to_owned(), days: 90 },
+            ],
+        }
+    }
+}
+
+/// A named retention tier.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RetentionTier {
+    /// Tier name (e.g. `"free"`, `"pro"`, `"team"`, `"enterprise"`).
+    pub name: String,
+    /// How many days to retain events for this tier. 0 = keep forever.
+    pub days: u64,
 }
 
 /// Idempotency cache configuration.
@@ -220,6 +322,27 @@ impl ServerConfig {
             }
             if !tls.key_path.exists() {
                 return Err(format!("tls.key_path does not exist: {}", tls.key_path.display()));
+            }
+        }
+        // Validate retention tiers.
+        if self.retention.tiers.is_empty() {
+            return Err("retention.tiers must have at least one tier".into());
+        }
+        for tier in &self.retention.tiers {
+            if tier.name.is_empty() {
+                return Err("retention tier name must not be empty".into());
+            }
+        }
+        if !self.retention.tiers.iter().any(|t| t.name == self.retention.default_tier) {
+            return Err(format!(
+                "retention.default_tier '{}' does not match any defined tier",
+                self.retention.default_tier
+            ));
+        }
+        // Validate that extended key entries have non-empty fields.
+        for entry in &self.auth.api_key_entries {
+            if entry.id.is_empty() || entry.secret.is_empty() {
+                return Err("api_key_entries: id and secret must not be empty".into());
             }
         }
         Ok(())

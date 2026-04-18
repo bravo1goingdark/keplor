@@ -25,7 +25,7 @@ async fn spawn_server(api_keys: Vec<String>) -> String {
     let catalog = Arc::new(Catalog::load_bundled().unwrap());
     let pipeline = Pipeline::new(store, writer, catalog);
 
-    let keys = ApiKeySet::new(api_keys);
+    let keys = ApiKeySet::new(api_keys, "free");
     let config = ServerConfig::default();
     let metrics_handle = install_metrics_recorder();
     let server = PipelineServer::new(pipeline, keys, &config, metrics_handle);

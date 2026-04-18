@@ -23,6 +23,8 @@ pub struct AppState {
     pub pipeline: Pipeline,
     /// Prometheus metrics handle for rendering.
     pub metrics_handle: Arc<PrometheusHandle>,
+    /// Default retention tier for unauthenticated requests.
+    pub default_tier: SmolStr,
 }
 
 /// `POST /v1/events` — ingest a single event.
@@ -32,12 +34,14 @@ pub async fn ingest_single(
     headers: axum::http::HeaderMap,
     Json(event): Json<IngestEvent>,
 ) -> Result<(StatusCode, Json<IngestResponse>), impl IntoResponse> {
-    let key_id = auth.map(|Extension(k)| k.key_id);
+    let (key_id, tier) = auth
+        .map(|Extension(k)| (Some(k.key_id), k.tier.to_string()))
+        .unwrap_or((None, state.default_tier.to_string()));
     let idempotency_key =
         headers.get("idempotency-key").and_then(|v| v.to_str().ok()).map(String::from);
     state
         .pipeline
-        .ingest(event, key_id.as_deref(), idempotency_key.as_deref())
+        .ingest(event, key_id.as_deref(), idempotency_key.as_deref(), &tier)
         .await
         .map(|resp| (StatusCode::CREATED, Json(resp)))
 }
@@ -73,14 +77,16 @@ pub async fn ingest_batch(
         .and_then(|v| v.to_str().ok())
         .is_some_and(|v| v.eq_ignore_ascii_case("true"));
 
-    let key_id = auth.map(|Extension(k)| k.key_id);
+    let (key_id, tier) = auth
+        .map(|Extension(k)| (Some(k.key_id), k.tier.to_string()))
+        .unwrap_or((None, state.default_tier.to_string()));
     let mut results = Vec::with_capacity(batch.events.len());
     let mut accepted = 0usize;
     let mut rejected = 0usize;
 
     if durable {
         for event in batch.events {
-            match state.pipeline.ingest(event, key_id.as_deref(), None).await {
+            match state.pipeline.ingest(event, key_id.as_deref(), None, &tier).await {
                 Ok(resp) => {
                     accepted += 1;
                     results.push(BatchItemResult::Ok(resp));
@@ -93,7 +99,7 @@ pub async fn ingest_batch(
         }
     } else {
         for event in batch.events {
-            match state.pipeline.ingest_fire_and_forget(event, key_id.as_deref()) {
+            match state.pipeline.ingest_fire_and_forget(event, key_id.as_deref(), &tier) {
                 Ok(resp) => {
                     accepted += 1;
                     results.push(BatchItemResult::Ok(resp));

@@ -41,6 +41,15 @@ tokio-rustls      = { workspace = true }
 rustls-pki-types  = { workspace = true }
 time            = { version = "0.3", features = ["parsing"] }
 
+[features]
+default  = []
+mimalloc = ["dep:mimalloc"]
+s3       = ["keplor-store/s3"]
+
+[dependencies.mimalloc]
+version  = "0.1"
+optional = true
+
 [dev-dependencies]
 tokio      = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
 reqwest    = { workspace = true }
@@ -48,3 +57,13 @@ serde_json = { workspace = true }
 rcgen      = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"] }
 tempfile   = "3"
 rustls     = { workspace = true }
+criterion  = { workspace = true }
+dhat       = { workspace = true }
+
+[[bench]]
+name    = "pipeline_bench"
+harness = false
+
+[[bench]]
+name    = "dhat_pipeline"
+harness = false

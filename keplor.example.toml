@@ -22,12 +22,53 @@ db_path = "/var/lib/keplor/keplor.db"   # SQLite database path
 
 # ── Authentication ───────────────────────────────────────────────────────
 # When empty, all endpoints are open (no auth required).
-# Format: "id:secret" or bare "secret" (auto-derives a stable key ID).
+#
+# Simple format: "id:secret" — all keys default to default_tier.
 [auth]
 # api_keys = [
 #     "prod-svc:sk-your-production-key",
 #     "dev:sk-your-dev-key",
 # ]
+
+# Extended format: explicit tier per key.
+# [[auth.api_key_entries]]
+# id = "free-user"
+# secret = "sk-free-key"
+# tier = "free"
+#
+# [[auth.api_key_entries]]
+# id = "pro-user"
+# secret = "sk-pro-key"
+# tier = "pro"
+#
+# [[auth.api_key_entries]]
+# id = "team-org"
+# secret = "sk-team-key"
+# tier = "team"
+
+# ── Retention tiers ──────────────────────────────────────────────────────
+# Define named tiers with per-tier retention durations.
+# API keys are mapped to tiers via [auth] config above.
+# GC runs hourly, one pass per tier. 0 days = keep forever.
+[retention]
+default_tier = "free"
+
+[[retention.tiers]]
+name = "free"
+days = 7
+
+[[retention.tiers]]
+name = "pro"
+days = 90
+
+# Uncomment to add more tiers:
+# [[retention.tiers]]
+# name = "team"
+# days = 180
+#
+# [[retention.tiers]]
+# name = "enterprise"
+# days = 365
 
 # ── CORS ─────────────────────────────────────────────────────────────────
 # Allowed origins for browser requests.
@@ -52,6 +93,19 @@ db_path = "/var/lib/keplor/keplor.db"   # SQLite database path
 # enabled = false                  # set true to enable per-key limiting
 # requests_per_second = 100.0
 # burst = 200
+
+# ── Blob storage (optional, requires --features s3) ──────────────────────
+# By default, request/response bodies are stored in the SQLite database.
+# Uncomment to offload blob data to an S3-compatible object store
+# (Cloudflare R2, MinIO, AWS S3). Metadata stays in SQLite.
+# [blob_storage]
+# bucket = "keplor-blobs"
+# endpoint = "https://<account-id>.r2.cloudflarestorage.com"
+# region = "auto"                    # "auto" for R2, "us-east-1" for AWS
+# access_key_id = "your-access-key"
+# secret_access_key = "your-secret-key"
+# prefix = ""                        # optional key prefix (e.g. "blobs/")
+# path_style = false                 # true for MinIO
 
 # ── TLS (optional) ───────────────────────────────────────────────────────
 # Uncomment to enable HTTPS. Both cert_path and key_path are required.

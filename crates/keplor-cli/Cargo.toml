@@ -16,6 +16,11 @@ path = "src/main.rs"
 [lints]
 workspace = true
 
+[features]
+default  = []
+mimalloc = ["dep:mimalloc"]
+s3       = ["keplor-server/s3"]
+
 [dependencies]
 keplor-core    = { path = "../keplor-core" }
 keplor-server  = { path = "../keplor-server" }
@@ -29,5 +34,7 @@ tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
 anyhow             = { workspace = true }
 serde_json         = { workspace = true }
 smol_str           = { version = "0.3" }
+
+mimalloc = { version = "0.1", optional = true }
 
 [dev-dependencies]

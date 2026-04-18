@@ -8,7 +8,6 @@ use keplor_core::{EventFlags, EventId, Latencies, LlmEvent, Provider, ProviderEr
 use keplor_pricing::compute::{compute_cost, CostOpts};
 use keplor_pricing::{Catalog, ModelKey};
 use keplor_store::{BatchWriter, Store};
-use sha2::{Digest, Sha256};
 use smol_str::SmolStr;
 
 use crate::error::ServerError;
@@ -89,6 +88,7 @@ impl Pipeline {
         event: IngestEvent,
         authenticated_key_id: Option<&str>,
         idempotency_key: Option<&str>,
+        tier: &str,
     ) -> Result<IngestResponse, ServerError> {
         // Check idempotency cache.
         if let (Some(key), Some(cache)) = (idempotency_key, &self.idempotency) {
@@ -101,7 +101,7 @@ impl Pipeline {
 
         let start = std::time::Instant::now();
         let (llm_event, req_bytes, resp_bytes, provider, model, cost) =
-            self.process_event(event, authenticated_key_id)?;
+            self.process_event(event, authenticated_key_id, tier)?;
 
         let id = tokio::time::timeout(
             std::time::Duration::from_secs(10),
@@ -144,10 +144,11 @@ impl Pipeline {
         &self,
         event: IngestEvent,
         authenticated_key_id: Option<&str>,
+        tier: &str,
     ) -> Result<IngestResponse, ServerError> {
         self.check_db_size()?;
         let (llm_event, req_bytes, resp_bytes, provider, model, cost) =
-            self.process_event(event, authenticated_key_id)?;
+            self.process_event(event, authenticated_key_id, tier)?;
 
         let id = llm_event.id;
         self.writer.write_fire_and_forget(llm_event, req_bytes, resp_bytes).map_err(|e| {
@@ -172,6 +173,7 @@ impl Pipeline {
         &self,
         mut event: IngestEvent,
         authenticated_key_id: Option<&str>,
+        tier: &str,
     ) -> Result<(LlmEvent, Bytes, Bytes, Provider, SmolStr, i64), ServerError> {
         // Server-side key attribution: override client-provided api_key_id
         // with the authenticated key identity to prevent spoofing.
@@ -189,26 +191,18 @@ impl Pipeline {
         let cost =
             event.cost_nanodollars.unwrap_or_else(|| self.compute_cost(&provider, &model, &usage));
 
-        // Bodies are already raw JSON bytes from the HTTP payload — no
-        // re-serialization needed thanks to RawValue deserialization.
+        // Extract bodies before moving event into build_llm_event.
+        // RawValue bytes pass through without re-serialization.
         let req_bytes = match &event.request_body {
-            Some(v) => Bytes::from(v.get().as_bytes().to_vec()),
+            Some(v) => Bytes::copy_from_slice(v.get().as_bytes()),
             None => Bytes::new(),
         };
         let resp_bytes = match &event.response_body {
-            Some(v) => Bytes::from(v.get().as_bytes().to_vec()),
+            Some(v) => Bytes::copy_from_slice(v.get().as_bytes()),
             None => Bytes::new(),
         };
 
-        let llm_event = build_llm_event(
-            &event,
-            provider.clone(),
-            model.clone(),
-            cost,
-            usage,
-            &req_bytes,
-            &resp_bytes,
-        )?;
+        let llm_event = build_llm_event(event, provider.clone(), model.clone(), cost, usage, tier)?;
 
         Ok((llm_event, req_bytes, resp_bytes, provider, model, cost))
     }
@@ -289,15 +283,18 @@ fn parse_iso8601(s: &str) -> Result<i64, ServerError> {
     Ok(dt.unix_timestamp_nanos() as i64)
 }
 
-/// Build the canonical event. Body bytes are pre-serialized — only SHA256 is computed here.
+/// Build the canonical event from an ingested payload.
+///
+/// SHA-256 of bodies is deferred to the batch writer — computing hashes
+/// here would block the request thread for work the store repeats anyway
+/// (it hashes individual components, not whole bodies).
 fn build_llm_event(
-    event: &IngestEvent,
+    event: IngestEvent,
     provider: Provider,
     model: SmolStr,
     cost: i64,
     usage: Usage,
-    req_bytes: &[u8],
-    resp_bytes: &[u8],
+    tier: &str,
 ) -> Result<LlmEvent, ServerError> {
     let now_ns = now_nanos();
 
@@ -350,23 +347,19 @@ fn build_llm_event(
         },
         flags,
         error,
-        request_sha256: sha256_bytes(req_bytes),
-        response_sha256: sha256_bytes(resp_bytes),
+        // Deferred to batch writer — [0;32] signals "compute on write".
+        request_sha256: [0u8; 32],
+        response_sha256: [0u8; 32],
         client_ip: event.client_ip.as_deref().and_then(|s| s.parse().ok()),
         user_agent: event.user_agent.as_deref().map(SmolStr::new),
         request_id: event.request_id.as_deref().map(SmolStr::new),
         trace_id: event.trace_id.as_deref().and_then(|s| s.parse().ok()),
         source: event.source.as_deref().map(SmolStr::new),
         ingested_at: now_ns,
-        metadata: event.metadata.clone(),
+        // Take ownership — avoids cloning the serde_json::Value.
+        metadata: event.metadata,
+        tier: SmolStr::new(tier),
     })
-}
-
-#[inline]
-fn sha256_bytes(data: &[u8]) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    hasher.update(data);
-    hasher.finalize().into()
 }
 
 fn error_from_ingest(e: &crate::schema::IngestError) -> ProviderError {
@@ -400,7 +393,7 @@ mod tests {
         let pipeline = test_pipeline();
         let event: IngestEvent =
             serde_json::from_str(r#"{"model":"gpt-4o","provider":"openai"}"#).unwrap();
-        let resp = pipeline.ingest(event, None, None).await.unwrap();
+        let resp = pipeline.ingest(event, None, None, "free").await.unwrap();
         assert!(!resp.id.is_empty());
         assert_eq!(resp.provider, "openai");
         assert_eq!(resp.model, "gpt-4o");
@@ -413,7 +406,7 @@ mod tests {
             r#"{"model":"gpt-4o","provider":"openai","usage":{"input_tokens":1000,"output_tokens":500}}"#,
         )
         .unwrap();
-        let resp = pipeline.ingest(event, None, None).await.unwrap();
+        let resp = pipeline.ingest(event, None, None, "free").await.unwrap();
         assert!(resp.cost_nanodollars > 0, "cost should be > 0 for known model with usage");
     }
 
@@ -424,7 +417,7 @@ mod tests {
             r#"{"model":"totally-fake-model","provider":"openai","usage":{"input_tokens":1000}}"#,
         )
         .unwrap();
-        let resp = pipeline.ingest(event, None, None).await.unwrap();
+        let resp = pipeline.ingest(event, None, None, "free").await.unwrap();
         assert_eq!(resp.cost_nanodollars, 0);
     }
 
@@ -433,7 +426,7 @@ mod tests {
         let pipeline = test_pipeline();
         let event: IngestEvent =
             serde_json::from_str(r#"{"model":"","provider":"openai"}"#).unwrap();
-        assert!(pipeline.ingest(event, None, None).await.is_err());
+        assert!(pipeline.ingest(event, None, None, "free").await.is_err());
     }
 
     #[tokio::test]
@@ -447,7 +440,7 @@ mod tests {
             r#"{"model":"gpt-4o","provider":"openai","source":"litellm","user_id":"alice"}"#,
         )
         .unwrap();
-        let resp = pipeline.ingest(event, None, None).await.unwrap();
+        let resp = pipeline.ingest(event, None, None, "free").await.unwrap();
 
         let id: EventId = resp.id.parse().unwrap();
         let loaded = store.get_event(&id).unwrap().expect("event should exist");
@@ -471,7 +464,7 @@ mod tests {
             r#"{"model":"gpt-4o","provider":"openai","timestamp":"2024-01-15T10:30:00Z"}"#,
         )
         .unwrap();
-        let resp = pipeline.ingest(event, None, None).await.unwrap();
+        let resp = pipeline.ingest(event, None, None, "free").await.unwrap();
         let id: EventId = resp.id.parse().unwrap();
         let loaded = pipeline.store().get_event(&id).unwrap().unwrap();
         assert!(loaded.ts_ns > 1_705_000_000_000_000_000);
@@ -483,7 +476,7 @@ mod tests {
         let pipeline = test_pipeline();
         let event: IngestEvent =
             serde_json::from_str(r#"{"model":"gpt-4o","provider":"openai"}"#).unwrap();
-        let resp = pipeline.ingest_fire_and_forget(event, None).unwrap();
+        let resp = pipeline.ingest_fire_and_forget(event, None, "free").unwrap();
         assert!(!resp.id.is_empty());
         // Give batch writer time to flush.
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -502,7 +495,7 @@ mod tests {
         .unwrap();
 
         // Simulate server-side key attribution overriding client-provided value.
-        let resp = pipeline.ingest(event, Some("real-key"), None).await.unwrap();
+        let resp = pipeline.ingest(event, Some("real-key"), None, "pro").await.unwrap();
         let id: EventId = resp.id.parse().unwrap();
         let loaded = store.get_event(&id).unwrap().expect("event should exist");
         assert_eq!(

@@ -11,6 +11,7 @@ use axum::middleware;
 use axum::routing::{delete, get, post};
 use axum::Router;
 use metrics_exporter_prometheus::PrometheusHandle;
+use smol_str::SmolStr;
 use tokio::net::TcpListener;
 use tower::ServiceBuilder;
 use tower_http::cors::{AllowOrigin, CorsLayer};
@@ -32,6 +33,8 @@ pub struct PipelineServer {
     writer: Arc<keplor_store::BatchWriter>,
     store: Arc<keplor_store::Store>,
     gc_retention_days: u64,
+    gc_interval_secs: u64,
+    retention_tiers: Vec<crate::config::RetentionTier>,
     wal_checkpoint_secs: u64,
     tls_config: Option<Arc<rustls::ServerConfig>>,
 }
@@ -46,7 +49,8 @@ impl PipelineServer {
     ) -> Self {
         let writer = pipeline.writer_arc();
         let store = pipeline.store_arc();
-        let state = AppState { pipeline, metrics_handle: Arc::new(metrics_handle) };
+        let default_tier = SmolStr::new(&config.retention.default_tier);
+        let state = AppState { pipeline, metrics_handle: Arc::new(metrics_handle), default_tier };
 
         // Spawn background rollup task — refreshes today's daily_rollups
         // every 60s so aggregation queries stay current.
@@ -153,6 +157,8 @@ impl PipelineServer {
             writer,
             store,
             gc_retention_days: config.storage.retention_days,
+            gc_interval_secs: config.storage.gc_interval_secs,
+            retention_tiers: config.retention.tiers.clone(),
             wal_checkpoint_secs: config.storage.wal_checkpoint_secs,
             tls_config,
         }
@@ -182,12 +188,18 @@ impl PipelineServer {
         let store = Arc::clone(&self.store);
         let shutdown_timeout = self.shutdown_timeout;
         let gc_retention_days = self.gc_retention_days;
+        let gc_interval_secs = self.gc_interval_secs;
         let wal_checkpoint_secs = self.wal_checkpoint_secs;
 
-        // Spawn automated GC task if retention is configured.
-        if gc_retention_days > 0 {
+        // Spawn tiered GC task if retention tiers are configured.
+        if gc_interval_secs > 0 && !self.retention_tiers.is_empty() {
             let gc_store = Arc::clone(&store);
-            tokio::spawn(gc_loop(gc_store, gc_retention_days));
+            let tiers = self.retention_tiers.clone();
+            tokio::spawn(gc_tiered_loop(gc_store, tiers, gc_interval_secs));
+        } else if gc_interval_secs > 0 && gc_retention_days > 0 {
+            // Legacy fallback: global retention with no tiers.
+            let gc_store = Arc::clone(&store);
+            tokio::spawn(gc_loop(gc_store, gc_retention_days, gc_interval_secs));
         }
 
         // Spawn WAL checkpoint task.
@@ -257,9 +269,51 @@ async fn shutdown_signal() {
     tracing::info!("shutdown signal received, stopping new connections...");
 }
 
+/// Periodically run tiered garbage collection — one pass per configured tier.
+async fn gc_tiered_loop(
+    store: Arc<keplor_store::Store>,
+    tiers: Vec<crate::config::RetentionTier>,
+    interval_secs: u64,
+) {
+    let interval = Duration::from_secs(interval_secs);
+    loop {
+        tokio::time::sleep(interval).await;
+        let now_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as i64;
+
+        for tier in &tiers {
+            if tier.days == 0 {
+                continue; // 0 = keep forever
+            }
+            let cutoff_ns = now_ns - (tier.days as i64 * 86_400 * 1_000_000_000);
+            let gc_store = Arc::clone(&store);
+            let tier_name = tier.name.clone();
+            match tokio::task::spawn_blocking(move || gc_store.gc_tier(&tier_name, cutoff_ns)).await
+            {
+                Ok(Ok(stats)) => {
+                    if stats.events_deleted > 0 || stats.blobs_deleted > 0 {
+                        tracing::info!(
+                            tier = tier.name,
+                            events = stats.events_deleted,
+                            blobs = stats.blobs_deleted,
+                            retention_days = tier.days,
+                            "tiered gc completed"
+                        );
+                    }
+                },
+                Ok(Err(e)) => tracing::warn!(tier = tier.name, error = %e, "tiered gc failed"),
+                Err(e) => tracing::warn!(tier = tier.name, error = %e, "tiered gc task panicked"),
+            }
+        }
+    }
+}
+
 /// Periodically delete events older than `retention_days` and orphaned blobs.
-async fn gc_loop(store: Arc<keplor_store::Store>, retention_days: u64) {
-    let interval = Duration::from_secs(3600); // Run every hour.
+/// Legacy fallback when no retention tiers are configured.
+async fn gc_loop(store: Arc<keplor_store::Store>, retention_days: u64, interval_secs: u64) {
+    let interval = Duration::from_secs(interval_secs);
     loop {
         tokio::time::sleep(interval).await;
         let cutoff_ns = {

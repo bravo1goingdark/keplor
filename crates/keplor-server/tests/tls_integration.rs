@@ -55,7 +55,7 @@ async fn spawn_tls_server(certs: &CertPair) -> String {
     let catalog = Arc::new(Catalog::load_bundled().unwrap());
     let pipeline = Pipeline::new(store, writer, catalog);
 
-    let keys = ApiKeySet::new(vec![]);
+    let keys = ApiKeySet::new(vec![], "free");
     let config = ServerConfig {
         tls: Some(TlsConfig {
             cert_path: certs.cert_file.path().to_path_buf(),

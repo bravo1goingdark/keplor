@@ -10,6 +10,7 @@ COPY crates crates
 COPY xtask xtask
 
 RUN cargo build --release --locked --target x86_64-unknown-linux-musl -p keplor-cli \
+    --features mimalloc \
     && strip target/x86_64-unknown-linux-musl/release/keplor
 
 # --- Runtime stage: scratch + binary ---
