@@ -32,4 +32,16 @@ pub enum StoreError {
         /// Actual hex sha256.
         actual: String,
     },
+
+    /// The batch writer channel is full — back-pressure signal.
+    #[error("batch writer channel full")]
+    ChannelFull,
+
+    /// The batch writer channel is closed — writer shut down.
+    #[error("batch writer channel closed")]
+    ChannelClosed,
+
+    /// A `std::sync::Mutex` was poisoned by a panicking thread.
+    #[error("lock poisoned: {0}")]
+    LockPoisoned(String),
 }

@@ -6,8 +6,11 @@
 pub mod auth;
 pub mod config;
 pub mod error;
+pub mod idempotency;
 pub mod normalize;
 pub mod pipeline;
+pub mod rate_limit;
+pub mod request_id;
 pub mod rollup;
 pub mod routes;
 pub mod schema;

@@ -17,6 +17,21 @@ pub struct ServerConfig {
     pub auth: AuthConfig,
     /// Pipeline tuning.
     pub pipeline: PipelineConfig,
+    /// Idempotency cache settings.
+    pub idempotency: IdempotencyConfig,
+    /// Per-key rate limiting settings.
+    pub rate_limit: RateLimitServerConfig,
+    /// Optional TLS configuration. When present, the server listens with TLS.
+    pub tls: Option<TlsConfig>,
+}
+
+/// TLS configuration for HTTPS listeners.
+#[derive(Debug, Deserialize)]
+pub struct TlsConfig {
+    /// Path to PEM-encoded certificate chain file.
+    pub cert_path: PathBuf,
+    /// Path to PEM-encoded private key file.
+    pub key_path: PathBuf,
 }
 
 /// HTTP listener configuration.
@@ -69,6 +84,42 @@ pub struct AuthConfig {
     /// API keys that are allowed to ingest events.
     /// When empty, authentication is disabled (open access).
     pub api_keys: Vec<String>,
+}
+
+/// Idempotency cache configuration.
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct IdempotencyConfig {
+    /// Enable idempotency key support. Default: `true`.
+    pub enabled: bool,
+    /// Time-to-live for cached responses in seconds. Default: 300 (5 min).
+    pub ttl_secs: u64,
+    /// Maximum number of cached idempotency keys. Default: 100,000.
+    pub max_entries: usize,
+}
+
+impl Default for IdempotencyConfig {
+    fn default() -> Self {
+        Self { enabled: true, ttl_secs: 300, max_entries: 100_000 }
+    }
+}
+
+/// Per-key rate limiting configuration.
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct RateLimitServerConfig {
+    /// Enable rate limiting. Default: `false`.
+    pub enabled: bool,
+    /// Requests per second per API key. Default: 100.0.
+    pub requests_per_second: f64,
+    /// Burst capacity per API key. Default: 200.
+    pub burst: usize,
+}
+
+impl Default for RateLimitServerConfig {
+    fn default() -> Self {
+        Self { enabled: false, requests_per_second: 100.0, burst: 200 }
+    }
 }
 
 /// Pipeline tuning knobs.
@@ -124,6 +175,29 @@ impl ServerConfig {
         }
         if self.storage.db_path.as_os_str().is_empty() {
             return Err("storage.db_path must not be empty".into());
+        }
+        if self.server.request_timeout_secs == 0 || self.server.request_timeout_secs > 300 {
+            return Err(format!(
+                "server.request_timeout_secs = {} must be in [1, 300]",
+                self.server.request_timeout_secs
+            ));
+        }
+        if self.server.max_connections == 0 {
+            return Err("server.max_connections must be > 0".into());
+        }
+        if let Some(tls) = &self.tls {
+            if !tls.cert_path.exists() {
+                return Err(format!(
+                    "tls.cert_path does not exist: {}",
+                    tls.cert_path.display()
+                ));
+            }
+            if !tls.key_path.exists() {
+                return Err(format!(
+                    "tls.key_path does not exist: {}",
+                    tls.key_path.display()
+                ));
+            }
         }
         Ok(())
     }

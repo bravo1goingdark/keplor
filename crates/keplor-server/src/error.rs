@@ -38,6 +38,12 @@ impl IntoResponse for ServerError {
                 (StatusCode::BAD_REQUEST, self.to_string())
             },
             Self::UnknownProvider(_) => (StatusCode::UNPROCESSABLE_ENTITY, self.to_string()),
+            Self::Store(
+                keplor_store::StoreError::ChannelFull | keplor_store::StoreError::ChannelClosed,
+            ) => {
+                tracing::warn!(error = %self, "back-pressure: batch writer unavailable");
+                (StatusCode::SERVICE_UNAVAILABLE, self.to_string())
+            },
             Self::Store(_) | Self::Internal(_) => {
                 tracing::error!(error = %self, "internal server error");
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error".to_owned())

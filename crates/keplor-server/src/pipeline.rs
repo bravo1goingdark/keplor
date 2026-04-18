@@ -12,6 +12,7 @@ use sha2::{Digest, Sha256};
 use smol_str::SmolStr;
 
 use crate::error::ServerError;
+use crate::idempotency::IdempotencyCache;
 use crate::normalize;
 use crate::schema::{IngestEvent, IngestResponse, TimestampInput};
 use crate::validate;
@@ -31,12 +32,19 @@ pub struct Pipeline {
     store: Arc<Store>,
     writer: Arc<BatchWriter>,
     catalog: Arc<Catalog>,
+    idempotency: Option<Arc<IdempotencyCache>>,
 }
 
 impl Pipeline {
     /// Create a new pipeline with the given store, batch writer, and pricing catalog.
     pub fn new(store: Arc<Store>, writer: Arc<BatchWriter>, catalog: Arc<Catalog>) -> Self {
-        Self { store, writer, catalog }
+        Self { store, writer, catalog, idempotency: None }
+    }
+
+    /// Attach an idempotency cache to the pipeline.
+    pub fn with_idempotency(mut self, cache: Arc<IdempotencyCache>) -> Self {
+        self.idempotency = Some(cache);
+        self
     }
 
     /// Process a single ingestion event — durable write (awaits flush).
@@ -44,13 +52,24 @@ impl Pipeline {
     /// When `authenticated_key_id` is `Some`, it overrides the
     /// client-provided `api_key_id` to prevent spoofing.
     ///
+    /// When `idempotency_key` is `Some` and a cached response exists, the
+    /// cached response is returned without creating a new event.
+    ///
     /// Times out after 10 seconds to prevent indefinite hangs if the
     /// batch writer stalls.
     pub async fn ingest(
         &self,
         event: IngestEvent,
         authenticated_key_id: Option<&str>,
+        idempotency_key: Option<&str>,
     ) -> Result<IngestResponse, ServerError> {
+        // Check idempotency cache.
+        if let (Some(key), Some(cache)) = (idempotency_key, &self.idempotency) {
+            if let Some(cached) = cache.get(key) {
+                return Ok(cached);
+            }
+        }
+
         let start = std::time::Instant::now();
         let (llm_event, req_bytes, resp_bytes, provider, model, cost) =
             self.process_event(event, authenticated_key_id)?;
@@ -70,12 +89,19 @@ impl Pipeline {
         metrics::histogram!("keplor_ingest_duration_seconds").record(elapsed.as_secs_f64());
         self.emit_metrics(&provider, &model);
 
-        Ok(IngestResponse {
+        let resp = IngestResponse {
             id: id.to_string(),
             cost_nanodollars: cost,
             model: model.to_string(),
             provider: provider.id_key().to_owned(),
-        })
+        };
+
+        // Store in idempotency cache.
+        if let (Some(key), Some(cache)) = (idempotency_key, &self.idempotency) {
+            cache.insert(key, resp.clone());
+        }
+
+        Ok(resp)
     }
 
     /// Process and submit without awaiting flush — for batch endpoints.
@@ -170,6 +196,16 @@ impl Pipeline {
     /// Shared batch writer handle (for shutdown draining).
     pub fn writer_arc(&self) -> Arc<BatchWriter> {
         Arc::clone(&self.writer)
+    }
+
+    /// Number of events currently queued in the batch writer channel.
+    pub fn queue_depth(&self) -> usize {
+        self.writer.queue_depth()
+    }
+
+    /// Maximum batch writer channel capacity.
+    pub fn queue_capacity(&self) -> usize {
+        self.writer.max_capacity()
     }
 
     #[inline]
@@ -334,7 +370,7 @@ mod tests {
         let pipeline = test_pipeline();
         let event: IngestEvent =
             serde_json::from_str(r#"{"model":"gpt-4o","provider":"openai"}"#).unwrap();
-        let resp = pipeline.ingest(event, None).await.unwrap();
+        let resp = pipeline.ingest(event, None, None).await.unwrap();
         assert!(!resp.id.is_empty());
         assert_eq!(resp.provider, "openai");
         assert_eq!(resp.model, "gpt-4o");
@@ -347,7 +383,7 @@ mod tests {
             r#"{"model":"gpt-4o","provider":"openai","usage":{"input_tokens":1000,"output_tokens":500}}"#,
         )
         .unwrap();
-        let resp = pipeline.ingest(event, None).await.unwrap();
+        let resp = pipeline.ingest(event, None, None).await.unwrap();
         assert!(resp.cost_nanodollars > 0, "cost should be > 0 for known model with usage");
     }
 
@@ -358,7 +394,7 @@ mod tests {
             r#"{"model":"totally-fake-model","provider":"openai","usage":{"input_tokens":1000}}"#,
         )
         .unwrap();
-        let resp = pipeline.ingest(event, None).await.unwrap();
+        let resp = pipeline.ingest(event, None, None).await.unwrap();
         assert_eq!(resp.cost_nanodollars, 0);
     }
 
@@ -367,7 +403,7 @@ mod tests {
         let pipeline = test_pipeline();
         let event: IngestEvent =
             serde_json::from_str(r#"{"model":"","provider":"openai"}"#).unwrap();
-        assert!(pipeline.ingest(event, None).await.is_err());
+        assert!(pipeline.ingest(event, None, None).await.is_err());
     }
 
     #[tokio::test]
@@ -381,7 +417,7 @@ mod tests {
             r#"{"model":"gpt-4o","provider":"openai","source":"litellm","user_id":"alice"}"#,
         )
         .unwrap();
-        let resp = pipeline.ingest(event, None).await.unwrap();
+        let resp = pipeline.ingest(event, None, None).await.unwrap();
 
         let id: EventId = resp.id.parse().unwrap();
         let loaded = store.get_event(&id).unwrap().expect("event should exist");
@@ -405,7 +441,7 @@ mod tests {
             r#"{"model":"gpt-4o","provider":"openai","timestamp":"2024-01-15T10:30:00Z"}"#,
         )
         .unwrap();
-        let resp = pipeline.ingest(event, None).await.unwrap();
+        let resp = pipeline.ingest(event, None, None).await.unwrap();
         let id: EventId = resp.id.parse().unwrap();
         let loaded = pipeline.store().get_event(&id).unwrap().unwrap();
         assert!(loaded.ts_ns > 1_705_000_000_000_000_000);
@@ -436,7 +472,7 @@ mod tests {
         .unwrap();
 
         // Simulate server-side key attribution overriding client-provided value.
-        let resp = pipeline.ingest(event, Some("real-key")).await.unwrap();
+        let resp = pipeline.ingest(event, Some("real-key"), None).await.unwrap();
         let id: EventId = resp.id.parse().unwrap();
         let loaded = store.get_event(&id).unwrap().expect("event should exist");
         assert_eq!(

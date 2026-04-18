@@ -168,7 +168,7 @@ pub struct BatchRequest {
 }
 
 /// Response returned from single-event ingestion.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct IngestResponse {
     /// Event id (ULID string).
     pub id: String,

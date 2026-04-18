@@ -137,7 +137,21 @@ fn run_server(config_path: PathBuf, json_logs: bool) -> Result<()> {
         );
 
         // Build pipeline.
-        let pipeline = keplor_server::Pipeline::new(store, writer, catalog);
+        let mut pipeline = keplor_server::Pipeline::new(store, writer, catalog);
+
+        // Attach idempotency cache if enabled.
+        if config.idempotency.enabled {
+            let cache = Arc::new(keplor_server::idempotency::IdempotencyCache::new(
+                config.idempotency.max_entries,
+                std::time::Duration::from_secs(config.idempotency.ttl_secs),
+            ));
+            pipeline = pipeline.with_idempotency(cache);
+            tracing::info!(
+                ttl_secs = config.idempotency.ttl_secs,
+                max_entries = config.idempotency.max_entries,
+                "idempotency cache enabled"
+            );
+        }
 
         // Build and run server.
         let keys = keplor_server::auth::ApiKeySet::new(config.auth.api_keys.clone());
@@ -185,14 +199,39 @@ fn query(
         return Ok(());
     }
 
-    println!("{:<28} {:<14} {:<20} {:>12} {:>14}", "ID", "PROVIDER", "MODEL", "TOKENS", "COST ($)");
-    println!("{}", "-".repeat(92));
+    let w_id = events
+        .iter()
+        .map(|e| e.id.to_string().len())
+        .max()
+        .unwrap_or(2)
+        .max("ID".len());
+    let w_provider = events
+        .iter()
+        .map(|e| e.provider.id_key().len())
+        .max()
+        .unwrap_or(8)
+        .max("PROVIDER".len());
+    let w_model = events
+        .iter()
+        .map(|e| e.model.len())
+        .max()
+        .unwrap_or(5)
+        .max("MODEL".len());
+    let w_tokens: usize = 12.max("TOKENS".len());
+    let w_cost: usize = 14.max("COST ($)".len());
+    let sep_len = w_id + 1 + w_provider + 1 + w_model + 1 + w_tokens + 1 + w_cost;
+
+    println!(
+        "{:<w_id$} {:<w_provider$} {:<w_model$} {:>w_tokens$} {:>w_cost$}",
+        "ID", "PROVIDER", "MODEL", "TOKENS", "COST ($)",
+    );
+    println!("{}", "-".repeat(sep_len));
 
     for e in &events {
         let total_tokens = e.usage.input_tokens + e.usage.output_tokens;
         let cost_dollars = e.cost_nanodollars as f64 / 1_000_000_000.0;
         println!(
-            "{:<28} {:<14} {:<20} {:>12} {:>14.8}",
+            "{:<w_id$} {:<w_provider$} {:<w_model$} {:>w_tokens$} {:>w_cost$.8}",
             e.id,
             e.provider.id_key(),
             e.model,

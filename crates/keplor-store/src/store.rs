@@ -243,12 +243,12 @@ impl Store {
     /// Acquire a read connection from the pool (round-robin).
     fn read_conn(&self) -> Result<std::sync::MutexGuard<'_, Connection>, StoreError> {
         let idx = self.read_idx.fetch_add(1, Ordering::Relaxed) % self.read_pool.len();
-        self.read_pool[idx].lock().map_err(|e| StoreError::Compression(e.to_string()))
+        self.read_pool[idx].lock().map_err(|e| StoreError::LockPoisoned(e.to_string()))
     }
 
     /// Acquire the write connection.
     fn write_conn(&self) -> Result<std::sync::MutexGuard<'_, Connection>, StoreError> {
-        self.write_conn.lock().map_err(|e| StoreError::Compression(e.to_string()))
+        self.write_conn.lock().map_err(|e| StoreError::LockPoisoned(e.to_string()))
     }
 
     /// Append an event with its raw request/response bodies.
@@ -1238,6 +1238,16 @@ impl Store {
         })
         .optional()
         .map_err(StoreError::from)
+    }
+
+    /// Lightweight health probe — executes `SELECT 1` on a read connection.
+    ///
+    /// Returns `Ok(())` if the database is reachable, or a [`StoreError`] if
+    /// the connection is broken or locked.
+    pub fn health_probe(&self) -> Result<(), StoreError> {
+        let conn = self.read_conn()?;
+        conn.query_row("SELECT 1", [], |_| Ok(()))?;
+        Ok(())
     }
 
     /// Count total blob rows.

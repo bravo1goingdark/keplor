@@ -4,18 +4,23 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::error_handling::HandleErrorLayer;
 use axum::extract::DefaultBodyLimit;
+use axum::http::StatusCode;
 use axum::middleware;
 use axum::routing::{get, post};
 use axum::Router;
 use metrics_exporter_prometheus::PrometheusHandle;
 use tokio::net::TcpListener;
+use tower::ServiceBuilder;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
 use crate::auth::{self, ApiKeySet};
 use crate::config::ServerConfig;
 use crate::pipeline::Pipeline;
+use crate::rate_limit::{self, RateLimitConfig, RateLimiter};
+use crate::request_id;
 use crate::rollup;
 use crate::routes::{self, AppState};
 
@@ -28,6 +33,7 @@ pub struct PipelineServer {
     store: Arc<keplor_store::Store>,
     gc_retention_days: u64,
     wal_checkpoint_secs: u64,
+    tls_config: Option<Arc<rustls::ServerConfig>>,
 }
 
 impl PipelineServer {
@@ -49,14 +55,37 @@ impl PipelineServer {
 
         let keys = Arc::new(keys);
         let body_limit = config.pipeline.max_body_bytes;
-        let authed = Router::new()
+
+        // Build optional rate limiter.
+        let rate_limiter: Option<Arc<RateLimiter>> = if config.rate_limit.enabled {
+            let rl = RateLimiter::new(RateLimitConfig {
+                requests_per_second: config.rate_limit.requests_per_second,
+                burst: config.rate_limit.burst,
+            });
+            tracing::info!(
+                rps = config.rate_limit.requests_per_second,
+                burst = config.rate_limit.burst,
+                "per-key rate limiting enabled"
+            );
+            Some(Arc::new(rl))
+        } else {
+            None
+        };
+
+        let mut authed = Router::new()
             .route("/v1/events", post(routes::ingest_single))
             .route("/v1/events/batch", post(routes::ingest_batch))
             .route("/v1/events", get(routes::query_events))
             .route("/v1/quota", get(routes::query_quota))
             .route("/v1/rollups", get(routes::query_rollups))
             .route("/v1/stats", get(routes::query_stats))
-            .layer(DefaultBodyLimit::max(body_limit))
+            .layer(DefaultBodyLimit::max(body_limit));
+
+        if let Some(rl) = rate_limiter {
+            authed = authed.layer(middleware::from_fn(rate_limit::make_rate_limit_middleware(rl)));
+        }
+
+        let authed = authed
             .layer(middleware::from_fn(move |req, next| {
                 let keys = Arc::clone(&keys);
                 auth::require_api_key(keys, req, next)
@@ -68,11 +97,57 @@ impl PipelineServer {
             .route("/metrics", get(routes::metrics_handler))
             .with_state(state);
 
+        let request_timeout = Duration::from_secs(config.server.request_timeout_secs);
+        let max_connections = config.server.max_connections;
+
+        // Timeout + concurrency limit applied to the full router.
+        // Health and metrics endpoints are included — the concurrency
+        // limit is high enough (default 10,000) that health probes
+        // should not be blocked under normal conditions.
         let router = Router::new()
             .merge(authed)
             .merge(public)
+            .layer(
+                ServiceBuilder::new()
+                    .layer(HandleErrorLayer::new(|_: tower::BoxError| async {
+                        StatusCode::REQUEST_TIMEOUT
+                    }))
+                    .layer(tower::timeout::TimeoutLayer::new(request_timeout))
+                    .layer(tower::limit::ConcurrencyLimitLayer::new(max_connections)),
+            )
+            .layer(middleware::from_fn(request_id::propagate_request_id))
             .layer(TraceLayer::new_for_http())
             .layer(CorsLayer::permissive());
+
+        let tls_config = config.tls.as_ref().map(|tls| {
+            let cert_file =
+                &mut std::io::BufReader::new(std::fs::File::open(&tls.cert_path).unwrap_or_else(
+                    |e| panic!("failed to open cert {}: {e}", tls.cert_path.display()),
+                ));
+            let key_file =
+                &mut std::io::BufReader::new(std::fs::File::open(&tls.key_path).unwrap_or_else(
+                    |e| panic!("failed to open key {}: {e}", tls.key_path.display()),
+                ));
+
+            let certs: Vec<_> = rustls_pemfile::certs(cert_file)
+                .filter_map(|c| c.ok())
+                .collect();
+            let key = rustls_pemfile::private_key(key_file)
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| panic!("no private key found in {}", tls.key_path.display()));
+
+            let server_config = rustls::ServerConfig::builder()
+                .with_no_client_auth()
+                .with_single_cert(certs, key)
+                .unwrap_or_else(|e| panic!("invalid TLS config: {e}"));
+
+            Arc::new(server_config)
+        });
+
+        if tls_config.is_some() {
+            tracing::info!("TLS enabled");
+        }
 
         Self {
             router,
@@ -82,6 +157,7 @@ impl PipelineServer {
             store,
             gc_retention_days: config.storage.retention_days,
             wal_checkpoint_secs: config.storage.wal_checkpoint_secs,
+            tls_config,
         }
     }
 
@@ -123,26 +199,27 @@ impl PipelineServer {
             tokio::spawn(wal_checkpoint_loop(ckpt_store, wal_checkpoint_secs));
         }
 
-        axum::serve(listener, self.router).with_graceful_shutdown(shutdown_signal()).await?;
+        if let Some(tls_config) = &self.tls_config {
+            let tls_listener = TlsListener::new(listener, tls_config.clone());
+            axum::serve(tls_listener, self.router)
+                .with_graceful_shutdown(shutdown_signal())
+                .await?;
+        } else {
+            axum::serve(listener, self.router)
+                .with_graceful_shutdown(shutdown_signal())
+                .await?;
+        }
 
         // ── Post-shutdown cleanup ────────────────────────────────
         tracing::info!("draining batch writer...");
-        let drain_result = tokio::time::timeout(shutdown_timeout, async {
-            // Drop our Arc so the writer's internal Sender can close.
-            // The flush_loop will drain remaining events when it sees None.
-            drop(writer);
-            // Give the flush loop time to complete.
-            tokio::time::sleep(Duration::from_millis(200)).await;
-        })
-        .await;
-
-        if drain_result.is_err() {
+        let drained = writer.shutdown(shutdown_timeout).await;
+        if drained {
+            tracing::info!("batch writer drained successfully");
+        } else {
             tracing::warn!(
                 timeout_secs = shutdown_timeout.as_secs(),
                 "batch writer drain timed out — some events may be lost"
             );
-        } else {
-            tracing::info!("batch writer drained successfully");
         }
 
         // Final WAL checkpoint.
@@ -203,6 +280,48 @@ async fn wal_checkpoint_loop(store: Arc<keplor_store::Store>, interval_secs: u64
         if let Err(e) = tokio::task::spawn_blocking(move || ckpt_store.wal_checkpoint()).await {
             tracing::warn!(error = %e, "wal checkpoint failed");
         }
+    }
+}
+
+// ── TLS listener adapter ───────────────────────────────────────────────
+
+/// A TLS-wrapping listener that performs the TLS handshake on each accepted
+/// TCP connection before handing it to axum.
+struct TlsListener {
+    inner: TcpListener,
+    acceptor: tokio_rustls::TlsAcceptor,
+}
+
+impl TlsListener {
+    fn new(listener: TcpListener, config: Arc<rustls::ServerConfig>) -> Self {
+        Self { inner: listener, acceptor: tokio_rustls::TlsAcceptor::from(config) }
+    }
+}
+
+impl axum::serve::Listener for TlsListener {
+    type Io = tokio_rustls::server::TlsStream<tokio::net::TcpStream>;
+    type Addr = std::net::SocketAddr;
+
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        loop {
+            match self.inner.accept().await {
+                Ok((tcp, addr)) => match self.acceptor.accept(tcp).await {
+                    Ok(tls) => return (tls, addr),
+                    Err(e) => {
+                        tracing::debug!(error = %e, "TLS handshake failed");
+                        continue;
+                    },
+                },
+                Err(e) => {
+                    tracing::error!(error = %e, "TCP accept failed");
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                },
+            }
+        }
+    }
+
+    fn local_addr(&self) -> std::io::Result<Self::Addr> {
+        self.inner.local_addr()
     }
 }
 

@@ -167,7 +167,8 @@ pub(crate) fn apply_pragmas(conn: &Connection) -> Result<(), StoreError> {
          PRAGMA mmap_size=268435456;
          PRAGMA busy_timeout=5000;
          PRAGMA cache_size=-64000;
-         PRAGMA temp_store=MEMORY;",
+         PRAGMA temp_store=MEMORY;
+         PRAGMA wal_autocheckpoint=1000;",
     )?;
     Ok(())
 }

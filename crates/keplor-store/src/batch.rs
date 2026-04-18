@@ -38,8 +38,9 @@ impl Default for BatchConfig {
 /// On shutdown, call [`BatchWriter::shutdown`] to drain all pending
 /// events before the process exits.
 pub struct BatchWriter {
-    tx: mpsc::Sender<WriteRequest>,
-    flush_handle: Option<tokio::task::JoinHandle<()>>,
+    tx: std::sync::Mutex<Option<mpsc::Sender<WriteRequest>>>,
+    channel_capacity: usize,
+    flush_handle: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 struct WriteRequest {
@@ -55,9 +56,14 @@ impl BatchWriter {
     /// The background flush task runs until [`BatchWriter::shutdown`] is
     /// called or all senders are dropped.
     pub fn new(store: Arc<Store>, config: BatchConfig) -> Self {
-        let (tx, rx) = mpsc::channel(config.channel_capacity);
+        let capacity = config.channel_capacity;
+        let (tx, rx) = mpsc::channel(capacity);
         let flush_handle = tokio::spawn(flush_loop(store, rx, config));
-        Self { tx, flush_handle: Some(flush_handle) }
+        Self {
+            tx: std::sync::Mutex::new(Some(tx)),
+            channel_capacity: capacity,
+            flush_handle: tokio::sync::Mutex::new(Some(flush_handle)),
+        }
     }
 
     /// Submit an event for batched writing.
@@ -69,12 +75,15 @@ impl BatchWriter {
         req_body: Bytes,
         resp_body: Bytes,
     ) -> Result<EventId, StoreError> {
+        let tx = {
+            let guard = self.tx.lock().unwrap_or_else(|e| e.into_inner());
+            guard.clone().ok_or(StoreError::ChannelClosed)?
+        };
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-        self.tx
-            .send(WriteRequest { event, req_body, resp_body, result_tx: Some(result_tx) })
+        tx.send(WriteRequest { event, req_body, resp_body, result_tx: Some(result_tx) })
             .await
-            .map_err(|_| StoreError::Compression("batch writer channel closed".into()))?;
-        result_rx.await.map_err(|_| StoreError::Compression("batch writer dropped".into()))?
+            .map_err(|_| StoreError::ChannelClosed)?;
+        result_rx.await.map_err(|_| StoreError::ChannelClosed)?
     }
 
     /// Submit an event without waiting for the flush.
@@ -84,27 +93,50 @@ impl BatchWriter {
         req_body: Bytes,
         resp_body: Bytes,
     ) -> Result<(), StoreError> {
-        self.tx
-            .try_send(WriteRequest { event, req_body, resp_body, result_tx: None })
-            .map_err(|_| StoreError::Compression("batch writer channel full".into()))
+        let guard = self.tx.lock().unwrap_or_else(|e| e.into_inner());
+        let tx = guard.as_ref().ok_or(StoreError::ChannelClosed)?;
+        tx.try_send(WriteRequest { event, req_body, resp_body, result_tx: None })
+            .map_err(|e| match e {
+                mpsc::error::TrySendError::Full(_) => StoreError::ChannelFull,
+                mpsc::error::TrySendError::Closed(_) => StoreError::ChannelClosed,
+            })
     }
 
-    /// Wait for the flush loop to finish after the channel is closed.
+    /// Number of events currently queued in the channel.
     ///
-    /// The channel closes when all `Sender` clones are dropped. The
-    /// flush loop will drain remaining events and exit.
-    pub async fn closed(&self) {
-        self.tx.closed().await;
+    /// Returns 0 if the channel is closed.
+    pub fn queue_depth(&self) -> usize {
+        let guard = self.tx.lock().unwrap_or_else(|e| e.into_inner());
+        guard.as_ref().map(|tx| tx.max_capacity() - tx.capacity()).unwrap_or(0)
     }
-}
 
-impl Drop for BatchWriter {
-    fn drop(&mut self) {
-        // When the BatchWriter is dropped, the tx Sender is also dropped,
-        // which closes the channel and causes the flush_loop to drain.
-        // The JoinHandle is dropped too — the flush task will finish in
-        // the background if the runtime is still alive.
-        drop(self.flush_handle.take());
+    /// Maximum channel capacity.
+    pub fn max_capacity(&self) -> usize {
+        self.channel_capacity
+    }
+
+    /// Gracefully shut down the batch writer.
+    ///
+    /// Drops the sender to close the channel, then waits for the flush
+    /// loop to drain all pending events up to `timeout`.
+    ///
+    /// Returns `true` if the flush loop completed within the deadline,
+    /// `false` if the timeout expired (some events may be lost).
+    pub async fn shutdown(&self, timeout: Duration) -> bool {
+        // Drop the sender to close the channel — the flush loop will
+        // see `None` from `rx.recv()` and drain remaining events.
+        {
+            let mut guard = self.tx.lock().unwrap_or_else(|e| e.into_inner());
+            guard.take();
+        }
+
+        // Take and await the flush handle.
+        let handle = self.flush_handle.lock().await.take();
+        if let Some(handle) = handle {
+            tokio::time::timeout(timeout, handle).await.is_ok()
+        } else {
+            true
+        }
     }
 }
 

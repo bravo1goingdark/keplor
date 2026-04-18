@@ -33,10 +33,14 @@ http        = "1"
 secrecy     = { workspace = true }
 subtle      = "2"
 figment     = { workspace = true }
-sha2        = { workspace = true }
-time        = { version = "0.3", features = ["parsing"] }
+sha2            = { workspace = true }
+lru             = { workspace = true }
+ulid            = { workspace = true }
+rustls          = { workspace = true }
+tokio-rustls    = { workspace = true }
+rustls-pemfile  = { workspace = true }
+time            = { version = "0.3", features = ["parsing"] }
 
 [dev-dependencies]
 tokio   = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
 reqwest = { workspace = true }
-rustls  = { workspace = true }
