@@ -427,7 +427,13 @@ tier = "pro"</code></pre>
 <h4>Smart routing</h4>
 <p>Don't want to offload immediately? Set a SQLite size threshold &mdash; blobs stay in SQLite until the database grows past it, then automatically route to S3/R2:</p>
 <Pre code={'[storage]\nblob_offload_threshold_mb = 500   # embedded until 500 MB, then auto-offload\n\n[blob_storage]\nbucket = "keplor-blobs"\nendpoint = "https://<account-id>.r2.cloudflarestorage.com"\nregion = "auto"\naccess_key_id = "..."\nsecret_access_key = "..."'} />
-<p>Keplor checks the DB size on each batch flush. When GC shrinks the database back below the threshold, new blobs go back to SQLite. Old blobs stay where they were written &mdash; the hybrid reader handles both.</p>
+<p>When the threshold is exceeded, Keplor does three things automatically:</p>
+<ol>
+  <li>Routes new blobs to S3/R2</li>
+  <li>Drains old embedded blobs to S3/R2 in the background (100 blobs every 60s)</li>
+  <li>Runs <code>VACUUM</code> once all blobs are drained to reclaim disk space</li>
+</ol>
+<p>When the DB shrinks back below the threshold, new blobs go to SQLite again. See <a href="{base}/docs/blob-storage">Blob Storage</a> for the full lifecycle.</p>
 
 <p>Build command: <code>cargo build --release --features mimalloc,s3</code></p>
 

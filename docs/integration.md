@@ -712,11 +712,29 @@ secret_access_key = "..."
 | `> 0` | Embedded until SQLite exceeds threshold, then auto-offload |
 | No `[blob_storage]` | Always embedded regardless of threshold |
 
-Keplor re-evaluates the SQLite size on each batch flush (~50ms). When GC shrinks the database back below the threshold, new blobs return to SQLite. Old blobs stay where they were written — the hybrid reader handles both seamlessly.
+When the threshold is exceeded, Keplor does three things automatically:
+
+1. **Routes new blobs to S3/R2** — the offload flag flips on each batch flush (~50ms)
+2. **Drains old embedded blobs** — a background task (every 60s) reads embedded blobs from SQLite, PUTs them to S3/R2, and sets `data = NULL` (100 blobs per tick)
+3. **Runs VACUUM** — once all embedded blobs are drained, `VACUUM` reclaims the disk space so the database file actually shrinks
+
+When the DB shrinks back below the threshold, the flag flips and new blobs go to SQLite again. The hybrid reader handles mixed embedded + external blobs seamlessly.
+
+```
+SQLite < threshold         SQLite >= threshold
++--------------------+     +--------------------------+
+| New blobs → SQLite | --> | New blobs → S3/R2        |
+|                    |     | Drain old blobs → S3/R2  |
+|                    |     | SET data = NULL           |
+|                    | <-- | VACUUM → DB shrinks       |
++--------------------+     +--------------------------+
+```
 
 #### Migration from embedded to S3
 
-Existing blobs in SQLite are **not** automatically migrated to S3. New events will write to S3; old events continue reading from SQLite. To fully migrate, export and re-ingest, or run a migration script against the `payload_blobs` table.
+With smart routing (`blob_offload_threshold_mb > 0`), migration is fully automatic — the drain loop handles it. No manual scripts needed.
+
+Without smart routing (threshold = 0), old blobs stay in SQLite and are readable via the hybrid reader until they expire via GC.
 
 ### Environment Variable Overrides
 

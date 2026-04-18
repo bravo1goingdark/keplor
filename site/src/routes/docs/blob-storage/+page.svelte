@@ -42,8 +42,15 @@
 </table>
 
 <h3>How the threshold works</h3>
-<p>Keplor checks <code>db_size_bytes()</code> on each batch flush (~every 50ms). When SQLite exceeds <code>blob_offload_threshold_mb</code>, an internal flag flips and new blobs go to the external store. When GC brings the database back below the threshold, new blobs go back to SQLite.</p>
-<p>Old blobs stay where they were written. The hybrid reader checks the SQLite <code>data</code> column first &mdash; if it's <code>NULL</code>, it falls back to the external store. This means you can switch modes at any time without a migration.</p>
+<p>Keplor checks <code>db_size_bytes()</code> on each batch flush (~every 50ms). When SQLite exceeds <code>blob_offload_threshold_mb</code>, three things happen:</p>
+<ol>
+  <li><strong>New blobs route to S3/R2</strong> &mdash; an internal flag flips and all new blobs go to the external store</li>
+  <li><strong>Old blobs drain automatically</strong> &mdash; a background task (every 60s) migrates existing embedded blobs to S3/R2 in batches of 100, then sets <code>data = NULL</code> in SQLite</li>
+  <li><strong>VACUUM runs after drain</strong> &mdash; once all embedded blobs are drained, Keplor runs <code>VACUUM</code> to reclaim disk space and actually shrink the database file</li>
+</ol>
+<p>When the DB shrinks below the threshold (via drain + VACUUM or GC), the flag flips back and new blobs go to SQLite again.</p>
+<Pre code={'SQLite < threshold         SQLite >= threshold\n+--------------------+     +--------------------------+\n| New blobs -> SQLite| --> | New blobs -> S3/R2       |\n|                    |     | Drain old blobs -> S3/R2 |\n|                    |     | SET data = NULL          |\n|                    | <-- | VACUUM -> DB shrinks     |\n+--------------------+     +--------------------------+'} />
+<p>The hybrid reader always works: it checks the SQLite <code>data</code> column first &mdash; if <code>NULL</code>, falls back to the external store. Mixed embedded + external blobs coexist seamlessly.</p>
 
 <h2 id="r2">Cloudflare R2</h2>
 <p>R2 is the recommended choice for most deployments: 10 GB free storage, zero egress fees, S3-compatible API.</p>
@@ -101,11 +108,12 @@
 <h3>Embedded to external</h3>
 <p>When you add <code>[blob_storage]</code> to a running instance:</p>
 <ul>
-  <li><strong>New events:</strong> Blobs go to the external store</li>
-  <li><strong>Old events:</strong> Blobs stay in SQLite, readable via the hybrid reader</li>
-  <li><strong>No downtime:</strong> Change config and restart</li>
+  <li><strong>New blobs:</strong> Go to the external store immediately</li>
+  <li><strong>Old blobs:</strong> Readable via the hybrid reader (no downtime)</li>
+  <li><strong>With threshold:</strong> Old blobs are drained automatically (100/tick, every 60s), then VACUUM reclaims the space</li>
+  <li><strong>Without threshold:</strong> Old blobs stay in SQLite until they expire via GC</li>
 </ul>
-<p>To fully migrate old blobs out of SQLite, export and re-ingest, or write a script that reads <code>payload_blobs.data</code> and PUTs to S3 by SHA-256 key.</p>
+<p>No manual migration script needed when using smart routing &mdash; the drain loop handles it.</p>
 
 <h3>External back to embedded</h3>
 <p>Remove the <code>[blob_storage]</code> section and restart. New blobs go back to SQLite. Existing external blobs become unreadable (their <code>data</code> column is <code>NULL</code> and no external store is configured). Only do this after all external-stored events have expired via GC.</p>
