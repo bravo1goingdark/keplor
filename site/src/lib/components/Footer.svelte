@@ -31,7 +31,7 @@
       <div>
         <p class="text-[12px] uppercase tracking-[0.12em] text-ink-muted mb-4">Legal</p>
         <div class="space-y-2.5 text-[14px]">
-          <span class="block text-ink-muted">Apache-2.0</span>
+          <a href="https://github.com/bravo1goingdark/keplor/blob/main/LICENSE" target="_blank" rel="noopener" class="block text-ink-muted hover:text-ink transition-colors">Apache License 2.0</a>
         </div>
       </div>
     </div>
@@ -51,7 +51,7 @@
         </div>
         <p class="text-[13px] text-ink-muted mt-1">Observe what's already there.</p>
       </div>
-      <p class="text-[12px] text-ink-muted">&copy; 2026 Keplor. Open source under Apache-2.0.</p>
+      <p class="text-[12px] text-ink-muted">&copy; 2026 Keplor contributors. Licensed under <a href="https://github.com/bravo1goingdark/keplor/blob/main/LICENSE" target="_blank" rel="noopener" class="hover:text-ink transition-colors">Apache-2.0</a>.</p>
     </div>
   </div>
 </footer>
