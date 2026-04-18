@@ -199,24 +199,10 @@ fn query(
         return Ok(());
     }
 
-    let w_id = events
-        .iter()
-        .map(|e| e.id.to_string().len())
-        .max()
-        .unwrap_or(2)
-        .max("ID".len());
-    let w_provider = events
-        .iter()
-        .map(|e| e.provider.id_key().len())
-        .max()
-        .unwrap_or(8)
-        .max("PROVIDER".len());
-    let w_model = events
-        .iter()
-        .map(|e| e.model.len())
-        .max()
-        .unwrap_or(5)
-        .max("MODEL".len());
+    let w_id = events.iter().map(|e| e.id.to_string().len()).max().unwrap_or(2).max("ID".len());
+    let w_provider =
+        events.iter().map(|e| e.provider.id_key().len()).max().unwrap_or(8).max("PROVIDER".len());
+    let w_model = events.iter().map(|e| e.model.len()).max().unwrap_or(5).max("MODEL".len());
     let w_tokens: usize = 12.max("TOKENS".len());
     let w_cost: usize = 14.max("COST ($)".len());
     let sep_len = w_id + 1 + w_provider + 1 + w_model + 1 + w_tokens + 1 + w_cost;

@@ -95,11 +95,12 @@ impl BatchWriter {
     ) -> Result<(), StoreError> {
         let guard = self.tx.lock().unwrap_or_else(|e| e.into_inner());
         let tx = guard.as_ref().ok_or(StoreError::ChannelClosed)?;
-        tx.try_send(WriteRequest { event, req_body, resp_body, result_tx: None })
-            .map_err(|e| match e {
+        tx.try_send(WriteRequest { event, req_body, resp_body, result_tx: None }).map_err(|e| {
+            match e {
                 mpsc::error::TrySendError::Full(_) => StoreError::ChannelFull,
                 mpsc::error::TrySendError::Closed(_) => StoreError::ChannelClosed,
-            })
+            }
+        })
     }
 
     /// Number of events currently queued in the channel.
