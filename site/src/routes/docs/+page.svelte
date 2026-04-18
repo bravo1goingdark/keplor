@@ -24,7 +24,7 @@
   {/each}
 </div>
 
-<h2>Architecture</h2>
+<h2 id="architecture">Architecture</h2>
 <table>
   <thead><tr><th>Crate</th><th>Purpose</th></tr></thead>
   <tbody>

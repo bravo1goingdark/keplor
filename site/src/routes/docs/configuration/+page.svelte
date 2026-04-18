@@ -5,11 +5,11 @@
 <h1 class="text-3xl font-bold mb-2">Configuration</h1>
 <p class="text-lg text-text-muted mb-8">TOML config file with environment variable overrides.</p>
 
-<h2>Config file</h2>
+<h2 id="config-file">Config file</h2>
 <p>Keplor looks for <code>keplor.toml</code> by default. Override with <code>--config</code>:</p>
 <pre><code>$ keplor run --config /etc/keplor/keplor.toml</code></pre>
 
-<h2>Full example</h2>
+<h2 id="example">Full example</h2>
 <pre><code># keplor.toml
 
 [server]
@@ -44,7 +44,7 @@ burst = 200
 # cert_path = "/etc/keplor/cert.pem"
 # key_path = "/etc/keplor/key.pem"</code></pre>
 
-<h2>[server]</h2>
+<h2 id="server">[server]</h2>
 <table>
   <thead><tr><th>Key</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
   <tbody>
@@ -55,7 +55,7 @@ burst = 200
   </tbody>
 </table>
 
-<h2>[storage]</h2>
+<h2 id="storage">[storage]</h2>
 <table>
   <thead><tr><th>Key</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
   <tbody>
@@ -65,7 +65,7 @@ burst = 200
   </tbody>
 </table>
 
-<h2>[auth]</h2>
+<h2 id="auth">[auth]</h2>
 <table>
   <thead><tr><th>Key</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
   <tbody>
@@ -73,7 +73,7 @@ burst = 200
   </tbody>
 </table>
 
-<h2>[pipeline]</h2>
+<h2 id="pipeline">[pipeline]</h2>
 <table>
   <thead><tr><th>Key</th><th>Type</th><th>Default</th><th>Range</th><th>Description</th></tr></thead>
   <tbody>
@@ -82,7 +82,7 @@ burst = 200
   </tbody>
 </table>
 
-<h2>[idempotency]</h2>
+<h2 id="idempotency">[idempotency]</h2>
 <table>
   <thead><tr><th>Key</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
   <tbody>
@@ -92,7 +92,7 @@ burst = 200
   </tbody>
 </table>
 
-<h2>[rate_limit]</h2>
+<h2 id="rate-limit">[rate_limit]</h2>
 <table>
   <thead><tr><th>Key</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
   <tbody>
@@ -102,7 +102,7 @@ burst = 200
   </tbody>
 </table>
 
-<h2>[tls]</h2>
+<h2 id="tls">[tls]</h2>
 <p>Optional. When present, the server listens with HTTPS via rustls.</p>
 <table>
   <thead><tr><th>Key</th><th>Type</th><th>Description</th></tr></thead>
@@ -112,7 +112,7 @@ burst = 200
   </tbody>
 </table>
 
-<h2>Environment variables</h2>
+<h2 id="env">Environment variables</h2>
 <p>Override any key with <code>KEPLOR_</code> prefix and underscore nesting:</p>
 <pre><code>$ KEPLOR_SERVER_LISTEN_ADDR=0.0.0.0:9090 \
   KEPLOR_STORAGE_DB_PATH=/tmp/keplor.db \
@@ -120,7 +120,7 @@ burst = 200
   keplor run</code></pre>
 <p>Environment variables take precedence over the config file.</p>
 
-<h2>SQLite pragmas</h2>
+<h2 id="pragmas">SQLite pragmas</h2>
 <p>Applied automatically at startup:</p>
 <table>
   <thead><tr><th>Pragma</th><th>Value</th><th>Purpose</th></tr></thead>
@@ -135,6 +135,6 @@ burst = 200
   </tbody>
 </table>
 
-<h2>Validation</h2>
+<h2 id="validation">Validation</h2>
 <p>Config is validated at startup. Invalid values produce immediate errors:</p>
 <pre><code>Error: invalid config: pipeline.batch_size must be > 0</code></pre>

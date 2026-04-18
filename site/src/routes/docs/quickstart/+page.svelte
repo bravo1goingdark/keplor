@@ -47,34 +47,34 @@ Compression ratio:    2.0x`;
 <h1 class="text-3xl font-bold mb-2">Quickstart</h1>
 <p class="text-lg text-text-muted mb-8">From zero to ingesting events in under 2 minutes.</p>
 
-<h2>1. Install</h2>
+<h2 id="install">1. Install</h2>
 <p>Build from source:</p>
 <Pre code="$ git clone https://github.com/bravo1goingdark/keplor.git
 $ cd keplor
 $ cargo build --release
 $ cp target/release/keplor /usr/local/bin/" />
 
-<h2>2. Start the server</h2>
+<h2 id="start">2. Start the server</h2>
 <Pre code="$ keplor run" />
 <p>Binds to <code>0.0.0.0:8080</code> with a local <code>keplor.db</code> SQLite database. No config needed.</p>
 <p>Verify:</p>
 <Pre code={healthResp} />
 
-<h2>3. Send your first event</h2>
+<h2 id="first-event">3. Send your first event</h2>
 <Pre code={ingestReq} />
 <p>Response:</p>
 <Pre code={ingestResp} />
 <p>Cost is auto-computed. <code>6250000</code> nanodollars = <strong>$0.00625</strong>.</p>
 
-<h2>4. Query it back</h2>
+<h2 id="query">4. Query it back</h2>
 <Pre code={'$ curl "http://localhost:8080/v1/events?user_id=alice&limit=5"'} />
 <p>Or from the CLI:</p>
 <Pre code={queryCmd} />
 
-<h2>5. Check stats</h2>
+<h2 id="stats">5. Check stats</h2>
 <Pre code={statsCmd} />
 
-<h2>Next steps</h2>
+<h2 id="next">Next steps</h2>
 <p>
   <a href="{base}/docs/api-reference">API Reference</a> &mdash; full endpoint docs.<br />
   <a href="{base}/docs/configuration">Configuration</a> &mdash; auth, storage, tuning.<br />
