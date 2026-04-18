@@ -120,20 +120,16 @@ impl PipelineServer {
             .layer(CorsLayer::permissive());
 
         let tls_config = config.tls.as_ref().map(|tls| {
-            let cert_file =
-                &mut std::io::BufReader::new(std::fs::File::open(&tls.cert_path).unwrap_or_else(
-                    |e| panic!("failed to open cert {}: {e}", tls.cert_path.display()),
-                ));
-            let key_file =
-                &mut std::io::BufReader::new(std::fs::File::open(&tls.key_path).unwrap_or_else(
-                    |e| panic!("failed to open key {}: {e}", tls.key_path.display()),
-                ));
+            use rustls_pki_types::pem::PemObject;
+            use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 
-            let certs: Vec<_> = rustls_pemfile::certs(cert_file).filter_map(|c| c.ok()).collect();
-            let key = rustls_pemfile::private_key(key_file)
-                .ok()
-                .flatten()
-                .unwrap_or_else(|| panic!("no private key found in {}", tls.key_path.display()));
+            let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_file_iter(&tls.cert_path)
+                .unwrap_or_else(|e| panic!("failed to read cert {}: {e}", tls.cert_path.display()))
+                .filter_map(|c| c.ok())
+                .collect();
+
+            let key = PrivateKeyDer::from_pem_file(&tls.key_path)
+                .unwrap_or_else(|e| panic!("failed to read key {}: {e}", tls.key_path.display()));
 
             let server_config = rustls::ServerConfig::builder()
                 .with_no_client_auth()
