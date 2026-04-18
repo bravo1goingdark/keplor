@@ -21,6 +21,8 @@ pub struct ServerConfig {
     pub idempotency: IdempotencyConfig,
     /// Per-key rate limiting settings.
     pub rate_limit: RateLimitServerConfig,
+    /// CORS origin allowlist.
+    pub cors: CorsConfig,
     /// Optional TLS configuration. When present, the server listens with TLS.
     pub tls: Option<TlsConfig>,
 }
@@ -120,6 +122,15 @@ impl Default for RateLimitServerConfig {
     fn default() -> Self {
         Self { enabled: false, requests_per_second: 100.0, burst: 200 }
     }
+}
+
+/// CORS configuration.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct CorsConfig {
+    /// Allowed origins. When empty, only same-origin requests are allowed.
+    /// Set to `["*"]` to allow all origins (not recommended in production).
+    pub allowed_origins: Vec<String>,
 }
 
 /// Pipeline tuning knobs.

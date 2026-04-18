@@ -12,7 +12,7 @@
 <div class="grid sm:grid-cols-2 gap-4 mb-16">
   {#each [
     { href: `${base}/docs/quickstart`, title: 'Quickstart', desc: 'Install and send your first event.' },
-    { href: `${base}/docs/integration`, title: 'Integration Guide', desc: 'Schema, auth, examples for any proxy.' },
+    { href: `${base}/docs/integration`, title: 'Integration Guide', desc: 'Schema, auth, examples for any integration.' },
     { href: `${base}/docs/api-reference`, title: 'API Reference', desc: 'Endpoints, schemas, and errors.' },
     { href: `${base}/docs/configuration`, title: 'Configuration', desc: 'TOML config and env vars.' },
     { href: `${base}/docs/cli`, title: 'CLI', desc: 'Server, query, stats, and gc.' },

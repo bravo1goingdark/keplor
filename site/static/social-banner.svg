@@ -68,6 +68,6 @@
     <text x="680" y="84" font-family="'DM Mono', monospace" font-size="12" fill="rgba(240,240,240,0.3)" letter-spacing="0.5">MODELS PRICED</text>
 
     <text x="920" y="60" font-family="'Space Grotesk', system-ui, sans-serif" font-size="28" font-weight="500" fill="#f0f0f0">&lt;1 ms</text>
-    <text x="920" y="84" font-family="'DM Mono', monospace" font-size="12" fill="rgba(240,240,240,0.3)" letter-spacing="0.5">P99 OVERHEAD</text>
+    <text x="920" y="84" font-family="'DM Mono', monospace" font-size="12" fill="rgba(240,240,240,0.3)" letter-spacing="0.5">P99 INGEST</text>
   </g>
 </svg>

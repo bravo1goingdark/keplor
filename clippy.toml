@@ -1,6 +1,6 @@
 msrv = "1.82"
 
-# A proxy tees streaming bodies; a few helpers are naturally long.
+# Ingestion pipeline processes varied event schemas; a few helpers are naturally long.
 cognitive-complexity-threshold = 30
 too-many-arguments-threshold   = 8
 

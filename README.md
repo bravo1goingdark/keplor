@@ -8,15 +8,15 @@
 
 **Status:** pre-alpha — under active development.
 
-Keplor is a transparent, observational HTTPS proxy for LLM traffic. It sits between your application and any LLM provider (OpenAI, Anthropic, Gemini, Bedrock, Azure, Mistral, Groq, xAI, DeepSeek, Cohere, Ollama, and any OpenAI-compatible endpoint), captures every request and response byte-for-byte, reassembles streaming responses losslessly, extracts precise token usage and cost, and stores it all in a heavily compressed local database — with optional fan-out to ClickHouse, S3, Postgres, or any OTLP-compatible backend.
+Keplor is a lightweight LLM logs ingestion and cost-accounting server. Your application, gateway, or SDK wrapper POSTs event data after each LLM call — Keplor validates it, auto-computes cost from a bundled pricing catalog covering every major provider (OpenAI, Anthropic, Gemini, Bedrock, Azure, Mistral, Groq, xAI, DeepSeek, Cohere, Ollama, and any OpenAI-compatible endpoint), compresses and stores it in a local SQLite database, and serves real-time aggregations and rollups.
 
-Named for Johannes Kepler, who derived the laws of planetary motion by watching what was already there. Keplor does the same for your LLM traffic.
+Named for Johannes Kepler, who derived the laws of planetary motion from observations others recorded. Keplor does the same — it turns the LLM logs your systems send it into precise cost and usage insights.
 
 ## What makes it different
 
 - **Single static binary** under 10 MB. No Postgres. No ClickHouse. No Kafka. No Redis. SQLite works out of the box.
-- **Pure observational proxy** — byte-for-byte passthrough, zero added latency, no routing opinions, no fallback logic, no request rewriting.
-- **Lossless streaming capture** across every provider's wire format: OpenAI SSE, Anthropic named events, Gemini progressive JSON, AWS Bedrock event-stream binary framing, and the rest.
+- **Pure ingestion** — no LLM traffic touches Keplor. Your app or gateway POSTs events after the fact. No routing, no interception, no request rewriting.
+- **Every provider schema** — accepts events from OpenAI, Anthropic, Gemini, Bedrock, and 8 more providers, with correct token-type handling for each.
 - **Heavy compression** via zstd with trained dictionaries per provider and component type — 30–80× ratios on real conversational traffic.
 - **Precise cost accounting** using the industry-standard LiteLLM pricing catalog, with correct handling of prompt caching, reasoning tokens, batch discounts, modality rates, tier pricing, and geo multipliers.
 - **Dual-schema telemetry** — every span carries both OpenTelemetry GenAI and OpenInference attributes, so Langfuse, Phoenix, LangSmith, Datadog, Honeycomb, and Grafana Tempo all ingest cleanly without reconfiguration.
@@ -24,14 +24,17 @@ Named for Johannes Kepler, who derived the laws of planetary motion by watching 
 ## Quickstart
 
 ```bash
-# Coming soon
-docker run -p 8443:8443 -v keplor-data:/var/lib/keplor ghcr.io/you/keplor:latest
-```
+# Build and run
+cargo build --release
+./target/release/keplor run
 
-Point your LLM SDK at `https://localhost:8443` (base URL override), make a few requests, then:
+# POST an event after your LLM call
+curl -X POST http://localhost:8080/v1/events \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gpt-4o","provider":"openai","usage":{"input_tokens":500,"output_tokens":200}}'
 
-```bash
-keplor stats --last 24h
+# Check storage stats
+./target/release/keplor stats
 ```
 ## License
 

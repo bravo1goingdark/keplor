@@ -1,0 +1,165 @@
+# Operations Guide
+
+## Deployment
+
+### Docker (recommended)
+
+```bash
+# Copy and edit the example config
+cp keplor.example.toml keplor.toml
+
+# Build and start
+docker compose up -d
+
+# Verify
+curl http://localhost:8080/health
+```
+
+### Binary
+
+```bash
+cargo build --release --target x86_64-unknown-linux-musl -p keplor-cli
+./target/x86_64-unknown-linux-musl/release/keplor run --config keplor.toml
+```
+
+### Systemd
+
+```ini
+[Unit]
+Description=Keplor LLM Log Ingestion Server
+After=network.target
+
+[Service]
+Type=simple
+User=keplor
+ExecStart=/usr/local/bin/keplor run --config /etc/keplor/keplor.toml --json-logs
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
+```
+
+## Configuration
+
+See `keplor.example.toml` for all available options. Every field can be overridden via environment variables using the `KEPLOR_<SECTION>_<FIELD>` pattern:
+
+```bash
+KEPLOR_STORAGE_RETENTION_DAYS=30
+KEPLOR_SERVER_LISTEN_ADDR=0.0.0.0:9090
+KEPLOR_AUTH_API_KEYS='["prod:sk-abc123"]'
+```
+
+## Monitoring
+
+### Health check
+
+```bash
+curl http://localhost:8080/health
+# {"status":"ok","version":"0.1.0","db":"connected","queue_depth":0,"queue_capacity":8192,"queue_utilization_pct":0}
+```
+
+Returns `503 Service Unavailable` if the database is unreachable.
+
+### Prometheus metrics
+
+Scrape `GET /metrics` for:
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `keplor_events_ingested_total` | counter | Events ingested (by provider) |
+| `keplor_events_errors_total` | counter | Errors (by stage: validation, store, queue_full) |
+| `keplor_ingest_duration_seconds` | histogram | End-to-end ingest latency |
+| `keplor_auth_successes_total` | counter | Successful authentications |
+| `keplor_auth_failures_total` | counter | Failed authentications |
+| `keplor_batch_flushes_total` | counter | Batch flush operations |
+| `keplor_batch_events_flushed_total` | counter | Events flushed to DB |
+| `keplor_batch_flush_errors_total` | counter | Failed batch flushes |
+
+### Alerting recommendations
+
+- `keplor_batch_flush_errors_total` increasing: database write failures (check disk space)
+- `queue_utilization_pct > 80` in health check: back-pressure, ingestion exceeding write throughput
+- `keplor_auth_failures_total` spike: possible credential stuffing
+
+## Backup and Restore
+
+### Backup
+
+Keplor uses SQLite with WAL mode. To create a consistent backup:
+
+**Option 1: Online backup via CLI (recommended)**
+
+```bash
+# Checkpoint WAL first, then copy
+keplor gc --older-than-days 99999 --db keplor.db  # no-op GC forces WAL checkpoint
+cp keplor.db keplor.db.backup
+```
+
+**Option 2: Stop and copy**
+
+```bash
+# Stop Keplor (graceful shutdown checkpoints WAL automatically)
+docker compose stop keplor
+
+# Copy the database file
+cp /var/lib/keplor/keplor.db /backups/keplor-$(date +%Y%m%d).db
+
+# Restart
+docker compose start keplor
+```
+
+**Option 3: sqlite3 .backup command**
+
+```bash
+sqlite3 /var/lib/keplor/keplor.db ".backup /backups/keplor-$(date +%Y%m%d).db"
+```
+
+This is safe to run while Keplor is writing — SQLite's `.backup` command handles WAL correctly.
+
+### Restore
+
+```bash
+docker compose stop keplor
+cp /backups/keplor-20260418.db /var/lib/keplor/keplor.db
+docker compose start keplor
+```
+
+### Scheduled backups
+
+```bash
+# crontab: daily backup at 03:00, retain 7 days
+0 3 * * * sqlite3 /var/lib/keplor/keplor.db ".backup /backups/keplor-$(date +\%Y\%m\%d).db" && find /backups -name 'keplor-*.db' -mtime +7 -delete
+```
+
+## Garbage Collection
+
+Automatic GC runs hourly when `storage.retention_days > 0` (default: 90 days). It deletes:
+1. Events older than the retention threshold
+2. Orphaned blobs (reference count = 0)
+
+Manual GC:
+
+```bash
+keplor gc --older-than-days 30 --db keplor.db
+```
+
+## Upgrading
+
+1. Back up the database (see above)
+2. Build or pull the new binary/image
+3. Run migrations: `keplor migrate --db keplor.db`
+4. Restart the server
+
+Migrations are idempotent — running them multiple times is safe. The server also applies migrations automatically on startup.
+
+## Troubleshooting
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| `503 Service Unavailable` on ingest | Batch writer queue full | Reduce ingestion rate or increase `pipeline.batch_size` |
+| `408 Request Timeout` | Request exceeded `server.request_timeout_secs` | Increase timeout or reduce batch size |
+| Database file growing unbounded | `retention_days = 0` (GC disabled) | Set `retention_days` to a positive value |
+| WAL file very large | Checkpoint interval too long or heavy write load | Decrease `wal_checkpoint_secs` |
+| High memory usage | Large batch writer queue | Reduce `channel_capacity` in batch config |

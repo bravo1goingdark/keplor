@@ -1,16 +1,16 @@
-//! Ingestion JSON schema — the wire format external proxies POST.
+//! Ingestion JSON schema — the wire format external systems POST.
 
 use serde::{Deserialize, Serialize};
 
 /// The JSON body for `POST /v1/events`.
 ///
-/// Any LLM proxy (LiteLLM, OpenRouter, custom gateways) can POST events
-/// in this format.  Keplor computes cost from usage + its pricing catalog
-/// unless the caller provides `cost_nanodollars` explicitly.
+/// Any LLM gateway, SDK wrapper, or application can POST events in this
+/// format.  Keplor computes cost from usage + its pricing catalog unless
+/// the caller provides `cost_nanodollars` explicitly.
 #[derive(Debug, Deserialize)]
 pub struct IngestEvent {
     // --- required --------------------------------------------------------
-    /// Model name as reported by the proxy (e.g. `"gpt-4o"`).
+    /// Model name as reported by the caller (e.g. `"gpt-4o"`).
     pub model: String,
 
     /// Provider identifier: `"openai"`, `"anthropic"`, `"gemini"`, etc.
@@ -44,7 +44,7 @@ pub struct IngestEvent {
     /// HTTP status code returned by the upstream.
     pub http_status: Option<u16>,
 
-    /// Name of the proxy/system sending this event.
+    /// Name of the system sending this event.
     pub source: Option<String>,
 
     // --- attribution -----------------------------------------------------

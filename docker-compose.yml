@@ -1,0 +1,14 @@
+services:
+  keplor:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - keplor-data:/var/lib/keplor
+      - ./keplor.example.toml:/etc/keplor/keplor.toml:ro
+    environment:
+      - RUST_LOG=info
+    restart: unless-stopped
+
+volumes:
+  keplor-data:

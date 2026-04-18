@@ -20,7 +20,7 @@ bitflags! {
         const STREAM_INCOMPLETE = 1 << 3;
         /// Provider cache was used (Anthropic cache_read, OpenAI cached).
         const CACHED_USED       = 1 << 4;
-        /// Request was blocked by a proxy-side budget rule (phase 10+).
+        /// Request was blocked by a server-side budget rule (phase 10+).
         const BUDGET_BLOCKED    = 1 << 5;
     }
 }

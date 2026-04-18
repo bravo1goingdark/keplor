@@ -1,4 +1,4 @@
-//! [`LlmEvent`] — the canonical captured-request record, and the small
+//! [`LlmEvent`] — the canonical ingested LLM event record, and the small
 //! helper types ([`Latencies`], [`TraceId`]) it embeds.
 //!
 //! `LlmEvent` deliberately does **not** derive `Serialize`/`Deserialize`:
@@ -19,7 +19,7 @@ use crate::{
     Usage, UserId,
 };
 
-/// The canonical captured-request record.  One row in `llm_events`.
+/// The canonical ingested LLM event record.  One row in `llm_events`.
 #[derive(Debug, Clone)]
 pub struct LlmEvent {
     /// Primary key — time-sortable ULID.
@@ -63,8 +63,8 @@ pub struct LlmEvent {
     pub request_sha256: [u8; 32],
     /// SHA-256 of the raw response bytes.
     pub response_sha256: [u8; 32],
-    /// Client source IP (`None` when the proxy is behind a trusted
-    /// reverse proxy and we don't trust the `X-Forwarded-For` chain).
+    /// Client source IP (`None` when Keplor is behind a reverse proxy
+    /// and we don't trust the `X-Forwarded-For` chain).
     pub client_ip: Option<IpAddr>,
     /// Client-side user-agent string.
     pub user_agent: Option<SmolStr>,

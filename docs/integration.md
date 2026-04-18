@@ -318,7 +318,7 @@ Prometheus metrics export. No auth. Returns `text/plain` in Prometheus expositio
 | `method` | string | No | `"POST"` | HTTP method of the upstream call |
 | `endpoint` | string | No | `""` | API endpoint path (e.g., `"/v1/chat/completions"`) |
 | `http_status` | uint16 | No | | HTTP status code from the upstream |
-| `source` | string | No | | Name of the proxy/system sending this event |
+| `source` | string | No | | Name of the system sending this event |
 | `user_id` | string | No | | User identity for cost attribution |
 | `api_key_id` | string | No | | API key identity (overridden by server when auth is enabled) |
 | `org_id` | string | No | | Organization ID |
@@ -459,7 +459,7 @@ When `cost_nanodollars` is not provided in the event, Keplor computes it from:
 
 ### Cost Override
 
-To bypass Keplor's calculation (e.g., if your proxy already computed cost):
+To bypass Keplor's calculation (e.g., if your application already computed cost):
 
 ```json
 {
@@ -621,7 +621,7 @@ resp = requests.post(f"{KEPLOR_URL}/v1/events", headers=headers, json={
     "latency": {"ttft_ms": 30, "total_ms": 450},
     "http_status": 200,
     "user_id": "user_42",
-    "source": "my-proxy",
+    "source": "my-app",
     "endpoint": "/v1/chat/completions",
     "flags": {"streaming": True},
 })
@@ -729,7 +729,7 @@ console.log(`Event ${result.id} cost: $${(result.cost_nanodollars / 1e9).toFixed
 
 ### LiteLLM Callback Integration
 
-If you use LiteLLM as your proxy, configure a custom callback to forward events:
+If you use LiteLLM as your gateway, configure a custom callback to forward events:
 
 ```python
 import litellm

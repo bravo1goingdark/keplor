@@ -64,18 +64,18 @@ resp = requests.post(
 
 <svelte:head>
   <title>Keplor — LLM Observability & Cost Accounting</title>
-  <meta name="description" content="Capture every LLM request and response. Auto-compute cost across 2,263 models. Single binary, zero dependencies, sub-millisecond overhead." />
-  <meta name="keywords" content="LLM observability, LLM cost tracking, LLM proxy logging, OpenAI cost, Anthropic cost, AI cost accounting, LLM monitoring" />
+  <meta name="description" content="Ingest every LLM event. Auto-compute cost across 2,263 models. Single binary, zero dependencies." />
+  <meta name="keywords" content="LLM observability, LLM cost tracking, LLM log ingestion, OpenAI cost, Anthropic cost, AI cost accounting, LLM monitoring" />
   <link rel="canonical" href="https://keplor.dev" />
 
   <!-- Open Graph -->
   <meta property="og:title" content="Keplor — LLM Observability & Cost Accounting" />
-  <meta property="og:description" content="Capture every LLM call. Auto-compute cost across 2,263 models. Single binary, zero dependencies." />
+  <meta property="og:description" content="Ingest every LLM event. Auto-compute cost across 2,263 models. Single binary, zero dependencies." />
   <meta property="og:url" content="https://keplor.dev" />
 
   <!-- Twitter -->
   <meta name="twitter:title" content="Keplor — LLM Observability & Cost Accounting" />
-  <meta name="twitter:description" content="Capture every LLM call. Auto-compute cost across 2,263 models. Single binary, zero dependencies." />
+  <meta name="twitter:description" content="Ingest every LLM event. Auto-compute cost across 2,263 models. Single binary, zero dependencies." />
 
   <!-- Structured data -->
   {@html `<script type="application/ld+json">${JSON.stringify({
@@ -107,7 +107,7 @@ resp = requests.post(
       </h1>
 
       <p class="text-[18px] leading-[1.6] text-ink-muted max-w-[54ch] mb-10 animate-in-delay-1">
-        A single binary captures every prompt and completion, auto-computes cost
+        A single binary ingests every prompt and completion, auto-computes cost
         from a <strong class="text-ink font-medium">2,263-model</strong> pricing catalog, and serves
         real-time aggregations. No containers, no cloud, no dependencies.
       </p>
@@ -226,7 +226,7 @@ resp = requests.post(
         { n: '<10 MB', label: 'Binary size', sub: 'Single static musl binary' },
         { n: '368K/s', label: 'Events throughput', sub: 'Per core, batched writes' },
         { n: '2,263', label: 'Models priced', sub: 'LiteLLM catalog, auto-refreshed' },
-        { n: '<1 ms', label: 'Ingestion overhead', sub: 'p99 proxy latency added' },
+        { n: '<1 ms', label: 'Ingestion overhead', sub: 'p99 ingestion latency' },
       ] as { n, label, sub }}
         <div>
           <div class="font-serif text-[clamp(28px,3.5vw,40px)] tracking-[-0.02em] text-ink">{n}</div>
@@ -268,7 +268,7 @@ resp = requests.post(
       Start observing.
     </h2>
     <p class="text-[17px] text-ink-muted mb-10 max-w-[44ch] mx-auto leading-[1.6]">
-      Five commands from clone to your first captured event.
+      Five commands from clone to your first ingested event.
       No account, no API key, no credit card.
     </p>
     <div class="flex flex-wrap justify-center gap-4">

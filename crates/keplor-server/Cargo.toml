@@ -42,5 +42,9 @@ rustls-pki-types  = { workspace = true }
 time            = { version = "0.3", features = ["parsing"] }
 
 [dev-dependencies]
-tokio   = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
-reqwest = { workspace = true }
+tokio      = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
+reqwest    = { workspace = true }
+serde_json = { workspace = true }
+rcgen      = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"] }
+tempfile   = "3"
+rustls     = { workspace = true }

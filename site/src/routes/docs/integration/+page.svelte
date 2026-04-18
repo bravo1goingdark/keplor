@@ -11,7 +11,7 @@
     "usage": {"input_tokens": 1000, "output_tokens": 500},
     "latency": {"ttft_ms": 30, "total_ms": 450},
     "user_id": "alice",
-    "source": "my-proxy"
+    "source": "my-app"
   }'`;
 
   const curlResponse = `{
@@ -36,7 +36,7 @@
 '        "latency": {"total_ms": latency_ms},\n' +
 '        "http_status": 200,\n' +
 '        "user_id": user_id,\n' +
-'        "source": "my-proxy",\n' +
+'        "source": "my-app",\n' +
 '    }).json()\n\n' +
 'result = log_llm_event("gpt-4o", "openai", {\n' +
 '    "input_tokens": 1500,\n' +
@@ -148,7 +148,7 @@
   "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
   "request_id": "req_abc123",
   "client_ip": "10.0.1.42",
-  "user_agent": "my-proxy/1.0",
+  "user_agent": "my-app/1.0",
   "request_body": {"messages": [{"role": "user", "content": "Hello"}]},
   "response_body": {"content": [{"type": "text", "text": "Hi there!"}]},
   "metadata": {"session_id": "sess_xyz", "user_tag": "premium"}
@@ -163,9 +163,9 @@
 <p class="text-lg text-text-muted mb-8">Everything a service needs to log LLM traffic through Keplor.</p>
 
 <h2 id="overview">How it works</h2>
-<p>Your proxy or application makes LLM calls as usual, then POSTs event data to Keplor. Keplor computes cost from its bundled pricing catalog, compresses and stores the event, and makes it queryable via the API.</p>
+<p>Your application or gateway makes LLM calls as usual, then POSTs event data to Keplor. Keplor computes cost from its bundled pricing catalog, compresses and stores the event, and makes it queryable via the API.</p>
 
-<Pre code={"Your App / Proxy                  Keplor\n      |                              |\n      |-- LLM call --> Provider      |\n      |<-- response --               |\n      |                              |\n      |-- POST /v1/events ---------> | validate, compute cost,\n      |<-- 201 {id, cost} ---------- | compress, store"} />
+<Pre code={"Your App / Gateway                Keplor\n      |                              |\n      |-- LLM call --> Provider      |\n      |<-- response --               |\n      |                              |\n      |-- POST /v1/events ---------> | validate, compute cost,\n      |<-- 201 {id, cost} ---------- | compress, store"} />
 
 <p>Keplor is <strong>observational only</strong> &mdash; it never touches your LLM traffic. It just records what happened.</p>
 

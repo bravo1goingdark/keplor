@@ -47,12 +47,18 @@ const MAX_BATCH_SIZE: usize = 10_000;
 
 /// `POST /v1/events/batch` — ingest a batch of events.
 ///
-/// Uses fire-and-forget writes: events are validated and queued for
-/// batched storage without awaiting individual flush confirmations.
-/// Events may be lost if the server crashes before the next flush.
+/// By default, uses fire-and-forget writes: events are validated and
+/// queued for batched storage without awaiting individual flush
+/// confirmations. Events may be lost if the server crashes before the
+/// next flush (~50 ms).
+///
+/// Set the `X-Keplor-Durable: true` header to await each write's flush
+/// confirmation before responding — slower, but every accepted event is
+/// guaranteed durable when the response arrives.
 pub async fn ingest_batch(
     State(state): State<AppState>,
     auth: Option<Extension<AuthenticatedKey>>,
+    headers: axum::http::HeaderMap,
     Json(batch): Json<BatchRequest>,
 ) -> Result<(StatusCode, Json<BatchResponse>), crate::error::ServerError> {
     if batch.events.len() > MAX_BATCH_SIZE {
@@ -62,21 +68,41 @@ pub async fn ingest_batch(
         )));
     }
 
+    let durable = headers
+        .get("x-keplor-durable")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.eq_ignore_ascii_case("true"));
+
     let key_id = auth.map(|Extension(k)| k.key_id);
     let mut results = Vec::with_capacity(batch.events.len());
     let mut accepted = 0usize;
     let mut rejected = 0usize;
 
-    for event in batch.events {
-        match state.pipeline.ingest_fire_and_forget(event, key_id.as_deref()) {
-            Ok(resp) => {
-                accepted += 1;
-                results.push(BatchItemResult::Ok(resp));
-            },
-            Err(e) => {
-                rejected += 1;
-                results.push(BatchItemResult::Err { error: e.to_string() });
-            },
+    if durable {
+        for event in batch.events {
+            match state.pipeline.ingest(event, key_id.as_deref(), None).await {
+                Ok(resp) => {
+                    accepted += 1;
+                    results.push(BatchItemResult::Ok(resp));
+                },
+                Err(e) => {
+                    rejected += 1;
+                    results.push(BatchItemResult::Err { error: e.to_string() });
+                },
+            }
+        }
+    } else {
+        for event in batch.events {
+            match state.pipeline.ingest_fire_and_forget(event, key_id.as_deref()) {
+                Ok(resp) => {
+                    accepted += 1;
+                    results.push(BatchItemResult::Ok(resp));
+                },
+                Err(e) => {
+                    rejected += 1;
+                    results.push(BatchItemResult::Err { error: e.to_string() });
+                },
+            }
         }
     }
 

@@ -4,14 +4,14 @@ This file tells Claude Code how to work on this repository. Read it before every
 
 ## Project
 
-**Keplor** — a production-grade, transparent, observational HTTPS proxy for LLM traffic, written in Rust. Single static musl binary under 10 MB, <1 ms proxy overhead p99, 10k req/s per core, <30 MB idle RAM.
+**Keplor** — a production-grade LLM logs ingestion and cost-accounting server, written in Rust. Single static musl binary under 10 MB, <1 ms ingestion latency p99, 10k req/s per core, <30 MB idle RAM.
 
-Named for Johannes Kepler, who derived planetary laws by watching what was already there. Keplor does the same for LLM traffic — no routing, no rewriting, just precise observation and honest accounting.
+Named for Johannes Kepler, who derived planetary laws from observations others recorded. Keplor does the same — it turns the LLM logs your systems send it into precise cost and usage insights.
 
 ## Non-negotiable principles
 
-1. **Pure observational** — byte-for-byte passthrough. Never reformat, rewrite, or buffer-then-replay payloads. Tee the bytes, forward them untouched.
-2. **Lossless streaming** — capture every SSE/event-stream chunk and reassemble the full response for each provider's exact wire format.
+1. **Faithful ingestion** — accept events as-is. Never recompute, reformat, or drop fields the caller sent.
+2. **Every provider schema** — accept events from any provider wire format with correct token-type handling for each.
 3. **Heavy compression** — zstd with trained dictionaries per (provider, component_type). Target 30–80× on conversational JSON.
 4. **Zero-dep default** — SQLite works out of the box. ClickHouse, S3, OTLP are optional sinks.
 5. **Lean stack** — hyper 1.x + axum 0.8 + rustls 0.23 (aws-lc-rs) + tokio. NOT pingora, NOT openssl, NOT async-std.

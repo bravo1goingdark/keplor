@@ -1,13 +1,13 @@
-//! The [`Provider`] enum: what LLM vendor / surface a request targets.
+//! The [`Provider`] enum: what LLM vendor / surface an event targets.
 //!
-//! `Keplor` never dispatches *on behalf of* the caller — the proxy tees
-//! bytes to whatever upstream the client asked for.  This enum is used for
-//! four things only:
+//! Keplor is an ingestion server — it receives pre-parsed events from
+//! external systems.  This enum identifies which provider the event
+//! came from and is used for four things only:
 //!
-//! 1. Routing the captured bytes to the correct wire-format reassembler.
-//! 2. Looking up pricing rows.
-//! 3. Attributing cost / usage for dashboards.
-//! 4. Picking the right auth header when we later add proxy-side virtual
+//! 1. Looking up pricing rows.
+//! 2. Attributing cost / usage for dashboards.
+//! 3. Selecting the right compression dictionary.
+//! 4. Picking the right auth header when we later add server-side virtual
 //!    keys (phase 10).
 
 use std::sync::Arc;

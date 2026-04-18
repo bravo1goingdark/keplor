@@ -13,7 +13,7 @@ use axum::Router;
 use metrics_exporter_prometheus::PrometheusHandle;
 use tokio::net::TcpListener;
 use tower::ServiceBuilder;
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::trace::TraceLayer;
 
 use crate::auth::{self, ApiKeySet};
@@ -117,7 +117,7 @@ impl PipelineServer {
             )
             .layer(middleware::from_fn(request_id::propagate_request_id))
             .layer(TraceLayer::new_for_http())
-            .layer(CorsLayer::permissive());
+            .layer(build_cors_layer(&config.cors));
 
         let tls_config = config.tls.as_ref().map(|tls| {
             use rustls_pki_types::pem::PemObject;
@@ -222,6 +222,28 @@ impl PipelineServer {
 
         tracing::info!("keplor shut down cleanly");
         Ok(())
+    }
+}
+
+/// Build a CORS layer from the configuration.
+///
+/// - Empty `allowed_origins`: no `Access-Control-Allow-Origin` header is
+///   sent, so browsers enforce same-origin policy (restrictive default).
+/// - `["*"]`: equivalent to `CorsLayer::permissive()`.
+/// - Explicit list: only those origins are allowed.
+fn build_cors_layer(config: &crate::config::CorsConfig) -> CorsLayer {
+    if config.allowed_origins.is_empty() {
+        // No origins configured — restrictive default.
+        CorsLayer::new()
+    } else if config.allowed_origins.len() == 1 && config.allowed_origins[0] == "*" {
+        CorsLayer::permissive()
+    } else {
+        let origins: Vec<http::HeaderValue> =
+            config.allowed_origins.iter().filter_map(|o| o.parse().ok()).collect();
+        CorsLayer::new()
+            .allow_origin(AllowOrigin::list(origins))
+            .allow_methods([http::Method::GET, http::Method::POST, http::Method::OPTIONS])
+            .allow_headers([http::header::CONTENT_TYPE, http::header::AUTHORIZATION])
     }
 }
 
