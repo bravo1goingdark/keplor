@@ -147,6 +147,11 @@ html.dark .accent-glow {
   opacity: 0.06;
 }
 
+/* ── Scrollbar hide utility ──────────────────────────────── */
+
+.no-scrollbar { scrollbar-width: none; -ms-overflow-style: none; }
+.no-scrollbar::-webkit-scrollbar { display: none; }
+
 /* ── Reduced motion ──────────────────────────────────────── */
 
 @media (prefers-reduced-motion: reduce) {

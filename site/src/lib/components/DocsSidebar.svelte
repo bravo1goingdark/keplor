@@ -91,7 +91,7 @@
   ];
 </script>
 
-<aside class="hidden lg:block w-44 shrink-0 pt-12 h-full overflow-y-auto">
+<aside class="hidden lg:block w-44 shrink-0 pt-12 h-full overflow-y-auto no-scrollbar">
   <nav class="space-y-1">
     {#each nav as { href, label, sections }}
       {@const active = page.url.pathname === href}
