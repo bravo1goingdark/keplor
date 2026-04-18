@@ -53,7 +53,8 @@
     "cache_read_input_tokens": 5000,
     "cache_creation_input_tokens": 0,
     "cost_nanodollars": 18750000
-  }]
+  }],
+  "has_more": false
 }`;
 
   const statsResponse = `{
@@ -67,7 +68,13 @@
     "cache_read_input_tokens": 12000,
     "cache_creation_input_tokens": 0,
     "cost_nanodollars": 48250000
-  }]
+  }],
+  "has_more": false
+}`;
+
+  const deleteResponse = `{
+  "events_deleted": 1234,
+  "blobs_deleted": 56
 }`;
 
   const healthResponse = `{
@@ -130,7 +137,7 @@ keplor_events_ingested_total{provider="openai"} 42`;
 <Pre code={ingestResponse} />
 
 <h2 id="batch"><span class="method method-post">POST</span> /v1/events/batch</h2>
-<p>Ingest up to <strong>10,000 events</strong>. Fire-and-forget writes for throughput.</p>
+<p>Ingest up to <strong>10,000 events</strong>. Fire-and-forget by default. Set <code>X-Keplor-Durable: true</code> header to await flush confirmation for each event.</p>
 
 <h3>Request</h3>
 <Pre code={batchRequest} />
@@ -187,6 +194,8 @@ keplor_events_ingested_total{provider="openai"} 42`;
     <tr><td><code>api_key_id</code></td><td>string</td><td>no</td><td>Filter by API key</td></tr>
     <tr><td><code>from</code></td><td>i64</td><td>yes</td><td>Start epoch ns (converted to day boundary)</td></tr>
     <tr><td><code>to</code></td><td>i64</td><td>yes</td><td>End epoch ns (converted to day boundary)</td></tr>
+    <tr><td><code>limit</code></td><td>u32</td><td>no</td><td>Max rows (default 100, max 1000)</td></tr>
+    <tr><td><code>offset</code></td><td>u32</td><td>no</td><td>Offset for pagination (default 0)</td></tr>
   </tbody>
 </table>
 
@@ -206,11 +215,25 @@ keplor_events_ingested_total{provider="openai"} 42`;
     <tr><td><code>to</code></td><td>i64</td><td>yes</td><td>End epoch ns</td></tr>
     <tr><td><code>provider</code></td><td>string</td><td>no</td><td>Filter by provider</td></tr>
     <tr><td><code>group_by</code></td><td>string</td><td>no</td><td>Set to <code>"model"</code> to group by provider + model</td></tr>
+    <tr><td><code>limit</code></td><td>u32</td><td>no</td><td>Max rows (default 100, max 1000)</td></tr>
+    <tr><td><code>offset</code></td><td>u32</td><td>no</td><td>Offset for pagination (default 0)</td></tr>
   </tbody>
 </table>
 
 <h3>Response <code>200 OK</code></h3>
 <Pre code={statsResponse} />
+
+<h2 id="delete-single"><span class="method method-delete">DELETE</span> /v1/events/:id</h2>
+<p>Delete a single event by ID. Cleans up blob references and orphaned blobs.</p>
+<p>Returns <code>204 No Content</code> if deleted, <code>404 Not Found</code> if the event does not exist.</p>
+
+<h2 id="delete-bulk"><span class="method method-delete">DELETE</span> /v1/events?older_than_days=N</h2>
+<p>Bulk delete events older than N days. Equivalent to <code>keplor gc</code> via HTTP. <code>older_than_days</code> must be greater than 0.</p>
+<h3>Response <code>200 OK</code></h3>
+<Pre code={deleteResponse} />
+
+<h2 id="export"><span class="method method-get">GET</span> /v1/events/export</h2>
+<p>Stream all matching events as JSON Lines (<code>application/x-ndjson</code>). Accepts the same filter parameters as <code>GET /v1/events</code> but with no result-set limit. Each line is one JSON event object.</p>
 
 <h2 id="health"><span class="method method-get">GET</span> /health</h2>
 <p>Liveness probe. Returns <code>200</code> when healthy, <code>503</code> when degraded.</p>
@@ -226,6 +249,7 @@ keplor_events_ingested_total{provider="openai"} 42`;
   <tbody>
     <tr><td><code>Authorization</code></td><td>Request</td><td><code>Bearer &lt;secret&gt;</code> (required when keys configured)</td></tr>
     <tr><td><code>Idempotency-Key</code></td><td>Request</td><td>Optional. Prevents duplicate event creation on retries. Cached for 5 min (configurable).</td></tr>
+    <tr><td><code>X-Keplor-Durable</code></td><td>Request</td><td>Set to <code>true</code> on batch endpoint to await flush confirmation. Default: fire-and-forget.</td></tr>
     <tr><td><code>X-Request-Id</code></td><td>Both</td><td>Echoed if sent; otherwise Keplor generates a ULID and returns it.</td></tr>
     <tr><td><code>Retry-After</code></td><td>Response</td><td>Seconds until rate limit resets (returned with <code>429</code>).</td></tr>
   </tbody>
@@ -236,12 +260,15 @@ keplor_events_ingested_total{provider="openai"} 42`;
 <table>
   <thead><tr><th>Status</th><th>When</th><th>Retry?</th></tr></thead>
   <tbody>
+    <tr><td><code>204</code></td><td>Event deleted successfully</td><td>No</td></tr>
     <tr><td><code>400</code></td><td>Validation error, bad JSON, invalid timestamp</td><td>No</td></tr>
     <tr><td><code>401</code></td><td>Missing or invalid API key</td><td>No</td></tr>
+    <tr><td><code>404</code></td><td>Event not found (DELETE)</td><td>No</td></tr>
     <tr><td><code>408</code></td><td>Request exceeded <code>request_timeout_secs</code></td><td>Yes</td></tr>
     <tr><td><code>422</code></td><td>Unknown provider</td><td>No</td></tr>
     <tr><td><code>429</code></td><td>Per-key rate limit exceeded</td><td>Yes (after <code>Retry-After</code>)</td></tr>
     <tr><td><code>500</code></td><td>Storage failure, write timeout</td><td>Yes (with backoff)</td></tr>
     <tr><td><code>503</code></td><td>Batch writer overloaded (back-pressure)</td><td>Yes (with backoff)</td></tr>
+    <tr><td><code>507</code></td><td>Database size limit exceeded</td><td>Yes (run GC or increase limit)</td></tr>
   </tbody>
 </table>
