@@ -8,7 +8,7 @@ use axum::error_handling::HandleErrorLayer;
 use axum::extract::DefaultBodyLimit;
 use axum::http::StatusCode;
 use axum::middleware;
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::Router;
 use metrics_exporter_prometheus::PrometheusHandle;
 use tokio::net::TcpListener;
@@ -76,6 +76,9 @@ impl PipelineServer {
             .route("/v1/events", post(routes::ingest_single))
             .route("/v1/events/batch", post(routes::ingest_batch))
             .route("/v1/events", get(routes::query_events))
+            .route("/v1/events/export", get(routes::export_events))
+            .route("/v1/events/{id}", delete(routes::delete_event))
+            .route("/v1/events", delete(routes::delete_events_bulk))
             .route("/v1/quota", get(routes::query_quota))
             .route("/v1/rollups", get(routes::query_rollups))
             .route("/v1/stats", get(routes::query_stats))

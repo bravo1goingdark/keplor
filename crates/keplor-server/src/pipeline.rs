@@ -33,18 +33,45 @@ pub struct Pipeline {
     writer: Arc<BatchWriter>,
     catalog: Arc<Catalog>,
     idempotency: Option<Arc<IdempotencyCache>>,
+    /// Maximum DB size in bytes. 0 = unlimited.
+    max_db_bytes: u64,
 }
 
 impl Pipeline {
     /// Create a new pipeline with the given store, batch writer, and pricing catalog.
     pub fn new(store: Arc<Store>, writer: Arc<BatchWriter>, catalog: Arc<Catalog>) -> Self {
-        Self { store, writer, catalog, idempotency: None }
+        Self { store, writer, catalog, idempotency: None, max_db_bytes: 0 }
+    }
+
+    /// Set maximum database size in megabytes. 0 = unlimited.
+    pub fn with_max_db_size_mb(mut self, mb: u64) -> Self {
+        self.max_db_bytes = mb * 1024 * 1024;
+        self
     }
 
     /// Attach an idempotency cache to the pipeline.
     pub fn with_idempotency(mut self, cache: Arc<IdempotencyCache>) -> Self {
         self.idempotency = Some(cache);
         self
+    }
+
+    /// Check if the database has exceeded the configured size limit.
+    fn check_db_size(&self) -> Result<(), ServerError> {
+        if self.max_db_bytes == 0 {
+            return Ok(());
+        }
+        match self.store.db_size_bytes() {
+            Ok(size) if size >= self.max_db_bytes => {
+                metrics::counter!("keplor_events_errors_total", "stage" => "storage_full")
+                    .increment(1);
+                Err(ServerError::StorageFull(format!(
+                    "database size {:.1} MB exceeds limit of {:.1} MB",
+                    size as f64 / (1024.0 * 1024.0),
+                    self.max_db_bytes as f64 / (1024.0 * 1024.0),
+                )))
+            },
+            _ => Ok(()),
+        }
     }
 
     /// Process a single ingestion event — durable write (awaits flush).
@@ -69,6 +96,8 @@ impl Pipeline {
                 return Ok(cached);
             }
         }
+
+        self.check_db_size()?;
 
         let start = std::time::Instant::now();
         let (llm_event, req_bytes, resp_bytes, provider, model, cost) =
@@ -116,6 +145,7 @@ impl Pipeline {
         event: IngestEvent,
         authenticated_key_id: Option<&str>,
     ) -> Result<IngestResponse, ServerError> {
+        self.check_db_size()?;
         let (llm_event, req_bytes, resp_bytes, provider, model, cost) =
             self.process_event(event, authenticated_key_id)?;
 

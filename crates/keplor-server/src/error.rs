@@ -26,6 +26,10 @@ pub enum ServerError {
     #[error("json: {0}")]
     Json(String),
 
+    /// Database size limit exceeded.
+    #[error("storage full: {0}")]
+    StorageFull(String),
+
     /// Internal error.
     #[error("internal: {0}")]
     Internal(String),
@@ -38,6 +42,7 @@ impl IntoResponse for ServerError {
                 (StatusCode::BAD_REQUEST, self.to_string())
             },
             Self::UnknownProvider(_) => (StatusCode::UNPROCESSABLE_ENTITY, self.to_string()),
+            Self::StorageFull(_) => (StatusCode::INSUFFICIENT_STORAGE, self.to_string()),
             Self::Store(
                 keplor_store::StoreError::ChannelFull | keplor_store::StoreError::ChannelClosed,
             ) => {

@@ -1081,6 +1081,8 @@ impl Store {
         api_key_id: Option<&str>,
         from_day: i64,
         to_day: i64,
+        limit: u32,
+        offset: u32,
     ) -> Result<Vec<RollupRow>, StoreError> {
         let conn = self.read_conn()?;
 
@@ -1101,10 +1103,14 @@ impl Store {
             sql.push_str(&format!(" AND api_key_id = ?{bind_idx}"));
         }
         sql.push_str(" ORDER BY day ASC");
+        bind_idx += 1;
+        sql.push_str(&format!(" LIMIT ?{bind_idx}"));
+        bind_idx += 1;
+        sql.push_str(&format!(" OFFSET ?{bind_idx}"));
 
         let mut stmt = conn.prepare_cached(&sql)?;
 
-        let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::with_capacity(4);
+        let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::with_capacity(6);
         params_vec.push(Box::new(from_day));
         params_vec.push(Box::new(to_day));
         if let Some(uid) = user_id {
@@ -1113,6 +1119,8 @@ impl Store {
         if let Some(kid) = api_key_id {
             params_vec.push(Box::new(kid.to_owned()));
         }
+        params_vec.push(Box::new(limit));
+        params_vec.push(Box::new(offset));
         let params_ref: Vec<&dyn rusqlite::types::ToSql> =
             params_vec.iter().map(|b| b.as_ref()).collect();
 
@@ -1133,6 +1141,8 @@ impl Store {
         to_day: i64,
         provider_filter: Option<&str>,
         group_by_model: bool,
+        limit: u32,
+        offset: u32,
     ) -> Result<Vec<AggregateRow>, StoreError> {
         let conn = self.read_conn()?;
 
@@ -1163,10 +1173,14 @@ impl Store {
         if group_by_model {
             sql.push_str(" GROUP BY provider, model ORDER BY SUM(cost_nanodollars) DESC");
         }
+        bind_idx += 1;
+        sql.push_str(&format!(" LIMIT ?{bind_idx}"));
+        bind_idx += 1;
+        sql.push_str(&format!(" OFFSET ?{bind_idx}"));
 
         let mut stmt = conn.prepare_cached(&sql)?;
 
-        let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::with_capacity(5);
+        let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::with_capacity(7);
         params_vec.push(Box::new(from_day));
         params_vec.push(Box::new(to_day));
         if let Some(uid) = user_id {
@@ -1178,6 +1192,8 @@ impl Store {
         if let Some(prov) = provider_filter {
             params_vec.push(Box::new(prov.to_owned()));
         }
+        params_vec.push(Box::new(limit));
+        params_vec.push(Box::new(offset));
         let params_ref: Vec<&dyn rusqlite::types::ToSql> =
             params_vec.iter().map(|b| b.as_ref()).collect();
 
@@ -1287,6 +1303,62 @@ impl Store {
     pub fn wal_checkpoint(&self) -> Result<(), StoreError> {
         let conn = self.write_conn()?;
         conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+        Ok(())
+    }
+
+    /// Database file size in bytes (page_count × page_size).
+    pub fn db_size_bytes(&self) -> Result<u64, StoreError> {
+        let conn = self.read_conn()?;
+        let page_count: i64 = conn.query_row("PRAGMA page_count", [], |r| r.get(0))?;
+        let page_size: i64 = conn.query_row("PRAGMA page_size", [], |r| r.get(0))?;
+        #[allow(clippy::cast_sign_loss)]
+        Ok((page_count * page_size) as u64)
+    }
+
+    /// Delete a single event by ID, cleaning up component links and
+    /// decrementing blob refcounts. Removes orphaned blobs.
+    ///
+    /// Returns `true` if the event existed and was deleted.
+    pub fn delete_event(&self, id: &EventId) -> Result<bool, StoreError> {
+        let conn = self.write_conn()?;
+        let tx = conn.unchecked_transaction()?;
+        let id_str = id.to_string();
+
+        // Decrement blob refcounts.
+        tx.execute(
+            "UPDATE payload_blobs SET refcount = refcount - 1 \
+             WHERE sha256 IN (SELECT blob_sha256 FROM event_components WHERE event_id = ?1)",
+            [&id_str],
+        )?;
+
+        // Delete component links.
+        tx.execute("DELETE FROM event_components WHERE event_id = ?1", [&id_str])?;
+
+        // Delete the event.
+        let deleted = tx.execute("DELETE FROM llm_events WHERE id = ?1", [&id_str])?;
+
+        // Clean up orphaned blobs.
+        tx.execute("DELETE FROM payload_blobs WHERE refcount <= 0", [])?;
+
+        tx.commit()?;
+        Ok(deleted > 0)
+    }
+
+    /// Stream event summaries matching a filter without collecting into a
+    /// `Vec`. Calls `callback` for each matching row. Used for bulk export.
+    ///
+    /// Unlike [`Store::query_summary`], this method has no result-set limit.
+    pub fn export_events(
+        &self,
+        filter: &EventFilter,
+        callback: &mut dyn FnMut(EventSummary),
+    ) -> Result<(), StoreError> {
+        // Reuse query_summary with u32::MAX — SQLite handles LIMIT
+        // 4_294_967_295 efficiently (it's essentially unlimited).
+        let events = self.query_summary(filter, u32::MAX, None)?;
+        for e in events {
+            callback(e);
+        }
         Ok(())
     }
 }

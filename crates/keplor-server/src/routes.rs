@@ -317,6 +317,10 @@ pub struct RollupsQuery {
     pub from: i64,
     /// End, epoch nanoseconds (converted to day boundary internally).
     pub to: i64,
+    /// Maximum results (default 100, max 1000).
+    pub limit: Option<u32>,
+    /// Offset for pagination (default 0).
+    pub offset: Option<u32>,
 }
 
 /// A single rollup entry in the response.
@@ -353,6 +357,8 @@ pub struct RollupEntry {
 pub struct RollupsResponse {
     /// Daily rollup rows.
     pub rollups: Vec<RollupEntry>,
+    /// Whether more rows exist beyond this page.
+    pub has_more: bool,
 }
 
 /// `GET /v1/rollups` — pre-aggregated daily rollup rows.
@@ -362,6 +368,8 @@ pub async fn query_rollups(
 ) -> Result<Json<RollupsResponse>, crate::error::ServerError> {
     let from_day = ns_to_day_epoch(params.from);
     let to_day = ns_to_day_epoch(params.to);
+    let limit = params.limit.unwrap_or(100).min(1000);
+    let offset = params.offset.unwrap_or(0);
 
     let store = state.pipeline.store_arc();
     let rows = tokio::task::spawn_blocking(move || {
@@ -370,14 +378,19 @@ pub async fn query_rollups(
             params.api_key_id.as_deref(),
             from_day,
             to_day,
+            limit + 1,
+            offset,
         )
     })
     .await
     .map_err(|e| crate::error::ServerError::Internal(e.to_string()))?
     .map_err(crate::error::ServerError::from)?;
 
-    let rollups = rows
+    let has_more = rows.len() > limit as usize;
+
+    let rollups: Vec<_> = rows
         .into_iter()
+        .take(limit as usize)
         .map(|r| RollupEntry {
             day: r.day,
             user_id: r.user_id,
@@ -394,7 +407,7 @@ pub async fn query_rollups(
         })
         .collect();
 
-    Ok(Json(RollupsResponse { rollups }))
+    Ok(Json(RollupsResponse { rollups, has_more }))
 }
 
 /// Query parameters for `GET /v1/stats`.
@@ -412,6 +425,10 @@ pub struct StatsQuery {
     pub provider: Option<String>,
     /// Set to `"model"` to group results by provider+model.
     pub group_by: Option<String>,
+    /// Maximum results (default 100, max 1000).
+    pub limit: Option<u32>,
+    /// Offset for pagination (default 0).
+    pub offset: Option<u32>,
 }
 
 /// A single stats entry in the response.
@@ -442,6 +459,8 @@ pub struct StatEntry {
 pub struct StatsResponse {
     /// Aggregated stat rows.
     pub stats: Vec<StatEntry>,
+    /// Whether more rows exist beyond this page.
+    pub has_more: bool,
 }
 
 /// `GET /v1/stats` — aggregated period statistics from `daily_rollups`.
@@ -452,6 +471,8 @@ pub async fn query_stats(
     let from_day = ns_to_day_epoch(params.from);
     let to_day = ns_to_day_epoch(params.to);
     let group_by_model = params.group_by.as_deref() == Some("model");
+    let limit = params.limit.unwrap_or(100).min(1000);
+    let offset = params.offset.unwrap_or(0);
 
     let store = state.pipeline.store_arc();
     let rows = tokio::task::spawn_blocking(move || {
@@ -462,14 +483,18 @@ pub async fn query_stats(
             to_day,
             params.provider.as_deref(),
             group_by_model,
+            limit + 1,
+            offset,
         )
     })
     .await
     .map_err(|e| crate::error::ServerError::Internal(e.to_string()))?
     .map_err(crate::error::ServerError::from)?;
 
-    let stats = rows
+    let has_more = rows.len() > limit as usize;
+    let stats: Vec<_> = rows
         .into_iter()
+        .take(limit as usize)
         .map(|r| StatEntry {
             provider: r.provider,
             model: r.model,
@@ -483,13 +508,149 @@ pub async fn query_stats(
         })
         .collect();
 
-    Ok(Json(StatsResponse { stats }))
+    Ok(Json(StatsResponse { stats, has_more }))
 }
 
 /// Convert epoch nanoseconds to a day boundary in epoch seconds.
 fn ns_to_day_epoch(ns: i64) -> i64 {
     let secs = ns / 1_000_000_000;
     secs - (secs % 86400)
+}
+
+// ── Deletion API ───────────────────────────────────────────────────────
+
+/// `DELETE /v1/events/:id` — delete a single event by ID.
+pub async fn delete_event(
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<StatusCode, crate::error::ServerError> {
+    let event_id: keplor_core::EventId =
+        id.parse().map_err(|_| crate::error::ServerError::Validation("invalid event id".into()))?;
+
+    let store = state.pipeline.store_arc();
+    let deleted = tokio::task::spawn_blocking(move || store.delete_event(&event_id))
+        .await
+        .map_err(|e| crate::error::ServerError::Internal(e.to_string()))?
+        .map_err(crate::error::ServerError::from)?;
+
+    if deleted {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Ok(StatusCode::NOT_FOUND)
+    }
+}
+
+/// Query parameters for `DELETE /v1/events`.
+#[derive(Debug, Deserialize)]
+pub struct DeleteEventsQuery {
+    /// Delete events older than this many days.
+    pub older_than_days: u32,
+}
+
+/// Response for bulk deletion.
+#[derive(Debug, Serialize)]
+pub struct DeleteEventsResponse {
+    /// Number of events deleted.
+    pub events_deleted: usize,
+    /// Number of orphaned blobs deleted.
+    pub blobs_deleted: usize,
+}
+
+/// `DELETE /v1/events?older_than_days=N` — bulk delete old events.
+pub async fn delete_events_bulk(
+    State(state): State<AppState>,
+    Query(params): Query<DeleteEventsQuery>,
+) -> Result<Json<DeleteEventsResponse>, crate::error::ServerError> {
+    if params.older_than_days == 0 {
+        return Err(crate::error::ServerError::Validation("older_than_days must be > 0".into()));
+    }
+
+    let cutoff_ns = {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as i64;
+        now - (params.older_than_days as i64) * 86_400 * 1_000_000_000
+    };
+
+    let store = state.pipeline.store_arc();
+    let stats = tokio::task::spawn_blocking(move || store.gc_expired(cutoff_ns))
+        .await
+        .map_err(|e| crate::error::ServerError::Internal(e.to_string()))?
+        .map_err(crate::error::ServerError::from)?;
+
+    Ok(Json(DeleteEventsResponse {
+        events_deleted: stats.events_deleted,
+        blobs_deleted: stats.blobs_deleted,
+    }))
+}
+
+// ── Export API ──────────────────────────────────────────────────────────
+
+/// `GET /v1/events/export` — stream all matching events as JSON Lines.
+pub async fn export_events(
+    State(state): State<AppState>,
+    Query(params): Query<EventQuery>,
+) -> Result<impl IntoResponse, crate::error::ServerError> {
+    let filter = EventFilter {
+        user_id: params.user_id.map(SmolStr::new),
+        api_key_id: params.api_key_id.map(SmolStr::new),
+        model: params.model.map(SmolStr::new),
+        provider: params.provider.map(SmolStr::new),
+        source: params.source.map(SmolStr::new),
+        from_ts_ns: params.from,
+        to_ts_ns: params.to,
+        http_status_min: params.status_min,
+        http_status_max: params.status_max,
+        meta_user_tag: params.user_tag.map(SmolStr::new),
+        meta_session_tag: params.session_tag.map(SmolStr::new),
+    };
+
+    let store = state.pipeline.store_arc();
+    let mut lines = Vec::new();
+    tokio::task::spawn_blocking(move || {
+        store
+            .export_events(&filter, &mut |event| {
+                let resp = EventResponse {
+                    id: event.id.to_string(),
+                    timestamp: event.ts_ns,
+                    model: event.model,
+                    provider: event.provider,
+                    usage: UsageResponse {
+                        input_tokens: event.input_tokens,
+                        output_tokens: event.output_tokens,
+                        cache_read_input_tokens: event.cache_read_input_tokens,
+                        cache_creation_input_tokens: event.cache_creation_input_tokens,
+                        reasoning_tokens: event.reasoning_tokens,
+                    },
+                    cost_nanodollars: event.cost_nanodollars,
+                    latency_total_ms: event.total_ms,
+                    latency_ttft_ms: event.ttft_ms,
+                    http_status: event.http_status,
+                    source: event.source,
+                    user_id: event.user_id,
+                    api_key_id: event.api_key_id,
+                    endpoint: event.endpoint,
+                    streaming: event.streaming,
+                    error: event.error_type,
+                    metadata: event
+                        .metadata_json
+                        .as_deref()
+                        .and_then(|s| serde_json::from_str(s).ok()),
+                };
+                if let Ok(json) = serde_json::to_string(&resp) {
+                    lines.push(json);
+                }
+            })
+            .map(|()| lines)
+    })
+    .await
+    .map_err(|e| crate::error::ServerError::Internal(e.to_string()))?
+    .map(|lines| {
+        let body = lines.join("\n");
+        ([(http::header::CONTENT_TYPE, "application/x-ndjson")], body)
+    })
+    .map_err(crate::error::ServerError::from)
 }
 
 // ── Health & Metrics ────────────────────────────────────────────────────

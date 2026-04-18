@@ -78,10 +78,13 @@ Client (app/gateway/SDK)
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
 | POST | `/v1/events` | Yes | Ingest single event (durable) |
-| POST | `/v1/events/batch` | Yes | Ingest batch (fire-and-forget or durable) |
-| GET | `/v1/events` | Yes | Query events with filters + pagination |
+| POST | `/v1/events/batch` | Yes | Ingest batch (fire-and-forget or durable via `X-Keplor-Durable`) |
+| GET | `/v1/events` | Yes | Query events with filters + cursor pagination |
+| GET | `/v1/events/export` | Yes | Stream all matching events as JSON Lines |
+| DELETE | `/v1/events/{id}` | Yes | Delete a single event |
+| DELETE | `/v1/events?older_than_days=N` | Yes | Bulk delete old events |
 | GET | `/v1/quota` | Yes | Real-time cost/count for a user or key |
-| GET | `/v1/rollups` | Yes | Pre-aggregated daily rollup rows |
-| GET | `/v1/stats` | Yes | Period statistics, optionally grouped by model |
+| GET | `/v1/rollups` | Yes | Pre-aggregated daily rollup rows (paginated) |
+| GET | `/v1/stats` | Yes | Period statistics, optionally grouped by model (paginated) |
 | GET | `/health` | No | Liveness probe (DB + queue status) |
 | GET | `/metrics` | No | Prometheus text format |

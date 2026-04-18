@@ -2,7 +2,7 @@ msrv = "1.82"
 
 # Ingestion pipeline processes varied event schemas; a few helpers are naturally long.
 cognitive-complexity-threshold = 30
-too-many-arguments-threshold   = 8
+too-many-arguments-threshold   = 10
 
 # Keep error types small, but the provider enum is unavoidably wide.
 large-error-threshold = 256

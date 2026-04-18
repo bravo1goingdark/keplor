@@ -71,11 +71,23 @@ pub struct StorageConfig {
     pub retention_days: u64,
     /// WAL checkpoint interval in seconds. 0 = disabled.
     pub wal_checkpoint_secs: u64,
+    /// Maximum database size in megabytes. 0 = unlimited.
+    /// When exceeded, ingestion returns HTTP 507 until space is freed (by GC
+    /// or manual deletion).
+    pub max_db_size_mb: u64,
+    /// Number of read connections in the pool. Default: 4.
+    pub read_pool_size: usize,
 }
 
 impl Default for StorageConfig {
     fn default() -> Self {
-        Self { db_path: PathBuf::from("keplor.db"), retention_days: 90, wal_checkpoint_secs: 300 }
+        Self {
+            db_path: PathBuf::from("keplor.db"),
+            retention_days: 90,
+            wal_checkpoint_secs: 300,
+            max_db_size_mb: 0,
+            read_pool_size: 4,
+        }
     }
 }
 
@@ -195,6 +207,12 @@ impl ServerConfig {
         }
         if self.server.max_connections == 0 {
             return Err("server.max_connections must be > 0".into());
+        }
+        if self.storage.read_pool_size == 0 || self.storage.read_pool_size > 64 {
+            return Err(format!(
+                "storage.read_pool_size = {} must be in [1, 64]",
+                self.storage.read_pool_size
+            ));
         }
         if let Some(tls) = &self.tls {
             if !tls.cert_path.exists() {

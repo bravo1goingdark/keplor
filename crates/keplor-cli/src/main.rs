@@ -114,10 +114,15 @@ fn run_server(config_path: PathBuf, json_logs: bool) -> Result<()> {
         let metrics_handle = keplor_server::install_metrics_recorder();
 
         // Open storage.
-        let store =
-            Arc::new(keplor_store::Store::open(&config.storage.db_path).with_context(|| {
+        let store = Arc::new(
+            keplor_store::Store::open_with_pool_size(
+                &config.storage.db_path,
+                config.storage.read_pool_size,
+            )
+            .with_context(|| {
                 format!("failed to open db at {}", config.storage.db_path.display())
-            })?);
+            })?,
+        );
 
         // Spawn batch writer.
         let batch_config = keplor_store::BatchConfig {
@@ -137,7 +142,8 @@ fn run_server(config_path: PathBuf, json_logs: bool) -> Result<()> {
         );
 
         // Build pipeline.
-        let mut pipeline = keplor_server::Pipeline::new(store, writer, catalog);
+        let mut pipeline = keplor_server::Pipeline::new(store, writer, catalog)
+            .with_max_db_size_mb(config.storage.max_db_size_mb);
 
         // Attach idempotency cache if enabled.
         if config.idempotency.enabled {

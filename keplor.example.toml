@@ -16,6 +16,9 @@
 db_path = "/var/lib/keplor/keplor.db"   # SQLite database path
 # retention_days = 90              # auto-GC events older than this (0 = disabled)
 # wal_checkpoint_secs = 300        # WAL checkpoint interval (0 = disabled)
+# max_db_size_mb = 0               # max database size in MB (0 = unlimited)
+                                    # returns HTTP 507 when exceeded
+# read_pool_size = 4               # number of SQLite read connections (1-64)
 
 # ── Authentication ───────────────────────────────────────────────────────
 # When empty, all endpoints are open (no auth required).

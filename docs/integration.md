@@ -102,7 +102,7 @@ Ingest a single LLM event. Waits for durable storage (up to 10s timeout).
 
 ### POST /v1/events/batch
 
-Ingest up to 10,000 events in one request. Fire-and-forget: events are validated and queued but not guaranteed durable until the next batch flush (~50ms).
+Ingest up to 10,000 events in one request. By default, fire-and-forget: events are validated and queued but not guaranteed durable until the next batch flush (~50ms). Set the `X-Keplor-Durable: true` header to await flush confirmation for each event before responding (slower, but every accepted event is guaranteed durable).
 
 **Auth:** Required when keys are configured.
 
@@ -215,12 +215,14 @@ Pre-aggregated daily rollups. Refreshed every 60 seconds.
 
 **Auth:** Required when keys are configured.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `user_id` | string | | Filter by user |
-| `api_key_id` | string | | Filter by API key |
-| `from` | int64 | Yes | Start epoch nanoseconds |
-| `to` | int64 | Yes | End epoch nanoseconds |
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `user_id` | string | | | Filter by user |
+| `api_key_id` | string | | | Filter by API key |
+| `from` | int64 | Yes | | Start epoch nanoseconds |
+| `to` | int64 | Yes | | End epoch nanoseconds |
+| `limit` | uint32 | | 100 | Max rows (max 1000) |
+| `offset` | uint32 | | 0 | Offset for pagination |
 
 **Response:** `200 OK`
 
@@ -241,7 +243,8 @@ Pre-aggregated daily rollups. Refreshed every 60 seconds.
       "cache_creation_input_tokens": 0,
       "cost_nanodollars": 50000000
     }
-  ]
+  ],
+  "has_more": false
 }
 ```
 
@@ -251,14 +254,16 @@ Aggregated statistics over a time range, optionally grouped by model.
 
 **Auth:** Required when keys are configured.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `user_id` | string | | Filter by user |
-| `api_key_id` | string | | Filter by API key |
-| `from` | int64 | Yes | Start epoch nanoseconds |
-| `to` | int64 | Yes | End epoch nanoseconds |
-| `provider` | string | | Filter by provider |
-| `group_by` | string | | Set to `"model"` for per-model breakdown |
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `user_id` | string | | | Filter by user |
+| `api_key_id` | string | | | Filter by API key |
+| `from` | int64 | Yes | | Start epoch nanoseconds |
+| `to` | int64 | Yes | | End epoch nanoseconds |
+| `provider` | string | | | Filter by provider |
+| `group_by` | string | | | Set to `"model"` for per-model breakdown |
+| `limit` | uint32 | | 100 | Max rows (max 1000) |
+| `offset` | uint32 | | 0 | Offset for pagination |
 
 **Response:** `200 OK`
 
@@ -276,9 +281,47 @@ Aggregated statistics over a time range, optionally grouped by model.
       "cache_creation_input_tokens": 1000,
       "cost_nanodollars": 250000000
     }
-  ]
+  ],
+  "has_more": false
 }
 ```
+
+### DELETE /v1/events/:id
+
+Delete a single event by ID. Cleans up blob references and orphaned blobs.
+
+**Auth:** Required when keys are configured.
+
+**Response:** `204 No Content` if deleted, `404 Not Found` if not found.
+
+### DELETE /v1/events?older_than_days=N
+
+Bulk delete events older than N days. Equivalent to `keplor gc` via HTTP.
+
+**Auth:** Required when keys are configured.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `older_than_days` | uint32 | Yes | Delete events older than this many days (must be > 0) |
+
+**Response:** `200 OK`
+
+```json
+{
+  "events_deleted": 1234,
+  "blobs_deleted": 56
+}
+```
+
+### GET /v1/events/export
+
+Stream all matching events as JSON Lines (`application/x-ndjson`). Same filters as `GET /v1/events` but with no result-set limit. Each line is one JSON event object.
+
+**Auth:** Required when keys are configured.
+
+**Parameters:** Same as `GET /v1/events` (except `limit` and `cursor` are ignored).
+
+**Response:** `200 OK` with `Content-Type: application/x-ndjson`
 
 ### GET /health
 
@@ -563,27 +606,33 @@ All errors return JSON:
 
 | Code | Meaning | When |
 |------|---------|------|
+| `200` | OK | Query, stats, export, or bulk delete succeeded |
 | `201` | Created | Event(s) successfully ingested |
+| `204` | No Content | Single event deleted successfully |
 | `207` | Multi-Status | Batch with partial failures |
 | `400` | Bad Request | Validation failure, invalid JSON, batch too large |
 | `401` | Unauthorized | Missing or invalid API key |
+| `404` | Not Found | Event ID does not exist (DELETE) |
 | `408` | Request Timeout | Request exceeded `request_timeout_secs` |
 | `422` | Unprocessable Entity | Deserialization error (missing required fields) |
 | `429` | Too Many Requests | Per-key rate limit exceeded (includes `Retry-After` header) |
 | `503` | Service Unavailable | Batch writer channel full (back-pressure) or channel closed |
+| `507` | Insufficient Storage | Database size limit exceeded (`storage.max_db_size_mb`) |
 | `500` | Internal Server Error | Database or server failure (details logged, not exposed) |
 
 ### Retry Guidance
 
 | Status | Retry? | Notes |
 |--------|--------|-------|
-| `201`, `207` | No | Success (check per-event results in batch) |
+| `200`, `201`, `204`, `207` | No | Success |
 | `400` | No | Fix the request |
 | `401` | No | Fix your API key |
+| `404` | No | Event does not exist |
 | `408` | Yes | Request was too slow; retry immediately |
 | `422` | No | Fix the JSON payload |
 | `429` | Yes | Wait for `Retry-After` seconds, then retry |
 | `503` | Yes | Server is overloaded; retry with exponential backoff |
+| `507` | Yes | Run GC or increase `max_db_size_mb`, then retry |
 | `500` | Yes | Retry with exponential backoff (1s, 2s, 4s, ...) |
 
 ### Request Headers
@@ -592,6 +641,7 @@ All errors return JSON:
 |--------|-----------|-------------|
 | `Authorization` | Request | `Bearer <secret>` (required when keys configured) |
 | `Idempotency-Key` | Request | Optional. Prevents duplicate event creation on retries. Cached for 5 minutes (configurable). |
+| `X-Keplor-Durable` | Request | Set to `true` on batch endpoint to await flush confirmation for each event. Default: fire-and-forget. |
 | `X-Request-Id` | Both | If sent in the request, echoed back. If absent, Keplor generates a ULID and returns it in the response. Useful for correlating logs. |
 | `Retry-After` | Response | Returned with `429` responses. Seconds until the rate limit resets. |
 
