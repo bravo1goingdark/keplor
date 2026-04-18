@@ -36,6 +36,7 @@ pub struct PipelineServer {
     gc_interval_secs: u64,
     retention_tiers: Vec<crate::config::RetentionTier>,
     wal_checkpoint_secs: u64,
+    blob_offload_threshold_mb: u64,
     tls_config: Option<Arc<rustls::ServerConfig>>,
 }
 
@@ -160,6 +161,7 @@ impl PipelineServer {
             gc_interval_secs: config.storage.gc_interval_secs,
             retention_tiers: config.retention.tiers.clone(),
             wal_checkpoint_secs: config.storage.wal_checkpoint_secs,
+            blob_offload_threshold_mb: config.storage.blob_offload_threshold_mb,
             tls_config,
         }
     }
@@ -200,6 +202,13 @@ impl PipelineServer {
             // Legacy fallback: global retention with no tiers.
             let gc_store = Arc::clone(&store);
             tokio::spawn(gc_loop(gc_store, gc_retention_days, gc_interval_secs));
+        }
+
+        // Spawn blob drain task when smart routing is configured.
+        if self.blob_offload_threshold_mb > 0 && store.has_external_blob_store() {
+            let drain_store = Arc::clone(&store);
+            let threshold = self.blob_offload_threshold_mb;
+            tokio::spawn(blob_drain_loop(drain_store, threshold));
         }
 
         // Spawn WAL checkpoint task.
@@ -338,6 +347,66 @@ async fn gc_loop(store: Arc<keplor_store::Store>, retention_days: u64, interval_
             },
             Ok(Err(e)) => tracing::warn!(error = %e, "gc failed"),
             Err(e) => tracing::warn!(error = %e, "gc task panicked"),
+        }
+    }
+}
+
+/// Background task that migrates embedded blobs to the external store
+/// when the SQLite database exceeds the offload threshold.
+///
+/// Runs every 60 seconds.  Each tick drains up to 100 blobs, then
+/// runs VACUUM if blobs were drained and the DB is still above the
+/// threshold.  Stops draining once no embedded blobs remain or the
+/// DB is below the threshold.
+async fn blob_drain_loop(store: Arc<keplor_store::Store>, threshold_mb: u64) {
+    let interval = Duration::from_secs(60);
+    let threshold_bytes = threshold_mb * 1024 * 1024;
+    let batch_size: usize = 100;
+
+    loop {
+        tokio::time::sleep(interval).await;
+
+        // Only drain when DB is above threshold.
+        let db_size = {
+            let s = Arc::clone(&store);
+            tokio::task::spawn_blocking(move || s.db_size_bytes())
+                .await
+                .unwrap_or(Ok(0))
+                .unwrap_or(0)
+        };
+
+        if db_size < threshold_bytes {
+            continue;
+        }
+
+        // Drain a batch of embedded blobs to external store.
+        let drain_store = Arc::clone(&store);
+        let drained =
+            tokio::task::spawn_blocking(move || drain_store.drain_embedded_blobs(batch_size))
+                .await
+                .unwrap_or(Ok(0))
+                .unwrap_or(0);
+
+        if drained == 0 {
+            continue;
+        }
+
+        // Check if more blobs remain; if not, VACUUM to reclaim space.
+        let remaining = {
+            let s = Arc::clone(&store);
+            tokio::task::spawn_blocking(move || s.embedded_blob_count())
+                .await
+                .unwrap_or(Ok(0))
+                .unwrap_or(0)
+        };
+
+        if remaining == 0 {
+            let vacuum_store = Arc::clone(&store);
+            match tokio::task::spawn_blocking(move || vacuum_store.vacuum()).await {
+                Ok(Ok(())) => tracing::info!("vacuum completed after blob drain"),
+                Ok(Err(e)) => tracing::warn!(error = %e, "vacuum failed"),
+                Err(e) => tracing::warn!(error = %e, "vacuum task panicked"),
+            }
         }
     }
 }

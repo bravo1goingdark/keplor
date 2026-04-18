@@ -1605,6 +1605,94 @@ impl Store {
         Ok(())
     }
 
+    /// Reclaim disk space by rebuilding the database file.
+    ///
+    /// SQLite does not return freed pages to the OS after DELETE.  This
+    /// runs `VACUUM` which rewrites the entire database, compacting it.
+    /// **Expensive** — blocks all writes for the duration.  Call after
+    /// draining a large number of embedded blobs.
+    pub fn vacuum(&self) -> Result<(), StoreError> {
+        let conn = self.write_conn()?;
+        conn.execute_batch("VACUUM;")?;
+        Ok(())
+    }
+
+    /// Migrate a batch of embedded blobs to the external blob store.
+    ///
+    /// Reads up to `batch_size` blobs that have non-NULL `data` in
+    /// `payload_blobs`, PUTs them to the external store, then sets
+    /// `data = NULL` in SQLite to free space.
+    ///
+    /// Returns the number of blobs migrated.  Returns 0 when no
+    /// embedded blobs remain or no external store is configured.
+    pub fn drain_embedded_blobs(&self, batch_size: usize) -> Result<usize, StoreError> {
+        let blob_store = match &self.blob_store {
+            Some(bs) => bs,
+            None => return Ok(0),
+        };
+
+        // Read a batch of blobs that still have embedded data.
+        let shas_and_data: Vec<([u8; 32], Vec<u8>, String, String)> = {
+            let conn = self.read_conn()?;
+            let mut stmt = conn.prepare(
+                "SELECT sha256, data, component_type, provider FROM payload_blobs
+                 WHERE data IS NOT NULL
+                 LIMIT ?1",
+            )?;
+            let rows = stmt.query_map([batch_size as i64], |r| {
+                let sha_vec: Vec<u8> = r.get(0)?;
+                let mut sha = [0u8; 32];
+                sha.copy_from_slice(&sha_vec);
+                let data: Vec<u8> = r.get(1)?;
+                let comp: String = r.get(2)?;
+                let prov: String = r.get(3)?;
+                Ok((sha, data, comp, prov))
+            })?;
+            rows.filter_map(|r| r.ok()).collect()
+        };
+
+        if shas_and_data.is_empty() {
+            return Ok(0);
+        }
+
+        let count = shas_and_data.len();
+
+        // PUT each blob to external store.
+        for (sha, data, comp, prov) in &shas_and_data {
+            blob_store.put(
+                sha,
+                data,
+                crate::blob::BlobMeta { component_type: comp, provider: prov },
+            )?;
+        }
+
+        // NULL out the data column in SQLite.
+        let conn = self.write_conn()?;
+        let tx = conn.unchecked_transaction()?;
+        {
+            let mut stmt =
+                tx.prepare_cached("UPDATE payload_blobs SET data = NULL WHERE sha256 = ?1")?;
+            for (sha, _, _, _) in &shas_and_data {
+                stmt.execute([&sha[..]])?;
+            }
+        }
+        tx.commit()?;
+
+        tracing::info!(blobs = count, "drained embedded blobs to external store");
+        Ok(count)
+    }
+
+    /// Number of blobs still stored embedded in SQLite (non-NULL data).
+    pub fn embedded_blob_count(&self) -> Result<usize, StoreError> {
+        let conn = self.read_conn()?;
+        let count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM payload_blobs WHERE data IS NOT NULL", [], |r| {
+                r.get(0)
+            })?;
+        #[allow(clippy::cast_sign_loss)]
+        Ok(count as usize)
+    }
+
     /// Database file size in bytes (page_count × page_size).
     pub fn db_size_bytes(&self) -> Result<u64, StoreError> {
         let conn = self.read_conn()?;
