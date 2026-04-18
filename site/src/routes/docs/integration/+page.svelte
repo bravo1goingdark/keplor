@@ -349,11 +349,22 @@
     <tr><td><code>207</code></td><td>Partial success (batch)</td><td>Retry failed items</td></tr>
     <tr><td><code>400</code></td><td>Validation error or bad JSON</td><td>Fix request</td></tr>
     <tr><td><code>401</code></td><td>Missing or invalid API key</td><td>Fix auth</td></tr>
+    <tr><td><code>408</code></td><td>Request timeout</td><td>Yes</td></tr>
     <tr><td><code>422</code></td><td>Unprocessable entity</td><td>Fix payload</td></tr>
+    <tr><td><code>429</code></td><td>Rate limit exceeded</td><td>Yes, after <code>Retry-After</code> seconds</td></tr>
     <tr><td><code>500</code></td><td>Server error</td><td>Yes, with backoff</td></tr>
+    <tr><td><code>503</code></td><td>Server overloaded</td><td>Yes, with backoff</td></tr>
   </tbody>
 </table>
-<p>All errors return <code>{'{"error": "message"}'}</code>.</p>
+<p>All errors return <code>{'{"error": "message"}'}</code>. All responses include an <code>X-Request-Id</code> header for log correlation.</p>
+
+<h3>Idempotency</h3>
+<p>To safely retry failed requests without creating duplicates, include an <code>Idempotency-Key</code> header:</p>
+<pre><code>curl -X POST http://localhost:8080/v1/events \
+  -H "Idempotency-Key: my-unique-key-123" \
+  -H "Content-Type: application/json" \
+  -d '&#123;"model": "gpt-4o", "provider": "openai"&#125;'</code></pre>
+<p>If the same key is sent again within the TTL (default 5 minutes), Keplor returns the cached response without creating a new event.</p>
 
 <h2 id="examples">Integration examples</h2>
 
@@ -369,7 +380,7 @@
 <h2 id="operations">Production operations</h2>
 
 <h3>Configuration</h3>
-<Pre code={'[server]\nlisten_addr = "0.0.0.0:8080"\nshutdown_timeout_secs = 25       # drain batch writer + WAL checkpoint\nrequest_timeout_secs = 30        # per-request timeout\nmax_connections = 10000          # concurrent connection limit\n\n[storage]\ndb_path = "keplor.db"\nretention_days = 90              # auto-GC (0 = disabled)\nwal_checkpoint_secs = 300        # WAL truncation interval\n\n[auth]\napi_keys = ["prod-svc:sk-abc"]   # empty = open mode\n\n[pipeline]\nbatch_size = 64\nmax_body_bytes = 10485760        # 10 MB'} />
+<Pre code={'[server]\nlisten_addr = "0.0.0.0:8080"\nshutdown_timeout_secs = 25       # drain batch writer + WAL checkpoint\nrequest_timeout_secs = 30        # per-request timeout (408 on exceed)\nmax_connections = 10000          # concurrent connection limit (503 on exceed)\n\n[storage]\ndb_path = "keplor.db"\nretention_days = 90              # auto-GC (0 = disabled)\nwal_checkpoint_secs = 300        # WAL truncation interval\n\n[auth]\napi_keys = ["prod-svc:sk-abc"]   # empty = open mode\n\n[pipeline]\nbatch_size = 64\nmax_body_bytes = 10485760        # 10 MB\n\n[idempotency]\nenabled = true                   # dedup retries via Idempotency-Key header\nttl_secs = 300                   # 5 minute cache TTL\nmax_entries = 100000\n\n[rate_limit]\nenabled = false                  # per-key rate limiting (429 on exceed)\nrequests_per_second = 100.0\nburst = 200\n\n# [tls]                          # optional HTTPS\n# cert_path = "/etc/keplor/cert.pem"\n# key_path = "/etc/keplor/key.pem"'} />
 <p>Override any field with <code>KEPLOR_&lt;SECTION&gt;_&lt;FIELD&gt;</code> environment variables.</p>
 
 <h3>JSON structured logging</h3>

@@ -282,13 +282,20 @@ Aggregated statistics over a time range, optionally grouped by model.
 
 ### GET /health
 
-Liveness probe. No auth.
+Liveness probe with DB and queue status. No auth.
 
 ```json
-{ "status": "ok", "version": "0.1.0", "db": "connected" }
+{
+  "status": "ok",
+  "version": "0.1.0",
+  "db": "connected",
+  "queue_depth": 42,
+  "queue_capacity": 8192,
+  "queue_utilization_pct": 0
+}
 ```
 
-Returns `503` with `"db": "unavailable"` if the database is unreachable.
+Returns `503` with `"status": "degraded"` if the database is unreachable. The `queue_depth` / `queue_capacity` fields show how full the batch writer channel is — useful for back-pressure monitoring.
 
 ### GET /metrics
 
@@ -394,6 +401,14 @@ When omitted, Keplor uses the server's wall-clock time at ingestion.
 | `provider` cannot be empty | `400: provider is required` |
 | `provider` max 128 characters | `400: provider exceeds 128 characters` |
 | Batch max 10,000 events | `400: batch size N exceeds maximum 10000` |
+| Token fields max 10,000,000 each | `400: input_tokens = N exceeds maximum 10000000` |
+| `cost_nanodollars` must be non-negative | `400: cost_nanodollars must not be negative` |
+| `cost_nanodollars` max 1,000,000,000,000 ($1,000) | `400: cost_nanodollars N exceeds maximum` |
+| Epoch nanos timestamp must be after 2020-01-01 | `400: timestamp is before 2020-01-01` |
+| Epoch nanos timestamp must be within 24h of now | `400: timestamp is more than 24 hours in the future` |
+| `user_id`, `api_key_id`, `org_id`, `project_id`, `route_id` max 256 chars | `400: user_id exceeds 256 characters` |
+| `endpoint` max 512 characters | `400: endpoint exceeds 512 characters` |
+| `metadata` JSON max 64 KB | `400: metadata JSON exceeds 65536 bytes` |
 
 ---
 
@@ -485,6 +500,21 @@ api_keys = []                       # default (open mode)
 [pipeline]
 batch_size = 64                     # events per batched write (max 100,000)
 max_body_bytes = 10485760           # 10 MB max request body (max 100 MB)
+
+[idempotency]
+enabled = true                      # default
+ttl_secs = 300                      # cache TTL (5 minutes)
+max_entries = 100000                # LRU cache capacity
+
+[rate_limit]
+enabled = false                     # default (disabled)
+requests_per_second = 100.0         # per API key
+burst = 200                         # max burst size
+
+# Optional TLS — when present, server listens with HTTPS
+# [tls]
+# cert_path = "/etc/keplor/cert.pem"
+# key_path = "/etc/keplor/key.pem"
 ```
 
 ### Environment Variable Overrides
@@ -537,7 +567,10 @@ All errors return JSON:
 | `207` | Multi-Status | Batch with partial failures |
 | `400` | Bad Request | Validation failure, invalid JSON, batch too large |
 | `401` | Unauthorized | Missing or invalid API key |
+| `408` | Request Timeout | Request exceeded `request_timeout_secs` |
 | `422` | Unprocessable Entity | Deserialization error (missing required fields) |
+| `429` | Too Many Requests | Per-key rate limit exceeded (includes `Retry-After` header) |
+| `503` | Service Unavailable | Batch writer channel full (back-pressure) or channel closed |
 | `500` | Internal Server Error | Database or server failure (details logged, not exposed) |
 
 ### Retry Guidance
@@ -547,8 +580,20 @@ All errors return JSON:
 | `201`, `207` | No | Success (check per-event results in batch) |
 | `400` | No | Fix the request |
 | `401` | No | Fix your API key |
+| `408` | Yes | Request was too slow; retry immediately |
 | `422` | No | Fix the JSON payload |
+| `429` | Yes | Wait for `Retry-After` seconds, then retry |
+| `503` | Yes | Server is overloaded; retry with exponential backoff |
 | `500` | Yes | Retry with exponential backoff (1s, 2s, 4s, ...) |
+
+### Request Headers
+
+| Header | Direction | Description |
+|--------|-----------|-------------|
+| `Authorization` | Request | `Bearer <secret>` (required when keys configured) |
+| `Idempotency-Key` | Request | Optional. Prevents duplicate event creation on retries. Cached for 5 minutes (configurable). |
+| `X-Request-Id` | Both | If sent in the request, echoed back. If absent, Keplor generates a ULID and returns it in the response. Useful for correlating logs. |
+| `Retry-After` | Response | Returned with `429` responses. Seconds until the rate limit resets. |
 
 ---
 

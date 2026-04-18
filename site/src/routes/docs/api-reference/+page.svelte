@@ -70,7 +70,14 @@
   }]
 }`;
 
-  const healthResponse = `{"status": "ok", "version": "0.1.0", "db": "connected"}`;
+  const healthResponse = `{
+  "status": "ok",
+  "version": "0.1.0",
+  "db": "connected",
+  "queue_depth": 0,
+  "queue_capacity": 8192,
+  "queue_utilization_pct": 0
+}`;
 
   const errorResponse = `{"error": "validation: model must not be empty"}`;
 
@@ -91,7 +98,7 @@ keplor_events_ingested_total{provider="openai"} 42`;
 <p>When no keys are configured (default), authentication is disabled. <code>/health</code> and <code>/metrics</code> are always public.</p>
 
 <h2 id="ingest"><span class="method method-post">POST</span> /v1/events</h2>
-<p>Ingest a single event. Waits for durable storage. Times out after 10 seconds.</p>
+<p>Ingest a single event. Waits for durable storage. Times out after 10 seconds. Supports <code>Idempotency-Key</code> header to prevent duplicate creation on retries.</p>
 
 <h3>Request body</h3>
 <table>
@@ -213,14 +220,28 @@ keplor_events_ingested_total{provider="openai"} 42`;
 <p>Prometheus text exposition format.</p>
 <Pre code={metricsExample} />
 
+<h2 id="headers">Request/Response headers</h2>
+<table>
+  <thead><tr><th>Header</th><th>Direction</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td><code>Authorization</code></td><td>Request</td><td><code>Bearer &lt;secret&gt;</code> (required when keys configured)</td></tr>
+    <tr><td><code>Idempotency-Key</code></td><td>Request</td><td>Optional. Prevents duplicate event creation on retries. Cached for 5 min (configurable).</td></tr>
+    <tr><td><code>X-Request-Id</code></td><td>Both</td><td>Echoed if sent; otherwise Keplor generates a ULID and returns it.</td></tr>
+    <tr><td><code>Retry-After</code></td><td>Response</td><td>Seconds until rate limit resets (returned with <code>429</code>).</td></tr>
+  </tbody>
+</table>
+
 <h2 id="errors">Error responses</h2>
 <Pre code={errorResponse} />
 <table>
-  <thead><tr><th>Status</th><th>When</th></tr></thead>
+  <thead><tr><th>Status</th><th>When</th><th>Retry?</th></tr></thead>
   <tbody>
-    <tr><td><code>400</code></td><td>Validation error, bad JSON, invalid timestamp</td></tr>
-    <tr><td><code>401</code></td><td>Missing or invalid API key</td></tr>
-    <tr><td><code>422</code></td><td>Unknown provider</td></tr>
-    <tr><td><code>500</code></td><td>Storage failure, write timeout</td></tr>
+    <tr><td><code>400</code></td><td>Validation error, bad JSON, invalid timestamp</td><td>No</td></tr>
+    <tr><td><code>401</code></td><td>Missing or invalid API key</td><td>No</td></tr>
+    <tr><td><code>408</code></td><td>Request exceeded <code>request_timeout_secs</code></td><td>Yes</td></tr>
+    <tr><td><code>422</code></td><td>Unknown provider</td><td>No</td></tr>
+    <tr><td><code>429</code></td><td>Per-key rate limit exceeded</td><td>Yes (after <code>Retry-After</code>)</td></tr>
+    <tr><td><code>500</code></td><td>Storage failure, write timeout</td><td>Yes (with backoff)</td></tr>
+    <tr><td><code>503</code></td><td>Batch writer overloaded (back-pressure)</td><td>Yes (with backoff)</td></tr>
   </tbody>
 </table>

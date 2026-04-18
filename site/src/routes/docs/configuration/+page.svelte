@@ -28,7 +28,21 @@ api_keys = ["prod-svc:sk-prod-abc123", "staging:sk-staging-def456"]
 
 [pipeline]
 batch_size = 128
-max_body_bytes = 10485760</code></pre>
+max_body_bytes = 10485760
+
+[idempotency]
+enabled = true
+ttl_secs = 300
+max_entries = 100000
+
+[rate_limit]
+enabled = false
+requests_per_second = 100.0
+burst = 200
+
+# [tls]
+# cert_path = "/etc/keplor/cert.pem"
+# key_path = "/etc/keplor/key.pem"</code></pre>
 
 <h2>[server]</h2>
 <table>
@@ -68,6 +82,36 @@ max_body_bytes = 10485760</code></pre>
   </tbody>
 </table>
 
+<h2>[idempotency]</h2>
+<table>
+  <thead><tr><th>Key</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td><code>enabled</code></td><td>bool</td><td><code>true</code></td><td>Enable idempotency key support</td></tr>
+    <tr><td><code>ttl_secs</code></td><td>u64</td><td><code>300</code></td><td>Cache TTL for idempotency keys (seconds)</td></tr>
+    <tr><td><code>max_entries</code></td><td>usize</td><td><code>100000</code></td><td>Maximum cached idempotency keys (LRU eviction)</td></tr>
+  </tbody>
+</table>
+
+<h2>[rate_limit]</h2>
+<table>
+  <thead><tr><th>Key</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td><code>enabled</code></td><td>bool</td><td><code>false</code></td><td>Enable per-key rate limiting</td></tr>
+    <tr><td><code>requests_per_second</code></td><td>f64</td><td><code>100.0</code></td><td>Token bucket refill rate per API key</td></tr>
+    <tr><td><code>burst</code></td><td>usize</td><td><code>200</code></td><td>Maximum burst size per API key</td></tr>
+  </tbody>
+</table>
+
+<h2>[tls]</h2>
+<p>Optional. When present, the server listens with HTTPS via rustls.</p>
+<table>
+  <thead><tr><th>Key</th><th>Type</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td><code>cert_path</code></td><td>string</td><td>Path to PEM-encoded certificate chain</td></tr>
+    <tr><td><code>key_path</code></td><td>string</td><td>Path to PEM-encoded private key</td></tr>
+  </tbody>
+</table>
+
 <h2>Environment variables</h2>
 <p>Override any key with <code>KEPLOR_</code> prefix and underscore nesting:</p>
 <pre><code>$ KEPLOR_SERVER_LISTEN_ADDR=0.0.0.0:9090 \
@@ -87,6 +131,7 @@ max_body_bytes = 10485760</code></pre>
     <tr><td><code>busy_timeout</code></td><td>5000 ms</td><td>Retry on lock contention</td></tr>
     <tr><td><code>cache_size</code></td><td>64 MB</td><td>Page cache</td></tr>
     <tr><td><code>temp_store</code></td><td>MEMORY</td><td>Temp tables in RAM</td></tr>
+    <tr><td><code>wal_autocheckpoint</code></td><td>1000 pages</td><td>Auto-checkpoint WAL to bound growth</td></tr>
   </tbody>
 </table>
 
