@@ -20,13 +20,35 @@ max_connections = 10000
 
 [storage]
 db_path = "/var/lib/keplor/keplor.db"
-retention_days = 90
+retention_days = 90          # legacy global GC (prefer [retention] tiers)
 wal_checkpoint_secs = 300
-max_db_size_mb = 0       # 0 = unlimited
-read_pool_size = 4       # SQLite read connections (1-64)
+max_db_size_mb = 0           # 0 = unlimited
+read_pool_size = 4           # SQLite read connections (1-64)
+gc_interval_secs = 3600     # how often GC runs (0 = disabled)
 
 [auth]
 api_keys = ["prod-svc:sk-prod-abc123", "staging:sk-staging-def456"]
+
+# Extended format with tier assignment:
+# [[auth.api_key_entries]]
+# id = "pro-user"
+# secret = "sk-pro-key"
+# tier = "pro"
+
+[retention]
+default_tier = "free"
+
+[[retention.tiers]]
+name = "free"
+days = 7
+
+[[retention.tiers]]
+name = "pro"
+days = 90
+
+# [[retention.tiers]]
+# name = "team"
+# days = 180
 
 [cors]
 allowed_origins = []     # empty = same-origin only; ["*"] = allow all
@@ -44,6 +66,14 @@ max_entries = 100000
 enabled = false
 requests_per_second = 100.0
 burst = 200
+
+# Optional: offload blobs to S3/R2 (requires --features s3)
+# [blob_storage]
+# bucket = "keplor-blobs"
+# endpoint = "https://&lt;account&gt;.r2.cloudflarestorage.com"
+# region = "auto"
+# access_key_id = "..."
+# secret_access_key = "..."
 
 # [tls]
 # cert_path = "/etc/keplor/cert.pem"
@@ -65,10 +95,11 @@ burst = 200
   <thead><tr><th>Key</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
   <tbody>
     <tr><td><code>db_path</code></td><td>string</td><td><code>"keplor.db"</code></td><td>SQLite database path</td></tr>
-    <tr><td><code>retention_days</code></td><td>u64</td><td><code>90</code></td><td>Auto-GC events older than this (0 = disabled)</td></tr>
+    <tr><td><code>retention_days</code></td><td>u64</td><td><code>90</code></td><td>Legacy global GC threshold (0 = disabled). Prefer <code>[retention]</code> tiers.</td></tr>
     <tr><td><code>wal_checkpoint_secs</code></td><td>u64</td><td><code>300</code></td><td>WAL truncation interval (0 = disabled)</td></tr>
     <tr><td><code>max_db_size_mb</code></td><td>u64</td><td><code>0</code></td><td>Max database size in MB (0 = unlimited). Returns HTTP 507 when exceeded.</td></tr>
     <tr><td><code>read_pool_size</code></td><td>usize</td><td><code>4</code></td><td>Number of SQLite read connections (range: 1&ndash;64)</td></tr>
+    <tr><td><code>gc_interval_secs</code></td><td>u64</td><td><code>3600</code></td><td>How often GC runs in seconds (0 = disabled)</td></tr>
   </tbody>
 </table>
 
@@ -76,7 +107,34 @@ burst = 200
 <table>
   <thead><tr><th>Key</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
   <tbody>
-    <tr><td><code>api_keys</code></td><td>string[]</td><td><code>[]</code></td><td>API keys (<code>id:secret</code> or bare secret). Empty = open access.</td></tr>
+    <tr><td><code>api_keys</code></td><td>string[]</td><td><code>[]</code></td><td>Simple API keys (<code>id:secret</code> or bare secret). Assigned to <code>default_tier</code>. Empty = open access.</td></tr>
+    <tr><td><code>api_key_entries</code></td><td>object[]</td><td><code>[]</code></td><td>Extended keys with explicit tier: <code>{"{ id, secret, tier }"}</code></td></tr>
+  </tbody>
+</table>
+
+<h2 id="retention">[retention]</h2>
+<p>Per-tier retention policies. GC runs one pass per tier, deleting events older than the tier's <code>days</code> threshold.</p>
+<table>
+  <thead><tr><th>Key</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td><code>default_tier</code></td><td>string</td><td><code>"free"</code></td><td>Tier assigned to simple-format keys and unauthenticated requests</td></tr>
+    <tr><td><code>tiers</code></td><td>object[]</td><td>free (7d), pro (90d)</td><td>Named tiers with retention days. <code>days = 0</code> keeps events forever.</td></tr>
+  </tbody>
+</table>
+<p>Tiers are just names &mdash; add <code>"team"</code>, <code>"enterprise"</code>, or any custom tier via config. No code changes needed.</p>
+
+<h2 id="blob-storage">[blob_storage] (optional, --features s3)</h2>
+<p>Offload request/response body blobs to an S3-compatible object store (Cloudflare R2, MinIO, AWS S3). Event metadata stays in SQLite; only the heavy compressed payloads move.</p>
+<table>
+  <thead><tr><th>Key</th><th>Type</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td><code>bucket</code></td><td>string</td><td>Bucket name</td></tr>
+    <tr><td><code>endpoint</code></td><td>string</td><td>S3 endpoint URL</td></tr>
+    <tr><td><code>region</code></td><td>string</td><td>Region (<code>"auto"</code> for R2, <code>"us-east-1"</code> for AWS)</td></tr>
+    <tr><td><code>access_key_id</code></td><td>string</td><td>Access key</td></tr>
+    <tr><td><code>secret_access_key</code></td><td>string</td><td>Secret key</td></tr>
+    <tr><td><code>prefix</code></td><td>string</td><td>Optional key prefix (e.g. <code>"blobs/"</code>)</td></tr>
+    <tr><td><code>path_style</code></td><td>bool</td><td>Use path-style addressing (required for MinIO)</td></tr>
   </tbody>
 </table>
 

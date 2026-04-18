@@ -64,18 +64,18 @@ resp = requests.post(
 
 <svelte:head>
   <title>Keplor — LLM Observability & Cost Accounting</title>
-  <meta name="description" content="Ingest every LLM event. Auto-compute cost across 2,263 models. Single binary, zero dependencies." />
+  <meta name="description" content="Ingest every LLM event. Auto-compute cost across 2,263 models. Multi-tenant with tiered retention. Single binary, zero dependencies." />
   <meta name="keywords" content="LLM observability, LLM cost tracking, LLM log ingestion, OpenAI cost, Anthropic cost, AI cost accounting, LLM monitoring" />
   <link rel="canonical" href="https://keplor.dev" />
 
   <!-- Open Graph -->
   <meta property="og:title" content="Keplor — LLM Observability & Cost Accounting" />
-  <meta property="og:description" content="Ingest every LLM event. Auto-compute cost across 2,263 models. Single binary, zero dependencies." />
+  <meta property="og:description" content="Ingest every LLM event. Auto-compute cost across 2,263 models. Multi-tenant with tiered retention. Single binary, zero dependencies." />
   <meta property="og:url" content="https://keplor.dev" />
 
   <!-- Twitter -->
   <meta name="twitter:title" content="Keplor — LLM Observability & Cost Accounting" />
-  <meta name="twitter:description" content="Ingest every LLM event. Auto-compute cost across 2,263 models. Single binary, zero dependencies." />
+  <meta name="twitter:description" content="Ingest every LLM event. Auto-compute cost across 2,263 models. Multi-tenant with tiered retention. Single binary, zero dependencies." />
 
   <!-- Structured data -->
   {@html `<script type="application/ld+json">${JSON.stringify({
@@ -109,7 +109,8 @@ resp = requests.post(
       <p class="text-[18px] leading-[1.6] text-ink-muted max-w-[54ch] mb-10 animate-in-delay-1">
         A single binary ingests every prompt and completion, auto-computes cost
         from a <strong class="text-ink font-medium">2,263-model</strong> pricing catalog, and serves
-        real-time aggregations. No containers, no cloud, no dependencies.
+        real-time aggregations. Multi-tenant with configurable retention tiers.
+        Zero dependencies to start; S3/R2 when you scale.
       </p>
 
       <div class="flex flex-wrap items-center gap-4 animate-in-delay-2">
@@ -137,8 +138,8 @@ resp = requests.post(
     <div class="grid md:grid-cols-3 gap-6 reveal-stagger">
       {#each [
         { step: '1', title: 'Your app calls an LLM', desc: 'OpenAI, Anthropic, Gemini, Bedrock, or any of 12 supported providers. Your code doesn\'t change.' },
-        { step: '2', title: 'POST the event to Keplor', desc: 'Two required fields: model and provider. Add token counts and Keplor computes cost automatically.' },
-        { step: '3', title: 'Query costs and usage', desc: 'Real-time quotas, daily rollups, per-model breakdowns. Filter by user, key, provider, or time range.' },
+        { step: '2', title: 'POST the event to Keplor', desc: 'Two required fields: model and provider. Add token counts and Keplor computes cost automatically. Each key gets its own retention tier.' },
+        { step: '3', title: 'Query costs and usage', desc: 'Real-time quotas, daily rollups, per-model breakdowns. Filter by user, key, provider, or time range. Export as JSON Lines.' },
       ] as { step, title, desc }}
         <div class="relative p-8 rounded-[8px] border border-line bg-bg hover:border-ink-muted/30 transition-colors">
           <span class="inline-flex items-center justify-center w-8 h-8 rounded-full bg-accent-subtle text-accent text-[13px] font-medium mb-5">{step}</span>
@@ -162,12 +163,14 @@ resp = requests.post(
 
     <div class="grid md:grid-cols-2 gap-x-16 gap-y-14 reveal-stagger">
       {#each [
-        { title: 'Full request & response capture', desc: 'Every prompt and completion stored with zstd compression and content-hash deduplication. Trained dictionaries push compression to 30-80x on real traffic.' },
-        { title: 'Automatic cost accounting', desc: 'Bundled LiteLLM pricing catalog covers 2,263 models across all major providers. Handles cache discounts, reasoning tokens, batch pricing, and audio/image tokens.' },
-        { title: 'Real-time aggregation API', desc: 'Quota checks, daily rollups, and period statistics via REST. Filter by user, API key, model, provider, or time range. Sub-millisecond query latency.' },
-        { title: 'Server-side key attribution', desc: 'Authenticated API keys are injected server-side, preventing clients from spoofing cost attribution. Supports explicit id:secret format or auto-derived key IDs.' },
-        { title: 'Zero dependencies', desc: 'Single static binary under 10 MB. SQLite for storage with WAL mode and connection pooling. No containers, no runtime, no cloud account.' },
-        { title: 'Provider-agnostic', desc: 'OpenAI, Anthropic, Gemini, Bedrock, Azure, Mistral, Groq, xAI, DeepSeek, Cohere, Ollama, and any OpenAI-compatible endpoint.' },
+        { title: 'Automatic cost accounting', desc: 'Bundled LiteLLM pricing catalog covers 2,263 models across all major providers. Handles cache discounts, reasoning tokens, batch pricing, and audio/image tokens. Cost stored as int64 nanodollars for precision.' },
+        { title: 'Full request & response capture', desc: 'Every prompt and completion stored with zstd compression and content-hash deduplication. Trained dictionaries push compression to 30-80x on real traffic. Optionally offload blobs to S3, R2, or MinIO.' },
+        { title: 'Multi-tenant with tiered retention', desc: 'Assign API keys to named retention tiers: free (7 days), pro (90 days), team (180 days), or any custom tier. GC runs per-tier automatically. Tier names and durations are fully configurable.' },
+        { title: 'Real-time aggregation API', desc: 'Quota checks, daily rollups, and period statistics via REST. Filter by user, API key, model, provider, or time range. Cursor-based pagination for large result sets.' },
+        { title: 'Pluggable blob storage', desc: 'Request/response bodies default to SQLite. Flip a config switch to offload to Cloudflare R2, AWS S3, or MinIO. Event metadata stays local for fast queries; only heavy payloads move.' },
+        { title: 'Zero-dep single binary', desc: 'Static musl binary under 10 MB. SQLite with WAL mode and connection pooling. One-command Docker deploy. No JVM, no runtime, no cloud account required.' },
+        { title: 'Server-side key attribution', desc: 'Authenticated keys are injected server-side, preventing clients from spoofing cost attribution. Each key carries a tier, so billing and retention are always tied to the actual caller.' },
+        { title: '12 providers, one API', desc: 'OpenAI, Anthropic, Gemini, Bedrock, Azure, Mistral, Groq, xAI, DeepSeek, Cohere, Ollama, and any OpenAI-compatible endpoint. Provider-specific token handling built in.' },
       ] as { title, desc }}
         <div>
           <h3 class="text-[17px] font-medium mb-2">{title}</h3>
@@ -224,7 +227,7 @@ resp = requests.post(
     <div class="grid grid-cols-2 md:grid-cols-4 gap-y-12 reveal-stagger">
       {#each [
         { n: '<10 MB', label: 'Binary size', sub: 'Single static musl binary' },
-        { n: '368K/s', label: 'Events throughput', sub: 'Per core, batched writes' },
+        { n: '261K/s', label: 'Events throughput', sub: 'Per core, fire-and-forget' },
         { n: '2,263', label: 'Models priced', sub: 'LiteLLM catalog, auto-refreshed' },
         { n: '<1 ms', label: 'Ingestion overhead', sub: 'p99 ingestion latency' },
       ] as { n, label, sub }}
@@ -268,7 +271,7 @@ resp = requests.post(
       Start observing.
     </h2>
     <p class="text-[17px] text-ink-muted mb-10 max-w-[44ch] mx-auto leading-[1.6]">
-      Five commands from clone to your first ingested event.
+      <code>docker compose up</code> or build from source.
       No account, no API key, no credit card.
     </p>
     <div class="flex flex-wrap justify-center gap-4">

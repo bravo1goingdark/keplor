@@ -182,18 +182,42 @@
 
 <h3>Key formats</h3>
 <table>
-  <thead><tr><th>Config value</th><th>Key ID used</th><th>Secret to send</th></tr></thead>
+  <thead><tr><th>Config format</th><th>Key ID</th><th>Tier</th></tr></thead>
   <tbody>
-    <tr><td><code>"prod-svc:sk-abc123"</code></td><td><code>prod-svc</code></td><td><code>sk-abc123</code></td></tr>
-    <tr><td><code>"sk-abc123"</code></td><td><code>key_&lt;sha256-prefix&gt;</code> (auto-derived)</td><td><code>sk-abc123</code></td></tr>
+    <tr><td><code>"prod-svc:sk-abc123"</code></td><td><code>prod-svc</code></td><td><code>default_tier</code></td></tr>
+    <tr><td><code>"sk-abc123"</code></td><td><code>key_&lt;sha256-prefix&gt;</code></td><td><code>default_tier</code></td></tr>
+    <tr><td><code>{"{ id, secret, tier }"}</code></td><td><code>id</code> value</td><td>explicit <code>tier</code></td></tr>
   </tbody>
 </table>
 
+<h3>Retention tiers</h3>
+<p>Each API key is assigned a <strong>retention tier</strong> that controls how long its events are kept. Configure tiers in <code>[retention]</code>:</p>
+<pre><code>[retention]
+default_tier = "free"
+
+[[retention.tiers]]
+name = "free"
+days = 7
+
+[[retention.tiers]]
+name = "pro"
+days = 90
+
+[[retention.tiers]]
+name = "team"
+days = 180</code></pre>
+<p>Assign tiers to keys using the extended format:</p>
+<pre><code>[[auth.api_key_entries]]
+id = "pro-user"
+secret = "sk-pro-key"
+tier = "pro"</code></pre>
+<p>Tier names are fully configurable &mdash; add <code>"enterprise"</code>, <code>"trial"</code>, or any custom name. GC runs one pass per tier automatically.</p>
+
 <h3>Server-side key attribution</h3>
-<p>When auth is enabled, Keplor <strong>overrides</strong> the client-provided <code>api_key_id</code> with the authenticated key's ID. This prevents clients from spoofing attribution. Cost rollups, quotas, and billing are always tied to the actual key.</p>
+<p>When auth is enabled, Keplor <strong>overrides</strong> the client-provided <code>api_key_id</code> with the authenticated key's ID and assigns the key's retention tier. This prevents clients from spoofing attribution.</p>
 
 <h3>Open mode</h3>
-<p>When no keys are configured (the default), auth is disabled. All requests are accepted without a Bearer token.</p>
+<p>When no keys are configured (the default), auth is disabled. All requests are accepted without a Bearer token and assigned to <code>default_tier</code>.</p>
 
 <h2 id="schema">What to send</h2>
 <p>Only <code>model</code> and <code>provider</code> are required. Everything else is optional with sensible defaults.</p>
@@ -380,8 +404,27 @@
 <h2 id="operations">Production operations</h2>
 
 <h3>Configuration</h3>
-<Pre code={'[server]\nlisten_addr = "0.0.0.0:8080"\nshutdown_timeout_secs = 25       # drain batch writer + WAL checkpoint\nrequest_timeout_secs = 30        # per-request timeout (408 on exceed)\nmax_connections = 10000          # concurrent connection limit (503 on exceed)\n\n[storage]\ndb_path = "keplor.db"\nretention_days = 90              # auto-GC (0 = disabled)\nwal_checkpoint_secs = 300        # WAL truncation interval\n\n[auth]\napi_keys = ["prod-svc:sk-abc"]   # empty = open mode\n\n[pipeline]\nbatch_size = 64\nmax_body_bytes = 10485760        # 10 MB\n\n[idempotency]\nenabled = true                   # dedup retries via Idempotency-Key header\nttl_secs = 300                   # 5 minute cache TTL\nmax_entries = 100000\n\n[rate_limit]\nenabled = false                  # per-key rate limiting (429 on exceed)\nrequests_per_second = 100.0\nburst = 200\n\n# [tls]                          # optional HTTPS\n# cert_path = "/etc/keplor/cert.pem"\n# key_path = "/etc/keplor/key.pem"'} />
-<p>Override any field with <code>KEPLOR_&lt;SECTION&gt;_&lt;FIELD&gt;</code> environment variables.</p>
+<Pre code={'[server]\nlisten_addr = "0.0.0.0:8080"\nshutdown_timeout_secs = 25       # drain batch writer + WAL checkpoint\nrequest_timeout_secs = 30        # per-request timeout (408 on exceed)\nmax_connections = 10000          # concurrent connection limit (503 on exceed)\n\n[storage]\ndb_path = "keplor.db"\nretention_days = 90              # legacy global GC (prefer [retention] tiers)\nwal_checkpoint_secs = 300        # WAL truncation interval\ngc_interval_secs = 3600          # GC run frequency (0 = disabled)\n\n[auth]\napi_keys = ["prod-svc:sk-abc"]   # simple format (empty = open mode)\n\n# Extended format with tier:\n# [[auth.api_key_entries]]\n# id = "pro-user"\n# secret = "sk-pro-key"\n# tier = "pro"\n\n[retention]\ndefault_tier = "free"\n\n[[retention.tiers]]\nname = "free"\ndays = 7\n\n[[retention.tiers]]\nname = "pro"\ndays = 90\n\n[pipeline]\nbatch_size = 64\nmax_body_bytes = 10485760        # 10 MB\n\n[idempotency]\nenabled = true                   # dedup retries via Idempotency-Key header\nttl_secs = 300                   # 5 minute cache TTL\nmax_entries = 100000\n\n[rate_limit]\nenabled = false                  # per-key rate limiting (429 on exceed)\nrequests_per_second = 100.0\nburst = 200\n\n# [tls]                          # optional HTTPS\n# cert_path = "/etc/keplor/cert.pem"\n# key_path = "/etc/keplor/key.pem"'} />
+<p>Override any field with <code>KEPLOR_&lt;SECTION&gt;_&lt;FIELD&gt;</code> environment variables. See <a href="{base}/docs/configuration">Configuration</a> for the full reference.</p>
+
+<h3>Blob storage (S3 / R2 / MinIO)</h3>
+<p>By default, request/response bodies are stored in SQLite alongside event metadata. To offload blobs to an S3-compatible object store, build with the <code>s3</code> feature and add a <code>[blob_storage]</code> section.</p>
+
+<p><strong>What moves:</strong> Only compressed body bytes. Event metadata (timestamps, tokens, cost) stays in SQLite for fast queries.</p>
+
+<h4>Cloudflare R2</h4>
+<p>R2 has 10 GB free storage and zero egress fees.</p>
+<Pre code={'[blob_storage]\nbucket = "keplor-blobs"\nendpoint = "https://<account-id>.r2.cloudflarestorage.com"\nregion = "auto"\naccess_key_id = "your-r2-access-key"\nsecret_access_key = "your-r2-secret-key"'} />
+
+<h4>AWS S3</h4>
+<Pre code={'[blob_storage]\nbucket = "keplor-blobs"\nendpoint = "https://s3.us-east-1.amazonaws.com"\nregion = "us-east-1"\naccess_key_id = "AKIA..."\nsecret_access_key = "..."'} />
+
+<h4>MinIO (self-hosted)</h4>
+<Pre code={'[blob_storage]\nbucket = "keplor-blobs"\nendpoint = "http://localhost:9000"\nregion = "us-east-1"\naccess_key_id = "minioadmin"\nsecret_access_key = "minioadmin"\npath_style = true    # required for MinIO'} />
+
+<p>Blobs are keyed by SHA-256 hash, so identical payloads (repeated system prompts) are naturally deduplicated. GC automatically deletes orphaned blobs from the external store when events expire.</p>
+
+<p>Build command: <code>cargo build --release --features mimalloc,s3</code></p>
 
 <h3>JSON structured logging</h3>
 <Pre code="$ keplor run --json-logs" />

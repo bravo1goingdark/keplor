@@ -45,7 +45,9 @@ Authorization: Bearer <secret>
 
 ### Key Configuration
 
-Keys are configured in `keplor.toml` or via environment variables:
+Keys are configured in `keplor.toml` or via environment variables. Two formats are supported:
+
+**Simple format** (backward compatible):
 
 ```toml
 [auth]
@@ -56,10 +58,27 @@ api_keys = [
 ]
 ```
 
-| Format | Example | Key ID |
-|--------|---------|--------|
-| `id:secret` | `"prod-svc:sk-abc123"` | `prod-svc` |
-| bare secret | `"sk-abc123"` | `key_<first8hex_sha256>` (auto-derived, stable) |
+**Extended format** (with retention tier assignment):
+
+```toml
+[[auth.api_key_entries]]
+id = "prod-svc"
+secret = "sk-prod-abc123"
+tier = "pro"                        # maps to a retention tier
+
+[[auth.api_key_entries]]
+id = "free-user"
+secret = "sk-free-xyz789"
+tier = "free"
+```
+
+Both formats can be combined. Simple-format keys default to the `default_tier` from `[retention]` config.
+
+| Format | Example | Key ID | Tier |
+|--------|---------|--------|------|
+| `id:secret` | `"prod-svc:sk-abc123"` | `prod-svc` | `default_tier` |
+| bare secret | `"sk-abc123"` | `key_<first8hex_sha256>` (auto-derived) | `default_tier` |
+| extended | `{ id, secret, tier }` | `id` value | `tier` value |
 
 ### Server-Side Key Attribution
 
@@ -534,11 +553,34 @@ max_connections = 10000             # concurrent connection limit
 
 [storage]
 db_path = "keplor.db"              # SQLite file path
-retention_days = 90                 # auto-GC events older than this (0 = disabled)
+retention_days = 90                 # legacy global GC (0 = disabled; prefer [retention] tiers)
 wal_checkpoint_secs = 300           # WAL truncation interval (0 = disabled)
+gc_interval_secs = 3600            # how often GC runs (0 = disabled)
 
 [auth]
-api_keys = []                       # default (open mode)
+api_keys = []                       # simple format (open mode when empty)
+
+# Extended format — assign retention tiers per key:
+# [[auth.api_key_entries]]
+# id = "prod-svc"
+# secret = "sk-prod-abc123"
+# tier = "pro"
+
+[retention]
+default_tier = "free"              # tier for simple-format keys & unauthenticated requests
+
+[[retention.tiers]]
+name = "free"
+days = 7                           # 0 = keep forever
+
+[[retention.tiers]]
+name = "pro"
+days = 90
+
+# Add custom tiers:
+# [[retention.tiers]]
+# name = "team"
+# days = 180
 
 [pipeline]
 batch_size = 64                     # events per batched write (max 100,000)
@@ -554,11 +596,102 @@ enabled = false                     # default (disabled)
 requests_per_second = 100.0         # per API key
 burst = 200                         # max burst size
 
+# Optional: offload blobs to S3/R2 (requires --features s3)
+# [blob_storage]
+# bucket = "keplor-blobs"
+# endpoint = "https://<account>.r2.cloudflarestorage.com"
+# region = "auto"
+# access_key_id = "..."
+# secret_access_key = "..."
+
 # Optional TLS — when present, server listens with HTTPS
 # [tls]
 # cert_path = "/etc/keplor/cert.pem"
 # key_path = "/etc/keplor/key.pem"
 ```
+
+### Blob Storage (S3 / Cloudflare R2 / MinIO)
+
+By default, Keplor stores request/response bodies in the SQLite database alongside event metadata. For deployments where disk is constrained (e.g. free-tier VMs) or you want to decouple storage, you can offload blob data to any S3-compatible object store.
+
+**What moves:** Only the compressed request/response body bytes. Event metadata (timestamps, tokens, cost, user IDs) stays in SQLite for fast queries.
+
+**What stays:** All query, stats, rollup, and quota endpoints work identically. The only difference is that viewing full request/response bodies (`get_component`) fetches from the object store instead of SQLite.
+
+#### Build with S3 support
+
+```bash
+cargo build --release --target x86_64-unknown-linux-musl -p keplor-cli \
+  --features mimalloc,s3
+```
+
+#### Cloudflare R2 setup
+
+R2 has a generous free tier (10 GB storage, no egress fees) and is S3-compatible.
+
+1. Create a bucket in the Cloudflare dashboard (e.g. `keplor-blobs`)
+2. Create an R2 API token with read/write permissions
+3. Add to `keplor.toml`:
+
+```toml
+[blob_storage]
+bucket = "keplor-blobs"
+endpoint = "https://<account-id>.r2.cloudflarestorage.com"
+region = "auto"
+access_key_id = "your-r2-access-key"
+secret_access_key = "your-r2-secret-key"
+```
+
+#### AWS S3 setup
+
+```toml
+[blob_storage]
+bucket = "keplor-blobs"
+endpoint = "https://s3.us-east-1.amazonaws.com"
+region = "us-east-1"
+access_key_id = "AKIA..."
+secret_access_key = "..."
+```
+
+#### MinIO (self-hosted S3)
+
+```toml
+[blob_storage]
+bucket = "keplor-blobs"
+endpoint = "http://localhost:9000"
+region = "us-east-1"
+access_key_id = "minioadmin"
+secret_access_key = "minioadmin"
+path_style = true                   # required for MinIO
+```
+
+#### Configuration reference
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `bucket` | string | | Bucket name |
+| `endpoint` | string | | S3 endpoint URL |
+| `region` | string | | Region (`"auto"` for R2, `"us-east-1"` for AWS) |
+| `access_key_id` | string | | Access key |
+| `secret_access_key` | string | | Secret key |
+| `prefix` | string | `""` | Optional key prefix (e.g. `"blobs/"`) |
+| `path_style` | bool | `false` | Use path-style addressing (required for MinIO) |
+
+#### How deduplication works
+
+Blobs are keyed by their SHA-256 hash. Identical payloads (e.g. repeated system prompts) produce the same key, so S3 PUTs are naturally idempotent. No coordination needed.
+
+#### Garbage collection with external blobs
+
+When events are deleted (via retention GC or the DELETE API), Keplor:
+1. Decrements the blob's reference count in SQLite
+2. If the count reaches zero, deletes the blob from the object store
+
+Failed external deletes are logged as warnings but don't block GC. Orphaned blobs in S3 waste storage but don't cause correctness issues.
+
+#### Migration from embedded to S3
+
+Existing blobs in SQLite are **not** automatically migrated to S3. New events will write to S3; old events continue reading from SQLite. To fully migrate, export and re-ingest, or run a migration script against the `payload_blobs` table.
 
 ### Environment Variable Overrides
 
@@ -830,12 +963,33 @@ Keplor exposes the following metrics at `GET /metrics`:
 
 ### Automated Garbage Collection
 
-When `storage.retention_days` is set (default: 90), Keplor runs hourly GC that:
-- Deletes events older than the retention window
-- Decrements blob refcounts and removes orphaned blobs
-- Logs the count of deleted events and blobs
+Keplor supports **tiered retention** — different API keys can have different retention periods. Configure tiers in `[retention]`:
 
-Set to `0` to disable (you can still run `keplor gc --older-than-days N` manually).
+```toml
+[retention]
+default_tier = "free"
+
+[[retention.tiers]]
+name = "free"
+days = 7
+
+[[retention.tiers]]
+name = "pro"
+days = 90
+
+[[retention.tiers]]
+name = "team"
+days = 180
+```
+
+GC runs every `storage.gc_interval_secs` (default: 3600 = 1 hour), one pass per tier. Each pass:
+- Deletes events of that tier older than the tier's retention window
+- Decrements blob refcounts and removes orphaned blobs
+- If an external blob store (S3/R2) is configured, deletes orphaned blobs from external storage
+
+Set `days = 0` on a tier to keep events forever. Set `storage.gc_interval_secs = 0` to disable automated GC entirely (you can still run `keplor gc --older-than-days N` manually).
+
+**Legacy mode:** If no `[retention]` section is present, `storage.retention_days` is used as a global fallback.
 
 ### WAL Checkpointing
 
