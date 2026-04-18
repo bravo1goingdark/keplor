@@ -810,68 +810,51 @@ impl Store {
         let conn = self.read_conn()?;
         let id_bytes = event_id.as_ulid().to_bytes();
 
-        if let Some(ref blob_store) = self.blob_store {
-            // External mode: get SHA + metadata from SQLite, data from BlobStore.
-            let row: Option<([u8; 32], String, String)> = conn
-                .query_row(
-                    "SELECT ec.blob_sha256, pb.provider, pb.compression
-                     FROM event_components ec
-                     JOIN payload_blobs pb ON pb.sha256 = ec.blob_sha256
-                     WHERE ec.event_id = ?1 AND ec.component_type = ?2",
-                    params![&id_bytes[..], component_type],
-                    |r| {
-                        let sha_vec: Vec<u8> = r.get(0)?;
-                        let mut sha = [0u8; 32];
-                        sha.copy_from_slice(&sha_vec);
-                        Ok((sha, r.get(1)?, r.get(2)?))
-                    },
-                )
-                .optional()?;
+        // Hybrid read: try SQLite data column first (works for embedded
+        // blobs and pre-migration blobs), then fall back to external store.
+        #[allow(clippy::type_complexity)] // reason: inline query result, not worth a named type
+        let row: Option<(Option<Vec<u8>>, Vec<u8>, String, String)> = conn
+            .query_row(
+                "SELECT pb.data, ec.blob_sha256, pb.provider, pb.compression
+                 FROM event_components ec
+                 JOIN payload_blobs pb ON pb.sha256 = ec.blob_sha256
+                 WHERE ec.event_id = ?1 AND ec.component_type = ?2",
+                params![&id_bytes[..], component_type],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()?;
 
-            let Some((sha, provider, compression)) = row else {
-                return Ok(None);
-            };
-            let Some(compressed) = blob_store.get(&sha)? else {
-                return Ok(None);
-            };
+        let Some((data_opt, sha_vec, provider, compression)) = row else {
+            return Ok(None);
+        };
 
-            let dict_key = if compression == "zstd_dict" {
-                Some(crate::compress::DictKey {
-                    provider: provider.into(),
-                    component_type: component_type.into(),
-                })
-            } else {
-                None
-            };
-            let decompressed = self.coder.decompress(&compressed, dict_key.as_ref())?;
-            Ok(Some(Bytes::from(decompressed)))
+        // Resolve compressed bytes: SQLite data column → external store.
+        let compressed = if let Some(data) = data_opt {
+            // Blob data is in SQLite (embedded mode or pre-migration blob).
+            Bytes::from(data)
+        } else if let Some(ref blob_store) = self.blob_store {
+            // Blob data is in external store (S3/R2).
+            let mut sha = [0u8; 32];
+            sha.copy_from_slice(&sha_vec);
+            match blob_store.get(&sha)? {
+                Some(data) => data,
+                None => return Ok(None),
+            }
         } else {
-            // Embedded mode: data in payload_blobs.data column.
-            let row: Option<(Vec<u8>, String, String)> = conn
-                .query_row(
-                    "SELECT pb.data, pb.provider, pb.compression FROM event_components ec
-                     JOIN payload_blobs pb ON pb.sha256 = ec.blob_sha256
-                     WHERE ec.event_id = ?1 AND ec.component_type = ?2",
-                    params![&id_bytes[..], component_type],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-                )
-                .optional()?;
+            // data is NULL and no external store — blob is missing.
+            return Ok(None);
+        };
 
-            let Some((compressed, provider, compression)) = row else {
-                return Ok(None);
-            };
-
-            let dict_key = if compression == "zstd_dict" {
-                Some(crate::compress::DictKey {
-                    provider: provider.into(),
-                    component_type: component_type.into(),
-                })
-            } else {
-                None
-            };
-            let decompressed = self.coder.decompress(&compressed, dict_key.as_ref())?;
-            Ok(Some(Bytes::from(decompressed)))
-        }
+        let dict_key = if compression == "zstd_dict" {
+            Some(crate::compress::DictKey {
+                provider: provider.into(),
+                component_type: component_type.into(),
+            })
+        } else {
+            None
+        };
+        let decompressed = self.coder.decompress(&compressed, dict_key.as_ref())?;
+        Ok(Some(Bytes::from(decompressed)))
     }
 
     /// Query events with filters and cursor-based pagination.
@@ -1036,7 +1019,8 @@ impl Store {
     /// Collect raw (uncompressed) payload samples for dictionary training.
     ///
     /// Returns up to `max_samples` decompressed blobs of the given
-    /// `component_type` and `provider`.
+    /// `component_type` and `provider`.  Uses hybrid read: tries SQLite
+    /// `data` column first, falls back to external blob store.
     pub fn collect_dict_samples(
         &self,
         provider: &str,
@@ -1045,53 +1029,40 @@ impl Store {
     ) -> Result<Vec<Vec<u8>>, StoreError> {
         let conn = self.read_conn()?;
 
-        if let Some(ref blob_store) = self.blob_store {
-            // External mode: get SHAs from SQLite, data from BlobStore.
-            let mut stmt = conn.prepare_cached(
-                "SELECT sha256 FROM payload_blobs
-                 WHERE provider = ?1 AND component_type = ?2
-                 ORDER BY hit_count DESC
-                 LIMIT ?3",
-            )?;
-            let rows =
-                stmt.query_map(params![provider, component_type, max_samples as i64], |r| {
-                    let v: Vec<u8> = r.get(0)?;
-                    let mut sha = [0u8; 32];
-                    sha.copy_from_slice(&v);
-                    Ok(sha)
-                })?;
+        let mut stmt = conn.prepare_cached(
+            "SELECT data, sha256 FROM payload_blobs
+             WHERE provider = ?1 AND component_type = ?2
+             ORDER BY hit_count DESC
+             LIMIT ?3",
+        )?;
 
-            let mut samples = Vec::with_capacity(max_samples);
-            for row in rows {
-                let sha = row?;
-                if let Some(compressed) = blob_store.get(&sha)? {
-                    let decompressed = self.coder.decompress(&compressed, None)?;
-                    samples.push(decompressed);
+        let rows = stmt.query_map(params![provider, component_type, max_samples as i64], |r| {
+            let data: Option<Vec<u8>> = r.get(0)?;
+            let sha_vec: Vec<u8> = r.get(1)?;
+            Ok((data, sha_vec))
+        })?;
+
+        let mut samples = Vec::with_capacity(max_samples);
+        for row in rows {
+            let (data_opt, sha_vec) = row?;
+
+            let compressed = if let Some(data) = data_opt {
+                data
+            } else if let Some(ref blob_store) = self.blob_store {
+                let mut sha = [0u8; 32];
+                sha.copy_from_slice(&sha_vec);
+                match blob_store.get(&sha)? {
+                    Some(data) => data.to_vec(),
+                    None => continue,
                 }
-            }
-            Ok(samples)
-        } else {
-            // Embedded mode: data in payload_blobs.data column.
-            let mut stmt = conn.prepare_cached(
-                "SELECT data FROM payload_blobs
-                 WHERE provider = ?1 AND component_type = ?2
-                 ORDER BY hit_count DESC
-                 LIMIT ?3",
-            )?;
+            } else {
+                continue;
+            };
 
-            let rows = stmt
-                .query_map(params![provider, component_type, max_samples as i64], |r| {
-                    r.get::<_, Vec<u8>>(0)
-                })?;
-
-            let mut samples = Vec::with_capacity(max_samples);
-            for row in rows {
-                let compressed = row?;
-                let decompressed = self.coder.decompress(&compressed, None)?;
-                samples.push(decompressed);
-            }
-            Ok(samples)
+            let decompressed = self.coder.decompress(&compressed, None)?;
+            samples.push(decompressed);
         }
+        Ok(samples)
     }
 
     /// Train a zstd dictionary from stored samples and persist it.
