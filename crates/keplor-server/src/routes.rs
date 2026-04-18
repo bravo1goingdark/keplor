@@ -141,6 +141,7 @@ pub struct UsageResponse {
     pub input_tokens: u32,
     pub output_tokens: u32,
     pub cache_read_input_tokens: u32,
+    pub cache_creation_input_tokens: u32,
     pub reasoning_tokens: u32,
 }
 
@@ -201,6 +202,7 @@ pub async fn query_events(
                     input_tokens: e.input_tokens,
                     output_tokens: e.output_tokens,
                     cache_read_input_tokens: e.cache_read_input_tokens,
+                    cache_creation_input_tokens: e.cache_creation_input_tokens,
                     reasoning_tokens: e.reasoning_tokens,
                 },
                 cost_nanodollars: e.cost_nanodollars,

@@ -55,6 +55,8 @@ pub struct EventSummary {
     pub output_tokens: u32,
     /// Cache-read input tokens.
     pub cache_read_input_tokens: u32,
+    /// Cache-creation input tokens.
+    pub cache_creation_input_tokens: u32,
     /// Reasoning tokens.
     pub reasoning_tokens: u32,
     /// Cost in nanodollars.
@@ -810,7 +812,7 @@ impl Store {
         let mut sql = String::with_capacity(256);
         sql.push_str(
             "SELECT id, ts_ns, user_id, api_key_id, provider, model, endpoint, http_status, \
-             input_tokens, output_tokens, cache_read_input_tokens, reasoning_tokens, \
+             input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens, reasoning_tokens, \
              cost_nanodollars, latency_ttft_ms, latency_total_ms, streaming, source, \
              error_type, metadata_json \
              FROM llm_events WHERE 1=1",
@@ -1356,14 +1358,15 @@ mod slim {
     pub const INPUT_TOKENS: usize = 8;
     pub const OUTPUT_TOKENS: usize = 9;
     pub const CACHE_READ: usize = 10;
-    pub const REASONING: usize = 11;
-    pub const COST: usize = 12;
-    pub const TTFT: usize = 13;
-    pub const TOTAL_MS: usize = 14;
-    pub const STREAMING: usize = 15;
-    pub const SOURCE: usize = 16;
-    pub const ERROR_TYPE: usize = 17;
-    pub const METADATA_JSON: usize = 18;
+    pub const CACHE_CREATION: usize = 11;
+    pub const REASONING: usize = 12;
+    pub const COST: usize = 13;
+    pub const TTFT: usize = 14;
+    pub const TOTAL_MS: usize = 15;
+    pub const STREAMING: usize = 16;
+    pub const SOURCE: usize = 17;
+    pub const ERROR_TYPE: usize = 18;
+    pub const METADATA_JSON: usize = 19;
 }
 
 fn row_to_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<EventSummary> {
@@ -1384,6 +1387,7 @@ fn row_to_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<EventSummary> {
         input_tokens: row.get::<_, i64>(slim::INPUT_TOKENS)? as u32,
         output_tokens: row.get::<_, i64>(slim::OUTPUT_TOKENS)? as u32,
         cache_read_input_tokens: row.get::<_, i64>(slim::CACHE_READ)? as u32,
+        cache_creation_input_tokens: row.get::<_, i64>(slim::CACHE_CREATION)? as u32,
         reasoning_tokens: row.get::<_, i64>(slim::REASONING)? as u32,
         cost_nanodollars: row.get(slim::COST)?,
         ttft_ms: row.get::<_, Option<i64>>(slim::TTFT)?.map(|v| v as u32),

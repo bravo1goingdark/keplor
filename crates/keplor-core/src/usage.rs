@@ -108,6 +108,7 @@ impl Usage {
             | Provider::XAi
             | Provider::DeepSeek
             | Provider::Cohere
+            | Provider::OpenRouter
             | Provider::Ollama
             | Provider::OpenAICompatible { .. } => self.input_tokens,
         }

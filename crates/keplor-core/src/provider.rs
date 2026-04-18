@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-/// The 13 provider surfaces Keplor understands.
+/// The 14 provider surfaces Keplor understands.
 ///
 /// Keep variant order stable — the [`Serialize`] impl uses variant names as
 /// stable storage keys.
@@ -43,6 +43,8 @@ pub enum Provider {
     DeepSeek,
     /// Cohere v2 (`api.cohere.com`).
     Cohere,
+    /// OpenRouter (`openrouter.ai`).
+    OpenRouter,
     /// Local Ollama (`localhost:11434` by default).
     Ollama,
     /// Any other base URL that speaks the OpenAI Chat Completions dialect.
@@ -70,6 +72,7 @@ impl Provider {
             Self::XAi => "api.x.ai",
             Self::DeepSeek => "api.deepseek.com",
             Self::Cohere => "api.cohere.com",
+            Self::OpenRouter => "openrouter.ai",
             Self::Ollama => "localhost",
             Self::OpenAICompatible { base_url } => base_url,
         }
@@ -93,6 +96,7 @@ impl Provider {
             Self::XAi => "xai",
             Self::DeepSeek => "deepseek",
             Self::Cohere => "cohere",
+            Self::OpenRouter => "openrouter",
             Self::Ollama => "ollama",
             Self::OpenAICompatible { .. } => "openai_compatible",
         }
@@ -132,6 +136,7 @@ impl Provider {
             "xai" => Self::XAi,
             "deepseek" => Self::DeepSeek,
             "cohere" => Self::Cohere,
+            "openrouter" => Self::OpenRouter,
             "ollama" => Self::Ollama,
             other => Self::OpenAICompatible { base_url: Arc::from(other) },
         }
@@ -162,6 +167,8 @@ impl Provider {
             Self::DeepSeek
         } else if s.eq_ignore_ascii_case("cohere") {
             Self::Cohere
+        } else if s.eq_ignore_ascii_case("openrouter") {
+            Self::OpenRouter
         } else if s.eq_ignore_ascii_case("ollama") {
             Self::Ollama
         } else {
@@ -210,6 +217,9 @@ impl Provider {
         }
         if h == "api.cohere.com" || h == "api.cohere.ai" {
             return Some(Self::Cohere);
+        }
+        if h == "openrouter.ai" {
+            return Some(Self::OpenRouter);
         }
         if h == "localhost" || h.starts_with("localhost:") || h == "127.0.0.1" {
             // Default Ollama port is 11434; also accept arbitrary local
