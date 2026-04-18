@@ -15,6 +15,7 @@ workspace = true
 [features]
 default = ["batch"]
 batch   = ["dep:tokio", "dep:metrics"]
+s3      = ["dep:rust-s3"]
 
 [dependencies]
 keplor-core = { path = "../keplor-core" }
@@ -31,6 +32,7 @@ tracing     = { workspace = true }
 zstd        = { workspace = true }
 tokio       = { workspace = true, optional = true, features = ["sync", "time", "rt", "macros"] }
 metrics     = { workspace = true, optional = true }
+rust-s3     = { version = "0.35", default-features = false, features = ["tokio-rustls-tls"], optional = true }
 
 [dev-dependencies]
 tokio     = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }

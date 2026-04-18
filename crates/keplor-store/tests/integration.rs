@@ -39,6 +39,7 @@ fn make_event(i: usize) -> LlmEvent {
         source: None,
         ingested_at: 0,
         metadata: None,
+        tier: smol_str::SmolStr::new("free"),
     }
 }
 

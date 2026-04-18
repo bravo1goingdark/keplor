@@ -79,6 +79,9 @@ pub struct LlmEvent {
     pub ingested_at: i64,
     /// Arbitrary metadata — stored as JSON text, not indexed.
     pub metadata: Option<serde_json::Value>,
+    /// Retention tier (e.g. `"free"`, `"pro"`, `"team"`).
+    /// Set at ingestion time from the authenticated API key.
+    pub tier: SmolStr,
 }
 
 /// Three-dimensional latency breakdown.
@@ -244,6 +247,7 @@ mod tests {
             source: None,
             ingested_at: 0,
             metadata: None,
+            tier: SmolStr::new("free"),
         };
         let e2 = e.clone();
         assert_eq!(e.id, e2.id);

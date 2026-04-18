@@ -11,6 +11,7 @@ static MIGRATIONS: &[(u32, &str)] = &[
     (3, MIGRATION_0003),
     (4, MIGRATION_0004),
     (5, MIGRATION_0005),
+    (6, MIGRATION_0006),
 ];
 
 const MIGRATION_0001: &str = r"
@@ -59,7 +60,7 @@ CREATE TABLE payload_blobs (
   compressed_size INTEGER NOT NULL,
   refcount INTEGER NOT NULL DEFAULT 1,
   hit_count INTEGER NOT NULL DEFAULT 0,
-  data BLOB NOT NULL,
+  data BLOB,
   first_seen_at INTEGER NOT NULL
 ) STRICT;
 
@@ -128,6 +129,35 @@ const MIGRATION_0005: &str = r"
 ALTER TABLE llm_events ADD COLUMN metadata_json TEXT;
 ";
 
+const MIGRATION_0006: &str = r"
+-- Add retention tier column for per-key retention policies.
+-- Default 'free' matches the default_tier in config.
+ALTER TABLE llm_events ADD COLUMN tier TEXT NOT NULL DEFAULT 'free';
+CREATE INDEX idx_events_tier_ts ON llm_events(tier, ts_ns);
+
+-- Rebuild payload_blobs: make `data` nullable for external blob storage.
+-- SQLite STRICT mode enforces NOT NULL, so we must recreate the table.
+-- NOTE: This copies all rows. On large databases (millions of blobs)
+-- this may take several minutes. Run during a maintenance window.
+CREATE TABLE payload_blobs_new (
+  sha256 BLOB PRIMARY KEY,
+  component_type TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  compression TEXT NOT NULL,
+  dict_id TEXT,
+  uncompressed_size INTEGER NOT NULL,
+  compressed_size INTEGER NOT NULL,
+  refcount INTEGER NOT NULL DEFAULT 1,
+  hit_count INTEGER NOT NULL DEFAULT 0,
+  data BLOB,
+  first_seen_at INTEGER NOT NULL
+) STRICT;
+
+INSERT INTO payload_blobs_new SELECT * FROM payload_blobs;
+DROP TABLE payload_blobs;
+ALTER TABLE payload_blobs_new RENAME TO payload_blobs;
+";
+
 /// Apply all unapplied migrations.
 pub(crate) fn migrate(conn: &Connection) -> Result<(), StoreError> {
     conn.execute_batch(
@@ -183,7 +213,7 @@ mod tests {
         migrate(&conn).unwrap();
         let ver: u32 =
             conn.query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(ver, 5);
+        assert_eq!(ver, 6);
     }
 
     #[test]
@@ -193,7 +223,7 @@ mod tests {
         migrate(&conn).unwrap();
         let ver: u32 =
             conn.query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(ver, 5);
+        assert_eq!(ver, 6);
     }
 
     #[test]

@@ -44,4 +44,9 @@ pub enum StoreError {
     /// A `std::sync::Mutex` was poisoned by a panicking thread.
     #[error("lock poisoned: {0}")]
     LockPoisoned(String),
+
+    /// S3-compatible object storage operation failed.
+    #[cfg(feature = "s3")]
+    #[error("blob store (s3): {0}")]
+    BlobS3(String),
 }
