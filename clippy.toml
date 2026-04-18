@@ -22,8 +22,6 @@ doc-valid-idents = [
     "Ollama",
     "xAI",
     "LiteLLM",
-    "OpenTelemetry",
-    "OpenInference",
     "Langfuse",
     "ClickHouse",
     "PostgreSQL",

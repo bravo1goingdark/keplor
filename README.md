@@ -19,7 +19,6 @@ Named for Johannes Kepler, who derived the laws of planetary motion from observa
 - **Every provider schema** — accepts events from OpenAI, Anthropic, Gemini, Bedrock, and 8 more providers, with correct token-type handling for each.
 - **Heavy compression** via zstd with trained dictionaries per provider and component type — 30–80× ratios on real conversational traffic.
 - **Precise cost accounting** using the industry-standard LiteLLM pricing catalog, with correct handling of prompt caching, reasoning tokens, batch discounts, modality rates, tier pricing, and geo multipliers.
-- **Dual-schema telemetry** — every span carries both OpenTelemetry GenAI and OpenInference attributes, so Langfuse, Phoenix, LangSmith, Datadog, Honeycomb, and Grafana Tempo all ingest cleanly without reconfiguration.
 
 ## Quickstart
 

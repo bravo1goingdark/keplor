@@ -32,10 +32,6 @@ Full prompts/completions observability — request/response bodies compressed an
 
 PII masking, retention policies, feedback API, training-dataset export. Don't build these now but design schemas to accommodate them.
 
-## Telemetry output
-
-Dual-emit both OpenTelemetry GenAI semantic conventions (`gen_ai.*`) and OpenInference attributes (`llm.*`, `openinference.span.kind`) on the same span for maximum downstream-tool compatibility (Langfuse, Phoenix, LangSmith, Datadog, Honeycomb, Grafana).
-
 ## Code quality bar
 
 - `cargo fmt` and `cargo clippy -- -D warnings` must pass on every commit.
