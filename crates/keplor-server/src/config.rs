@@ -27,9 +27,9 @@ pub struct ServerConfig {
     pub tls: Option<TlsConfig>,
     /// Retention tier configuration.
     pub retention: RetentionConfig,
-    /// Optional S3-compatible blob storage for request/response bodies.
+    /// Optional S3/R2 event archival configuration.
     #[cfg(feature = "s3")]
-    pub blob_storage: Option<keplor_store::blob::s3::S3BlobConfig>,
+    pub archive: Option<ArchiveConfig>,
 }
 
 /// TLS configuration for HTTPS listeners.
@@ -84,10 +84,6 @@ pub struct StorageConfig {
     pub read_pool_size: usize,
     /// GC run interval in seconds. Default: 3600 (1 hour). 0 = disabled.
     pub gc_interval_secs: u64,
-    /// Auto-offload blobs to external store when SQLite exceeds this size
-    /// (in MB).  Requires `[blob_storage]` to be configured.
-    /// 0 = manual mode (always use external store if configured, else embedded).
-    pub blob_offload_threshold_mb: u64,
 }
 
 impl Default for StorageConfig {
@@ -99,7 +95,6 @@ impl Default for StorageConfig {
             max_db_size_mb: 0,
             read_pool_size: 4,
             gc_interval_secs: 3600,
-            blob_offload_threshold_mb: 0,
         }
     }
 }
@@ -260,6 +255,10 @@ pub struct PipelineConfig {
     pub batch_size: usize,
     /// Maximum request body size in bytes.
     pub max_body_bytes: usize,
+    /// Bounded channel capacity for the batch writer. Default: 32768.
+    /// Higher values absorb traffic bursts at the cost of more memory
+    /// and more events at risk if the process crashes before flushing.
+    pub channel_capacity: usize,
 }
 
 impl Default for PipelineConfig {
@@ -267,8 +266,81 @@ impl Default for PipelineConfig {
         Self {
             batch_size: 64,
             max_body_bytes: 10 * 1024 * 1024, // 10 MB
+            channel_capacity: 32_768,
         }
     }
+}
+
+/// S3/R2 event archival configuration.
+///
+/// When configured, old events are serialized to zstd-compressed JSONL
+/// files and uploaded to the specified S3-compatible bucket.  Events are
+/// deleted from SQLite after a confirmed upload.
+///
+/// ```toml
+/// [archive]
+/// bucket = "keplor-archive"
+/// endpoint = "https://<account-id>.r2.cloudflarestorage.com"
+/// region = "auto"
+/// access_key_id = "your-access-key"
+/// secret_access_key = "your-secret-key"
+/// prefix = "events"
+/// archive_after_days = 30
+/// archive_threshold_mb = 500
+/// archive_batch_size = 10000
+/// ```
+#[cfg(feature = "s3")]
+#[derive(Debug, Clone, Deserialize)]
+pub struct ArchiveConfig {
+    /// S3 bucket name.
+    pub bucket: String,
+    /// S3 endpoint URL.
+    pub endpoint: String,
+    /// S3 region (e.g. `"auto"` for R2, `"us-east-1"` for AWS).
+    pub region: String,
+    /// Access key ID.
+    pub access_key_id: String,
+    /// Secret access key.
+    pub secret_access_key: String,
+    /// Key prefix in the bucket (e.g. `"events"`).
+    #[serde(default)]
+    pub prefix: String,
+    /// Use path-style addressing (required for MinIO).
+    #[serde(default)]
+    pub path_style: bool,
+    /// Archive events older than this many days. 0 = disabled.
+    /// For sub-day granularity, use `archive_after_hours` instead.
+    #[serde(default = "default_archive_after_days")]
+    pub archive_after_days: u64,
+    /// Archive events older than this many hours. 0 = use `archive_after_days`.
+    /// Takes precedence over `archive_after_days` when non-zero.
+    /// Set to `1` to keep only the last hour in SQLite.
+    #[serde(default)]
+    pub archive_after_hours: u64,
+    /// Archive when SQLite exceeds this size (MB). 0 = disabled.
+    #[serde(default)]
+    pub archive_threshold_mb: u64,
+    /// Maximum events per JSONL archive file.
+    #[serde(default = "default_archive_batch_size")]
+    pub archive_batch_size: usize,
+    /// How often the archive loop runs in seconds. Default: 3600 (1 hour).
+    #[serde(default = "default_archive_interval_secs")]
+    pub archive_interval_secs: u64,
+}
+
+#[cfg(feature = "s3")]
+fn default_archive_after_days() -> u64 {
+    30
+}
+
+#[cfg(feature = "s3")]
+fn default_archive_batch_size() -> usize {
+    10_000
+}
+
+#[cfg(feature = "s3")]
+fn default_archive_interval_secs() -> u64 {
+    3600 // 1 hour
 }
 
 impl ServerConfig {
@@ -351,6 +423,42 @@ impl ServerConfig {
             }
         }
         Ok(())
+    }
+
+    /// Log warnings for configurations that are valid but risky.
+    ///
+    /// Call after [`ServerConfig::validate`] succeeds.
+    pub fn warn_risky_defaults(&self) {
+        if self.storage.max_db_size_mb == 0 {
+            tracing::warn!(
+                "storage.max_db_size_mb is 0 (unlimited) — the database can \
+                 grow until disk is full. Set a limit for production deployments"
+            );
+        }
+
+        #[cfg(feature = "s3")]
+        if let Some(ref archive) = self.archive {
+            let min_retention = self
+                .retention
+                .tiers
+                .iter()
+                .filter(|t| t.days > 0)
+                .map(|t| t.days)
+                .min()
+                .unwrap_or(u64::MAX);
+
+            if archive.archive_after_days > min_retention {
+                tracing::warn!(
+                    archive_after_days = archive.archive_after_days,
+                    min_tier_retention = min_retention,
+                    "archive_after_days ({}) > shortest tier retention ({} days) — \
+                     GC will delete events before they can be archived. \
+                     Lower archive_after_days or increase tier retention",
+                    archive.archive_after_days,
+                    min_retention,
+                );
+            }
+        }
     }
 }
 

@@ -59,9 +59,10 @@ pub struct LlmEvent {
     pub flags: EventFlags,
     /// Normalised upstream error, if any.
     pub error: Option<ProviderError>,
-    /// SHA-256 of the raw (pre-compression) request bytes.
+    /// Vestigial — always zeroed after blob subsystem removal.
+    /// Kept for SQLite column index stability.
     pub request_sha256: [u8; 32],
-    /// SHA-256 of the raw response bytes.
+    /// Vestigial — always zeroed after blob subsystem removal.
     pub response_sha256: [u8; 32],
     /// Client source IP (`None` when Keplor is behind a reverse proxy
     /// and we don't trust the `X-Forwarded-For` chain).

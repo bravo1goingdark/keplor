@@ -4,8 +4,12 @@
 //! at `requests_per_second` and allows bursts up to `burst` tokens.
 //! When a key's bucket is exhausted, requests are rejected with `429 Too Many
 //! Requests` and a `Retry-After` header.
+//!
+//! The bucket state is sharded 16-way to reduce mutex contention under high
+//! concurrency.
 
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::sync::Mutex;
 use std::time::Instant;
 
@@ -15,6 +19,9 @@ use axum::response::{IntoResponse, Response};
 use smol_str::SmolStr;
 
 use crate::auth::AuthenticatedKey;
+
+/// Number of independent bucket shards.
+const NUM_SHARDS: usize = 16;
 
 /// Per-key rate limiter configuration.
 #[derive(Debug, Clone)]
@@ -26,8 +33,10 @@ pub struct RateLimitConfig {
 }
 
 /// In-process rate limiter that tracks token buckets per API key.
+///
+/// Sharded 16-way to minimize lock contention at high concurrency.
 pub struct RateLimiter {
-    buckets: Mutex<HashMap<SmolStr, TokenBucket>>,
+    shards: [Mutex<HashMap<SmolStr, TokenBucket>>; NUM_SHARDS],
     config: RateLimitConfig,
 }
 
@@ -39,7 +48,8 @@ struct TokenBucket {
 impl RateLimiter {
     /// Create a new rate limiter.
     pub fn new(config: RateLimitConfig) -> Self {
-        Self { buckets: Mutex::new(HashMap::new()), config }
+        let shards = std::array::from_fn(|_| Mutex::new(HashMap::new()));
+        Self { shards, config }
     }
 
     /// Try to acquire a token for the given key.
@@ -47,7 +57,8 @@ impl RateLimiter {
     /// Returns `Ok(())` if allowed, or `Err(seconds_until_next_token)` if
     /// the bucket is exhausted.
     pub fn try_acquire(&self, key: &str) -> Result<(), f64> {
-        let mut buckets = self.buckets.lock().unwrap_or_else(|e| e.into_inner());
+        let shard_idx = shard_index(key);
+        let mut buckets = self.shards[shard_idx].lock().unwrap_or_else(|e| e.into_inner());
         let now = Instant::now();
         let burst = self.config.burst as f64;
         let rps = self.config.requests_per_second;
@@ -70,6 +81,14 @@ impl RateLimiter {
             Err(wait)
         }
     }
+}
+
+/// Map a key to a shard index using a fast hash.
+#[inline]
+fn shard_index(key: &str) -> usize {
+    let mut hasher = std::hash::DefaultHasher::new();
+    key.hash(&mut hasher);
+    hasher.finish() as usize % NUM_SHARDS
 }
 
 /// Build an axum middleware function that enforces per-key rate limits.

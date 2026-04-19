@@ -3,7 +3,6 @@
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use bytes::Bytes;
 use keplor_core::{EventFlags, EventId, Latencies, LlmEvent, Provider, ProviderError, Usage};
 use keplor_pricing::compute::{compute_cost, CostOpts};
 use keplor_pricing::{Catalog, ModelKey};
@@ -100,19 +99,18 @@ impl Pipeline {
         self.check_db_size()?;
 
         let start = std::time::Instant::now();
-        let (llm_event, req_bytes, resp_bytes, provider, model, cost) =
+        let (llm_event, provider, model, cost) =
             self.process_event(event, authenticated_key_id, tier)?;
 
-        let id = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            self.writer.write(llm_event, req_bytes, resp_bytes),
-        )
-        .await
-        .map_err(|_| ServerError::Internal("write timed out after 10s".into()))?
-        .map_err(|e| {
-            metrics::counter!("keplor_events_errors_total", "stage" => "store").increment(1);
-            ServerError::from(e)
-        })?;
+        let id =
+            tokio::time::timeout(std::time::Duration::from_secs(10), self.writer.write(llm_event))
+                .await
+                .map_err(|_| ServerError::Internal("write timed out after 10s".into()))?
+                .map_err(|e| {
+                    metrics::counter!("keplor_events_errors_total", "stage" => "store")
+                        .increment(1);
+                    ServerError::from(e)
+                })?;
 
         let elapsed = start.elapsed();
         metrics::histogram!("keplor_ingest_duration_seconds").record(elapsed.as_secs_f64());
@@ -133,6 +131,85 @@ impl Pipeline {
         Ok(resp)
     }
 
+    /// Process a batch of events with durable writes — all events are sent
+    /// to the channel first, then all flush confirmations are awaited
+    /// concurrently. This avoids the serial-await bottleneck where each
+    /// event in a durable batch waited for its own 50ms flush cycle.
+    pub async fn ingest_batch_durable(
+        &self,
+        events: Vec<IngestEvent>,
+        authenticated_key_id: Option<&str>,
+        tier: &str,
+    ) -> Vec<Result<IngestResponse, ServerError>> {
+        if let Err(e) = self.check_db_size() {
+            return events.iter().map(|_| Err(ServerError::StorageFull(e.to_string()))).collect();
+        }
+
+        let mut llm_events = Vec::with_capacity(events.len());
+        let mut responses = Vec::with_capacity(events.len());
+        // Track which original indices succeeded validation.
+        let mut ok_indices = Vec::with_capacity(events.len());
+        let event_count = events.len();
+        let mut results: Vec<Option<Result<IngestResponse, ServerError>>> =
+            (0..event_count).map(|_| None).collect();
+
+        for (i, event) in events.into_iter().enumerate() {
+            match self.process_event(event, authenticated_key_id, tier) {
+                Ok((llm_event, provider, model, cost)) => {
+                    responses.push((provider, model, cost));
+                    llm_events.push(llm_event);
+                    ok_indices.push(i);
+                },
+                Err(e) => {
+                    metrics::counter!("keplor_events_errors_total", "stage" => "validation")
+                        .increment(1);
+                    results[i] = Some(Err(e));
+                },
+            }
+        }
+
+        // Send all valid events and await flush concurrently.
+        let write_results = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            self.writer.write_many(llm_events),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            ok_indices
+                .iter()
+                .map(|_| {
+                    Err(keplor_store::StoreError::Internal("write timed out after 10s".into()))
+                })
+                .collect()
+        });
+
+        for (j, write_result) in write_results.into_iter().enumerate() {
+            let idx = ok_indices[j];
+            let (ref provider, ref model, cost) = responses[j];
+            match write_result {
+                Ok(id) => {
+                    self.emit_metrics(provider, model);
+                    results[idx] = Some(Ok(IngestResponse {
+                        id: id.to_string(),
+                        cost_nanodollars: cost,
+                        model: model.to_string(),
+                        provider: provider.id_key().to_owned(),
+                    }));
+                },
+                Err(e) => {
+                    metrics::counter!("keplor_events_errors_total", "stage" => "store")
+                        .increment(1);
+                    results[idx] = Some(Err(ServerError::from(e)));
+                },
+            }
+        }
+
+        results
+            .into_iter()
+            .map(|r| r.unwrap_or_else(|| Err(ServerError::Internal("unreachable".into()))))
+            .collect()
+    }
+
     /// Process and submit without awaiting flush — for batch endpoints.
     ///
     /// When `authenticated_key_id` is `Some`, it overrides the
@@ -147,11 +224,11 @@ impl Pipeline {
         tier: &str,
     ) -> Result<IngestResponse, ServerError> {
         self.check_db_size()?;
-        let (llm_event, req_bytes, resp_bytes, provider, model, cost) =
+        let (llm_event, provider, model, cost) =
             self.process_event(event, authenticated_key_id, tier)?;
 
         let id = llm_event.id;
-        self.writer.write_fire_and_forget(llm_event, req_bytes, resp_bytes).map_err(|e| {
+        self.writer.write_fire_and_forget(llm_event).map_err(|e| {
             metrics::counter!("keplor_events_errors_total", "stage" => "queue_full").increment(1);
             ServerError::from(e)
         })?;
@@ -166,15 +243,15 @@ impl Pipeline {
         })
     }
 
-    /// Core processing: validate → normalize → cost → build event → serialize bodies.
+    /// Core processing: validate → normalize → cost → build event.
     ///
-    /// Returns `(LlmEvent, req_bytes, resp_bytes, provider, model, cost)`.
+    /// Returns `(LlmEvent, provider, model, cost)`.
     fn process_event(
         &self,
         mut event: IngestEvent,
         authenticated_key_id: Option<&str>,
         tier: &str,
-    ) -> Result<(LlmEvent, Bytes, Bytes, Provider, SmolStr, i64), ServerError> {
+    ) -> Result<(LlmEvent, Provider, SmolStr, i64), ServerError> {
         // Server-side key attribution: override client-provided api_key_id
         // with the authenticated key identity to prevent spoofing.
         if let Some(key_id) = authenticated_key_id {
@@ -191,20 +268,9 @@ impl Pipeline {
         let cost =
             event.cost_nanodollars.unwrap_or_else(|| self.compute_cost(&provider, &model, &usage));
 
-        // Extract bodies before moving event into build_llm_event.
-        // RawValue bytes pass through without re-serialization.
-        let req_bytes = match &event.request_body {
-            Some(v) => Bytes::copy_from_slice(v.get().as_bytes()),
-            None => Bytes::new(),
-        };
-        let resp_bytes = match &event.response_body {
-            Some(v) => Bytes::copy_from_slice(v.get().as_bytes()),
-            None => Bytes::new(),
-        };
-
         let llm_event = build_llm_event(event, provider.clone(), model.clone(), cost, usage, tier)?;
 
-        Ok((llm_event, req_bytes, resp_bytes, provider, model, cost))
+        Ok((llm_event, provider, model, cost))
     }
 
     /// Direct store access for queries.

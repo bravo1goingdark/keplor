@@ -74,6 +74,22 @@ enum Cli {
         #[arg(short, long, default_value = "keplor.db")]
         db: PathBuf,
     },
+    /// Archive old events to S3/R2 (requires --features s3).
+    #[cfg(feature = "s3")]
+    Archive {
+        /// Path to config file (for S3 credentials).
+        #[arg(short, long, default_value = "keplor.toml")]
+        config: PathBuf,
+        /// Archive events older than this many days (overrides config).
+        #[arg(long)]
+        older_than_days: Option<u32>,
+    },
+    /// Show archive status and manifest summary.
+    ArchiveStatus {
+        /// Path to the SQLite database.
+        #[arg(short, long, default_value = "keplor.db")]
+        db: PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
@@ -88,6 +104,9 @@ fn main() -> Result<()> {
         Cli::Stats { db } => stats(db),
         Cli::Gc { older_than_days, db } => gc(db, older_than_days),
         Cli::Rollup { days, db } => rollup(db, days),
+        #[cfg(feature = "s3")]
+        Cli::Archive { config, older_than_days } => archive(config, older_than_days),
+        Cli::ArchiveStatus { db } => archive_status(db),
     }
 }
 
@@ -103,6 +122,7 @@ fn run_server(config_path: PathBuf, json_logs: bool) -> Result<()> {
     };
 
     config.validate().map_err(|e| anyhow::anyhow!("invalid config: {e}"))?;
+    config.warn_risky_defaults();
 
     if config.auth.api_keys.is_empty() {
         tracing::warn!("API key authentication is DISABLED — all ingestion endpoints are open");
@@ -117,41 +137,13 @@ fn run_server(config_path: PathBuf, json_logs: bool) -> Result<()> {
         // Install Prometheus recorder (must be before any metrics calls).
         let metrics_handle = keplor_server::install_metrics_recorder();
 
-        // Open storage, optionally with external blob store.
+        // Open storage.
         let store = {
             let db_path = &config.storage.db_path;
             let pool_size = config.storage.read_pool_size;
 
-            #[cfg(feature = "s3")]
-            let mut store = if let Some(ref blob_cfg) = config.blob_storage {
-                let s3 = keplor_store::blob::s3::S3BlobStore::new(
-                    blob_cfg,
-                    tokio::runtime::Handle::current(),
-                )
-                .with_context(|| "failed to initialize S3 blob store")?;
-                tracing::info!(
-                    bucket = blob_cfg.bucket,
-                    endpoint = blob_cfg.endpoint,
-                    "external blob store configured"
-                );
-                keplor_store::Store::open_with_blob_store(db_path, pool_size, Box::new(s3))
-                    .with_context(|| format!("failed to open db at {}", db_path.display()))?
-            } else {
-                keplor_store::Store::open_with_pool_size(db_path, pool_size)
-                    .with_context(|| format!("failed to open db at {}", db_path.display()))?
-            };
-
-            #[cfg(not(feature = "s3"))]
-            let mut store = keplor_store::Store::open_with_pool_size(db_path, pool_size)
+            let store = keplor_store::Store::open_with_pool_size(db_path, pool_size)
                 .with_context(|| format!("failed to open db at {}", db_path.display()))?;
-
-            if config.storage.blob_offload_threshold_mb > 0 {
-                store.set_offload_threshold_mb(config.storage.blob_offload_threshold_mb);
-                tracing::info!(
-                    threshold_mb = config.storage.blob_offload_threshold_mb,
-                    "smart blob offloading enabled"
-                );
-            }
 
             Arc::new(store)
         };
@@ -159,6 +151,7 @@ fn run_server(config_path: PathBuf, json_logs: bool) -> Result<()> {
         // Spawn batch writer.
         let batch_config = keplor_store::BatchConfig {
             batch_size: config.pipeline.batch_size,
+            channel_capacity: config.pipeline.channel_capacity,
             ..keplor_store::BatchConfig::default()
         };
         let writer = Arc::new(keplor_store::BatchWriter::new(Arc::clone(&store), batch_config));
@@ -197,7 +190,8 @@ fn run_server(config_path: PathBuf, json_logs: bool) -> Result<()> {
             config.auth.api_key_entries.clone(),
             &config.retention.default_tier,
         );
-        let server = keplor_server::PipelineServer::new(pipeline, keys, &config, metrics_handle);
+        let server = keplor_server::PipelineServer::new(pipeline, keys, &config, metrics_handle)
+            .context("failed to build server")?;
 
         tracing::info!("keplor starting");
         server.run().await.context("server error")
@@ -280,23 +274,15 @@ fn stats(db: PathBuf) -> Result<()> {
     let total_events = if events.is_empty() {
         0
     } else {
-        // Count by querying with a large limit.
         store.query(&filter, u32::MAX, None).map(|e| e.len()).unwrap_or(0)
     };
 
-    let blob_count = store.blob_count().unwrap_or(0);
-    let compressed = store.total_compressed_bytes().unwrap_or(0);
-    let uncompressed = store.total_uncompressed_bytes().unwrap_or(0);
+    let db_size = store.db_size_bytes().unwrap_or(0);
 
     println!("=== Keplor Storage Statistics ===");
     println!("Database:             {}", db.display());
     println!("Total events:         {total_events}");
-    println!("Unique blobs:         {blob_count}");
-    println!("Compressed size:      {} bytes", compressed);
-    println!("Uncompressed size:    {} bytes", uncompressed);
-    if compressed > 0 {
-        println!("Compression ratio:    {:.1}x", uncompressed as f64 / compressed as f64);
-    }
+    println!("Database size:        {:.2} MB", db_size as f64 / (1024.0 * 1024.0));
     Ok(())
 }
 
@@ -315,8 +301,8 @@ fn gc(db: PathBuf, older_than_days: u32) -> Result<()> {
 
     let stats = store.gc_expired(cutoff_ns).context("gc failed")?;
     println!(
-        "GC complete: deleted {} events, {} orphaned blobs (cutoff: {} days ago)",
-        stats.events_deleted, stats.blobs_deleted, older_than_days
+        "GC complete: deleted {} events (cutoff: {} days ago)",
+        stats.events_deleted, older_than_days
     );
     Ok(())
 }
@@ -338,6 +324,95 @@ fn rollup(db: PathBuf, days: u32) -> Result<()> {
     }
 
     println!("rolled up {days} days ending at {today} (epoch seconds)");
+    Ok(())
+}
+
+#[cfg(feature = "s3")]
+fn archive(config_path: PathBuf, older_than_days_override: Option<u32>) -> Result<()> {
+    init_tracing(false);
+
+    let config = keplor_server::ServerConfig::load(&config_path)
+        .with_context(|| format!("failed to load config from {}", config_path.display()))?;
+
+    let archive_cfg =
+        config.archive.as_ref().ok_or_else(|| anyhow::anyhow!("no [archive] section in config"))?;
+
+    let store = Arc::new(
+        keplor_store::Store::open_with_pool_size(
+            &config.storage.db_path,
+            config.storage.read_pool_size,
+        )
+        .with_context(|| format!("failed to open db at {}", config.storage.db_path.display()))?,
+    );
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("failed to build tokio runtime")?;
+
+    let s3_config = keplor_store::ArchiveS3Config {
+        bucket: archive_cfg.bucket.clone(),
+        endpoint: archive_cfg.endpoint.clone(),
+        region: archive_cfg.region.clone(),
+        access_key_id: archive_cfg.access_key_id.clone(),
+        secret_access_key: archive_cfg.secret_access_key.clone(),
+        prefix: archive_cfg.prefix.clone(),
+        path_style: archive_cfg.path_style,
+    };
+
+    let archiver = keplor_store::Archiver::new(Arc::clone(&store), &s3_config, rt.handle().clone())
+        .context("failed to initialize archiver")?;
+
+    let days = older_than_days_override.map(u64::from).unwrap_or(archive_cfg.archive_after_days);
+
+    let cutoff_ns = {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .context("system clock error")?
+            .as_nanos() as i64;
+        now - (days as i64) * 86_400 * 1_000_000_000
+    };
+
+    let result = archiver
+        .archive_old_events(cutoff_ns, archive_cfg.archive_batch_size)
+        .context("archive failed")?;
+
+    println!(
+        "Archive complete: {} events archived, {} files uploaded, {:.2} MB compressed",
+        result.events_archived,
+        result.files_uploaded,
+        result.compressed_bytes as f64 / (1024.0 * 1024.0),
+    );
+    Ok(())
+}
+
+fn archive_status(db: PathBuf) -> Result<()> {
+    let store = keplor_store::Store::open(&db)
+        .with_context(|| format!("failed to open db at {}", db.display()))?;
+
+    let (files, events, bytes) = store.archive_summary().context("query archive summary")?;
+
+    println!("=== Archive Status ===");
+    println!("Database:        {}", db.display());
+    println!("Archive files:   {files}");
+    println!("Archived events: {events}");
+    println!("Compressed size: {:.2} MB", bytes as f64 / (1024.0 * 1024.0));
+
+    if files > 0 {
+        let manifests = store.list_archives(None, None, None).unwrap_or_default();
+        // Show per-user breakdown.
+        let mut user_counts: std::collections::BTreeMap<String, (usize, usize)> =
+            std::collections::BTreeMap::new();
+        for m in &manifests {
+            let entry = user_counts.entry(m.user_id.clone()).or_default();
+            entry.0 += m.event_count;
+            entry.1 += m.compressed_bytes;
+        }
+        println!("\nPer-user breakdown:");
+        for (user, (count, bytes)) in &user_counts {
+            println!("  {user}: {count} events, {:.2} MB", *bytes as f64 / (1024.0 * 1024.0));
+        }
+    }
     Ok(())
 }
 

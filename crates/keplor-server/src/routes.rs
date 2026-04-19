@@ -85,8 +85,10 @@ pub async fn ingest_batch(
     let mut rejected = 0usize;
 
     if durable {
-        for event in batch.events {
-            match state.pipeline.ingest(event, key_id.as_deref(), None, &tier).await {
+        let batch_results =
+            state.pipeline.ingest_batch_durable(batch.events, key_id.as_deref(), &tier).await;
+        for result in batch_results {
+            match result {
                 Ok(resp) => {
                     accepted += 1;
                     results.push(BatchItemResult::Ok(resp));
@@ -186,6 +188,8 @@ pub struct EventListResponse {
     pub events: Vec<EventResponse>,
     pub cursor: Option<i64>,
     pub has_more: bool,
+    /// Whether archived (S3) data exists for the queried time range.
+    pub has_archived_data: bool,
 }
 
 /// `GET /v1/events` — query stored events with filtering and pagination.
@@ -255,10 +259,21 @@ pub async fn query_events(
         })
         .collect();
 
+    // Check if archived data exists for this time range.
+    let from_ts = params.from;
+    let to_ts = params.to;
+    let archive_store = state.pipeline.store_arc();
+    let has_archived_data = tokio::task::spawn_blocking(move || {
+        archive_store.has_archived_data(from_ts, to_ts).unwrap_or(false)
+    })
+    .await
+    .unwrap_or(false);
+
     Ok(Json(EventListResponse {
         events: responses,
         cursor: if has_more { next_cursor } else { None },
         has_more,
+        has_archived_data,
     }))
 }
 
