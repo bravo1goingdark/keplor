@@ -9,7 +9,7 @@
 # listen_addr = "0.0.0.0:8080"
 # shutdown_timeout_secs = 25       # drain batch writer + WAL checkpoint
 # request_timeout_secs = 30        # per-request timeout (408 on expiry)
-# max_connections = 10000           # concurrent connection limit
+# max_connections = 10000           # concurrent connection limit (raise to 65000 for 50K+ users)
 
 # ── Storage ──────────────────────────────────────────────────────────────
 [storage]
@@ -18,9 +18,7 @@ db_path = "/var/lib/keplor/keplor.db"   # SQLite database path
 # wal_checkpoint_secs = 300        # WAL checkpoint interval (0 = disabled)
 # max_db_size_mb = 0               # max database size in MB (0 = unlimited)
                                     # returns HTTP 507 when exceeded
-# read_pool_size = 4               # number of SQLite read connections (1-64)
-# blob_offload_threshold_mb = 0    # auto-offload blobs to S3/R2 when SQLite
-                                    # exceeds this size (0 = manual mode)
+# read_pool_size = 4               # number of SQLite read connections (1-64, use 16 for high concurrency)
 
 # ── Authentication ───────────────────────────────────────────────────────
 # When empty, all endpoints are open (no auth required).
@@ -81,8 +79,9 @@ days = 90
 
 # ── Pipeline ─────────────────────────────────────────────────────────────
 [pipeline]
-# batch_size = 64                  # max events per batch write
+# batch_size = 64                  # max events per batch write (use 256 for high throughput)
 # max_body_bytes = 10485760        # 10 MB max request body
+# channel_capacity = 32768         # batch writer queue depth (raise for bursty traffic)
 
 # ── Idempotency ──────────────────────────────────────────────────────────
 [idempotency]
@@ -96,18 +95,23 @@ days = 90
 # requests_per_second = 100.0
 # burst = 200
 
-# ── Blob storage (optional, requires --features s3) ──────────────────────
-# By default, request/response bodies are stored in the SQLite database.
-# Uncomment to offload blob data to an S3-compatible object store
-# (Cloudflare R2, MinIO, AWS S3). Metadata stays in SQLite.
-# [blob_storage]
-# bucket = "keplor-blobs"
+# ── Event archival (optional, requires --features s3) ────────────────────
+# Archive old events to S3/R2 as compressed JSONL files.
+# Archived events are deleted from SQLite to keep it lean.
+# Daily rollups are preserved and queryable regardless of archival.
+# [archive]
+# bucket = "keplor-archive"
 # endpoint = "https://<account-id>.r2.cloudflarestorage.com"
-# region = "auto"                    # "auto" for R2, "us-east-1" for AWS
+# region = "auto"
 # access_key_id = "your-access-key"
 # secret_access_key = "your-secret-key"
-# prefix = ""                        # optional key prefix (e.g. "blobs/")
-# path_style = false                 # true for MinIO
+# prefix = "events"
+# path_style = false
+# archive_after_days = 30           # archive events older than 30 days
+# archive_after_hours = 0           # sub-day: archive events older than N hours (overrides days)
+# archive_threshold_mb = 500        # or when SQLite exceeds 500 MB
+# archive_batch_size = 10000        # events per JSONL file
+# archive_interval_secs = 3600      # how often the archive loop runs (default: 1 hour)
 
 # ── TLS (optional) ───────────────────────────────────────────────────────
 # Uncomment to enable HTTPS. Both cert_path and key_path are required.

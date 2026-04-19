@@ -19,6 +19,7 @@ FROM alpine:3.20 AS runtime
 RUN addgroup -S keplor && adduser -S keplor -G keplor
 
 COPY --from=builder /build/target/x86_64-unknown-linux-musl/release/keplor /usr/local/bin/keplor
+COPY --from=builder /build/keplor.example.toml /etc/keplor/keplor.toml
 
 RUN mkdir -p /var/lib/keplor && chown keplor:keplor /var/lib/keplor
 

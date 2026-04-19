@@ -61,7 +61,7 @@
     <text x="200" y="60" font-family="'Space Grotesk', system-ui, sans-serif" font-size="28" font-weight="500" fill="#f0f0f0">&lt;10 MB</text>
     <text x="200" y="84" font-family="'DM Mono', monospace" font-size="12" fill="rgba(240,240,240,0.3)" letter-spacing="0.5">BINARY SIZE</text>
 
-    <text x="440" y="60" font-family="'Space Grotesk', system-ui, sans-serif" font-size="28" font-weight="500" fill="#f0f0f0">368K/s</text>
+    <text x="440" y="60" font-family="'Space Grotesk', system-ui, sans-serif" font-size="28" font-weight="500" fill="#f0f0f0">261K/s</text>
     <text x="440" y="84" font-family="'DM Mono', monospace" font-size="12" fill="rgba(240,240,240,0.3)" letter-spacing="0.5">THROUGHPUT</text>
 
     <text x="680" y="60" font-family="'Space Grotesk', system-ui, sans-serif" font-size="28" font-weight="500" fill="#f0f0f0">2,263</text>

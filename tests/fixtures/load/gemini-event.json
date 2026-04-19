@@ -1,0 +1,34 @@
+{
+  "model": "gemini-2.0-flash",
+  "provider": "gemini",
+  "usage": {
+    "input_tokens": 200,
+    "output_tokens": 120
+  },
+  "latency": {
+    "ttft_ms": 18,
+    "total_ms": 180
+  },
+  "http_status": 200,
+  "source": "load-test",
+  "user_id": "bench-user",
+  "endpoint": "/v1beta/models/gemini-2.0-flash:generateContent",
+  "request_body": {
+    "contents": [
+      {"role": "user", "parts": [{"text": "Summarize the key differences between REST and GraphQL APIs."}]}
+    ],
+    "generationConfig": {"maxOutputTokens": 256}
+  },
+  "response_body": {
+    "candidates": [
+      {
+        "content": {
+          "parts": [{"text": "REST uses fixed endpoints while GraphQL uses a single endpoint with flexible queries."}],
+          "role": "model"
+        },
+        "finishReason": "STOP"
+      }
+    ],
+    "usageMetadata": {"promptTokenCount": 200, "candidatesTokenCount": 120, "totalTokenCount": 320}
+  }
+}

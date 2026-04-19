@@ -1,0 +1,39 @@
+{
+  "model": "claude-sonnet-4-20250514",
+  "provider": "anthropic",
+  "usage": {
+    "input_tokens": 800,
+    "output_tokens": 400,
+    "cache_read_input_tokens": 150
+  },
+  "latency": {
+    "ttft_ms": 35,
+    "total_ms": 1100
+  },
+  "http_status": 200,
+  "source": "load-test",
+  "user_id": "bench-user",
+  "endpoint": "/v1/messages",
+  "flags": {
+    "streaming": true,
+    "cache_used": true
+  },
+  "request_body": {
+    "model": "claude-sonnet-4-20250514",
+    "max_tokens": 1024,
+    "system": "You are a helpful coding assistant.",
+    "messages": [
+      {"role": "user", "content": "Write a Rust function that implements binary search on a sorted slice."}
+    ]
+  },
+  "response_body": {
+    "id": "msg_bench001",
+    "type": "message",
+    "role": "assistant",
+    "content": [
+      {"type": "text", "text": "Here's a binary search implementation in Rust using generics."}
+    ],
+    "model": "claude-sonnet-4-20250514",
+    "usage": {"input_tokens": 800, "output_tokens": 400}
+  }
+}

@@ -1,0 +1,48 @@
+{
+  "model": "gpt-4o",
+  "provider": "openai",
+  "usage": {
+    "input_tokens": 150,
+    "output_tokens": 80
+  },
+  "latency": {
+    "ttft_ms": 22,
+    "total_ms": 245
+  },
+  "http_status": 200,
+  "source": "load-test",
+  "user_id": "bench-user",
+  "endpoint": "/v1/chat/completions",
+  "flags": {
+    "streaming": true
+  },
+  "request_body": {
+    "model": "gpt-4o",
+    "messages": [
+      {"role": "system", "content": "You are a helpful assistant."},
+      {"role": "user", "content": "Explain the concept of gravitational lensing in astrophysics and how it has been used to detect dark matter in galaxy clusters."}
+    ],
+    "stream": true,
+    "max_tokens": 512
+  },
+  "response_body": {
+    "id": "chatcmpl-bench001",
+    "object": "chat.completion",
+    "model": "gpt-4o-2024-08-06",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "Gravitational lensing is a phenomenon predicted by Einstein's general theory of relativity, where the path of light is bent as it passes near a massive object."
+        },
+        "finish_reason": "stop"
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 150,
+      "completion_tokens": 80,
+      "total_tokens": 230
+    }
+  }
+}

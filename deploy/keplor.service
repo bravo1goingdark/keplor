@@ -1,0 +1,33 @@
+[Unit]
+Description=Keplor — LLM log ingestion and cost-accounting server
+Documentation=https://github.com/bravo1goingdark/keplor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=keplor
+Group=keplor
+ExecStart=/usr/local/bin/keplor run --config /etc/keplor/keplor.toml
+Restart=on-failure
+RestartSec=5
+
+# Hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+
+# Allow writing to the database and log directories
+ReadWritePaths=/var/lib/keplor
+
+# Resource limits
+LimitNOFILE=131072
+MemoryMax=1G
+
+# Graceful shutdown: SIGTERM → drain batch writer (25s) → SIGKILL
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
