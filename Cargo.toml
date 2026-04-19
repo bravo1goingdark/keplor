@@ -41,6 +41,14 @@ opt-level = 0
 [profile.test]
 opt-level = 0
 
+[profile.bench]
+opt-level     = 3
+debug         = 2          # full DWARF symbols for flamegraphs
+lto           = false      # fast bench builds (release uses fat LTO)
+codegen-units = 16         # parallel codegen for bench compilation speed
+strip         = false      # keep symbols (release strips them)
+incremental   = false
+
 [workspace.dependencies]
 # --- async runtime + HTTP stack ---
 tokio                  = { version = "1" }

@@ -1,28 +1,40 @@
 //! [`Store`] — the local SQLite-backed storage engine.
-//!
-//! Blob data storage is pluggable via the [`crate::blob::BlobStore`] trait.
-//! When no external blob store is configured, blobs live in the SQLite
-//! `payload_blobs.data` column (embedded mode).  When an external store
-//! (e.g. S3/R2) is configured, the `data` column is `NULL` and blob
-//! bytes are stored externally.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
-use bytes::Bytes;
 use rusqlite::{params, Connection, OptionalExtension};
-use sha2::{Digest, Sha256};
 use smol_str::SmolStr;
 
 use keplor_core::{EventFlags, EventId, Latencies, LlmEvent, Provider, ProviderError, Usage};
 
-use crate::blob::BlobStore;
-use crate::components::{split_request, split_response, ComponentType};
-use crate::compress::ZstdCoder;
 use crate::error::StoreError;
 use crate::filter::{Cursor, EventFilter};
 use crate::migrations;
+
+/// Manifest row for an archived event chunk in S3/R2.
+#[derive(Debug, Clone, Default)]
+pub struct ArchiveManifest {
+    /// Unique archive chunk id (ULID).
+    pub archive_id: String,
+    /// User id that owns these events (`"_none"` if absent).
+    pub user_id: String,
+    /// Day partition as `YYYY-MM-DD`.
+    pub day: String,
+    /// Full S3 key.
+    pub s3_key: String,
+    /// Number of events in this chunk.
+    pub event_count: usize,
+    /// Earliest event timestamp (nanoseconds).
+    pub min_ts_ns: i64,
+    /// Latest event timestamp (nanoseconds).
+    pub max_ts_ns: i64,
+    /// Compressed file size in bytes.
+    pub compressed_bytes: usize,
+    /// When this archive was created (epoch seconds).
+    pub created_at: i64,
+}
 
 /// Statistics returned by [`Store::gc_expired`].
 #[derive(Debug, Clone, Default)]
@@ -170,7 +182,7 @@ impl ConnOpener for MemoryOpener {
     }
 }
 
-/// Local SQLite store for LLM events and their payload blobs.
+/// Local SQLite store for LLM events.
 ///
 /// Uses a **read/write split** connection pool:
 /// - One dedicated write connection (`write_conn`) for all mutations
@@ -183,54 +195,28 @@ pub struct Store {
     write_conn: Mutex<Connection>,
     read_pool: Vec<Mutex<Connection>>,
     read_idx: AtomicUsize,
-    coder: ZstdCoder,
-    /// External blob store.  `None` = embedded mode (blobs in SQLite).
-    blob_store: Option<Box<dyn BlobStore>>,
-    /// When > 0 and `blob_store` is Some, auto-offload new blobs to
-    /// external store when SQLite exceeds this size in bytes.
-    offload_threshold_bytes: u64,
-    /// True when SQLite has exceeded `offload_threshold_bytes`.
-    /// Re-evaluated on each batch flush.
-    offloading_active: AtomicBool,
 }
 
 impl std::fmt::Debug for Store {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Store")
             .field("read_pool_size", &self.read_pool.len())
-            .field("blob_backend", &if self.blob_store.is_some() { "external" } else { "embedded" })
             .finish_non_exhaustive()
     }
 }
 
 impl Store {
-    /// Open (or create) a store at the given path (embedded blob mode).
+    /// Open (or create) a store at the given path.
     pub fn open(path: &Path) -> Result<Self, StoreError> {
         Self::open_with_pool_size(path, DEFAULT_READ_POOL_SIZE)
     }
 
-    /// Open a store with a custom read pool size (embedded blob mode).
+    /// Open a store with a custom read pool size.
     pub fn open_with_pool_size(path: &Path, read_pool_size: usize) -> Result<Self, StoreError> {
         let pool_size = read_pool_size.max(1);
         let write_conn = Connection::open(path)?;
         let opener = FileOpener(path.to_path_buf());
-        Self::init(write_conn, &opener, pool_size, None)
-    }
-
-    /// Open a store with an external blob backend (S3/R2/MinIO).
-    ///
-    /// Event metadata and blob metadata (refcount, sizes, compression)
-    /// live in SQLite.  Blob data bytes are stored via the provided
-    /// [`BlobStore`] implementation.
-    pub fn open_with_blob_store(
-        path: &Path,
-        read_pool_size: usize,
-        blob_store: Box<dyn BlobStore>,
-    ) -> Result<Self, StoreError> {
-        let pool_size = read_pool_size.max(1);
-        let write_conn = Connection::open(path)?;
-        let opener = FileOpener(path.to_path_buf());
-        Self::init(write_conn, &opener, pool_size, Some(blob_store))
+        Self::init(write_conn, &opener, pool_size)
     }
 
     /// Open an in-memory store (for tests).
@@ -244,63 +230,16 @@ impl Store {
         let uri = format!("file:keplor_mem_{id}?mode=memory&cache=shared");
         let write_conn = Connection::open(&uri)?;
         let opener = MemoryOpener(uri);
-        Self::init(write_conn, &opener, DEFAULT_READ_POOL_SIZE, None)
-    }
-
-    /// Whether an external blob store is configured.
-    pub fn has_external_blob_store(&self) -> bool {
-        self.blob_store.is_some()
-    }
-
-    /// Set the SQLite size threshold (in MB) for automatic blob offloading.
-    ///
-    /// When `threshold_mb > 0` and an external blob store is configured,
-    /// new blobs are written to the external store once SQLite exceeds
-    /// this size.  When GC brings the database back under the threshold,
-    /// new blobs go back to SQLite.  Set to `0` to disable (manual mode).
-    pub fn set_offload_threshold_mb(&mut self, threshold_mb: u64) {
-        self.offload_threshold_bytes = threshold_mb * 1024 * 1024;
-    }
-
-    /// Re-evaluate whether blob offloading should be active.
-    ///
-    /// Called once per batch flush.  Checks `db_size_bytes()` against
-    /// the configured threshold and flips the `offloading_active` flag.
-    fn refresh_offload_state(&self) {
-        if self.offload_threshold_bytes == 0 || self.blob_store.is_none() {
-            return;
-        }
-        let active =
-            self.db_size_bytes().map(|size| size >= self.offload_threshold_bytes).unwrap_or(false);
-        self.offloading_active.store(active, Ordering::Relaxed);
-    }
-
-    /// Whether blobs should currently go to the external store.
-    ///
-    /// True when: blob_store is configured AND either (a) no threshold
-    /// is set (always external) or (b) threshold is set and SQLite
-    /// exceeds it.
-    fn should_use_external_blobs(&self) -> bool {
-        if self.blob_store.is_none() {
-            return false;
-        }
-        if self.offload_threshold_bytes == 0 {
-            // No threshold = always external when configured.
-            return true;
-        }
-        self.offloading_active.load(Ordering::Relaxed)
+        Self::init(write_conn, &opener, DEFAULT_READ_POOL_SIZE)
     }
 
     fn init(
         write_conn: Connection,
         opener: &dyn ConnOpener,
         pool_size: usize,
-        blob_store: Option<Box<dyn BlobStore>>,
     ) -> Result<Self, StoreError> {
         migrations::apply_pragmas(&write_conn)?;
         migrations::migrate(&write_conn)?;
-        let mut coder = ZstdCoder::new();
-        Self::load_dicts(&write_conn, &mut coder)?;
 
         let mut read_pool = Vec::with_capacity(pool_size);
         for _ in 0..pool_size {
@@ -309,15 +248,7 @@ impl Store {
             read_pool.push(Mutex::new(rc));
         }
 
-        Ok(Self {
-            write_conn: Mutex::new(write_conn),
-            read_pool,
-            read_idx: AtomicUsize::new(0),
-            coder,
-            blob_store,
-            offload_threshold_bytes: 0,
-            offloading_active: AtomicBool::new(false),
-        })
+        Ok(Self { write_conn: Mutex::new(write_conn), read_pool, read_idx: AtomicUsize::new(0) })
     }
 
     /// Acquire a read connection from the pool (round-robin).
@@ -331,56 +262,38 @@ impl Store {
         self.write_conn.lock().map_err(|e| StoreError::LockPoisoned(e.to_string()))
     }
 
-    /// Append an event with its raw request/response bodies.
+    /// Append a single event.
+    pub fn append_event(&self, event: &LlmEvent) -> Result<EventId, StoreError> {
+        let conn = self.write_conn()?;
+        Self::insert_event(&conn, event)?;
+        Ok(event.id)
+    }
+
+    /// Append a batch of events in a single transaction.
     ///
-    /// Bodies are split into components, SHA-256 hashed, compressed, and
-    /// stored with refcount-based deduplication.  Compression is skipped
-    /// entirely on dedup hits.
-    pub fn append_event(
-        &self,
-        event: &LlmEvent,
-        req_body: &Bytes,
-        resp_body: &Bytes,
-    ) -> Result<EventId, StoreError> {
-        let request_sha = sha256_bytes(req_body);
-        let response_sha = sha256_bytes(resp_body);
-
-        let req_components = split_request(&event.provider, req_body);
-        let resp_components = split_response(resp_body);
-
-        let provider_key = event.provider.id_key();
+    /// Prepared statements are reused across all events.
+    pub fn append_batch(&self, events: &[LlmEvent]) -> Result<Vec<EventId>, StoreError> {
+        if events.is_empty() {
+            return Ok(Vec::new());
+        }
 
         let conn = self.write_conn()?;
         let tx = conn.unchecked_transaction()?;
 
-        let mut request_blob_id: Option<[u8; 32]> = None;
-        let mut response_blob_id: Option<[u8; 32]> = None;
-        let mut component_links: Vec<(&str, [u8; 32])> =
-            Vec::with_capacity(req_components.len() + resp_components.len());
-
-        for comp in &req_components {
-            let sha = sha256_bytes(&comp.data);
-            self.upsert_blob(&tx, &sha, &comp.data, comp.kind.as_str(), provider_key)?;
-            component_links.push((comp.kind.as_str(), sha));
-            if comp.kind == ComponentType::Messages || comp.kind == ComponentType::Raw {
-                request_blob_id = Some(sha);
+        {
+            let mut stmt = Self::prepare_insert(&tx)?;
+            for event in events {
+                Self::execute_insert(&mut stmt, event)?;
             }
         }
 
-        for comp in &resp_components {
-            let sha = sha256_bytes(&comp.data);
-            self.upsert_blob(&tx, &sha, &comp.data, comp.kind.as_str(), provider_key)?;
-            component_links.push((comp.kind.as_str(), sha));
-            response_blob_id = Some(sha);
-        }
+        tx.commit()?;
+        Ok(events.iter().map(|e| e.id).collect())
+    }
 
-        let error_type = event.error.as_ref().map(error_type_str);
-        let error_message = event.error.as_ref().map(|e| e.to_string());
-
-        let metadata_str =
-            event.metadata.as_ref().map(|v| serde_json::to_string(v).unwrap_or_default());
-
-        tx.execute(
+    /// Shared INSERT statement preparation.
+    fn prepare_insert(conn: &Connection) -> Result<rusqlite::CachedStatement<'_>, StoreError> {
+        Ok(conn.prepare_cached(
             "INSERT INTO llm_events(
                 id, ts_ns, user_id, api_key_id, org_id, project_id, route_id,
                 provider, model, model_family, endpoint, method, http_status,
@@ -404,440 +317,76 @@ impl Store {
                 ?37, ?38, ?39, ?40,
                 ?41, ?42, ?43, ?44
              )",
-            params![
-                event.id.as_ulid().to_bytes().as_slice(),
-                event.ts_ns,
-                event.user_id.as_ref().map(|u| u.as_str()),
-                event.api_key_id.as_ref().map(|a| a.as_str()),
-                event.org_id.as_ref().map(|o| o.as_str()),
-                event.project_id.as_ref().map(|p| p.as_str()),
-                event.route_id.as_str(),
-                provider_key,
-                event.model.as_str(),
-                event.model_family.as_deref(),
-                event.endpoint.as_str(),
-                event.method.as_str(),
-                event.http_status.map(i64::from),
-                i64::from(event.usage.input_tokens),
-                i64::from(event.usage.output_tokens),
-                i64::from(event.usage.cache_read_input_tokens),
-                i64::from(event.usage.cache_creation_input_tokens),
-                i64::from(event.usage.reasoning_tokens),
-                i64::from(event.usage.audio_input_tokens),
-                i64::from(event.usage.audio_output_tokens),
-                i64::from(event.usage.image_tokens),
-                i64::from(event.usage.tool_use_tokens),
-                event.cost_nanodollars,
-                event.latency.ttft_ms.map(i64::from),
-                i64::from(event.latency.total_ms),
-                event.latency.time_to_close_ms.map(i64::from),
-                event.flags.contains(EventFlags::STREAMING) as i64,
-                event.flags.contains(EventFlags::TOOL_CALLS) as i64,
-                event.flags.contains(EventFlags::REASONING) as i64,
-                event.flags.contains(EventFlags::STREAM_INCOMPLETE) as i64,
-                error_type,
-                error_message,
-                &request_sha[..],
-                &response_sha[..],
-                request_blob_id.as_ref().map(|b| &b[..]),
-                response_blob_id.as_ref().map(|b| &b[..]),
-                event.client_ip.map(|ip| ip.to_string()),
-                event.user_agent.as_deref(),
-                event.request_id.as_deref(),
-                event.trace_id.map(|t| t.to_string()),
-                event.source.as_deref(),
-                event.ingested_at,
-                metadata_str.as_deref(),
-                event.tier.as_str(),
-            ],
-        )?;
-
-        let event_id_bytes = event.id.as_ulid().to_bytes();
-        for (comp_type, blob_sha) in &component_links {
-            tx.execute(
-                "INSERT OR IGNORE INTO event_components(event_id, component_type, blob_sha256)
-                 VALUES(?1, ?2, ?3)",
-                params![&event_id_bytes[..], comp_type, &blob_sha[..]],
-            )?;
-        }
-
-        tx.commit()?;
-        Ok(event.id)
+        )?)
     }
 
-    /// Append a batch of events in a single transaction.
-    ///
-    /// All SHA-256 hashing and zstd compression runs **before** the mutex
-    /// is acquired, so the lock is held only for the SQLite writes.
-    /// Compression is skipped for blobs already seen within the batch.
-    /// Prepared statements are reused across all events.
-    pub fn append_batch(
-        &self,
-        events: &[(LlmEvent, Bytes, Bytes)],
-    ) -> Result<Vec<EventId>, StoreError> {
-        if events.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        // ── Pre-lock: hash + split + compress (dedup within batch) ────
-        let mut seen_shas: std::collections::HashSet<[u8; 32]> =
-            std::collections::HashSet::with_capacity(events.len() * 3);
-        let mut unique_blobs: Vec<PreparedBlob> = Vec::with_capacity(events.len() * 3);
-
-        struct BatchEvent<'a> {
-            event: &'a LlmEvent,
-            event_id_bytes: [u8; 16],
-            provider_key: &'a str,
-            request_sha: [u8; 32],
-            response_sha: [u8; 32],
-            request_blob_id: Option<[u8; 32]>,
-            response_blob_id: Option<[u8; 32]>,
-            component_links: Vec<(&'static str, [u8; 32])>,
-            error_type: Option<&'static str>,
-            error_message: Option<String>,
-            // Pre-formatted outside the lock to avoid allocations under Mutex.
-            client_ip_str: Option<String>,
-            trace_id_str: Option<String>,
-            metadata_str: Option<String>,
-        }
-
-        let mut batch_events: Vec<BatchEvent<'_>> = Vec::with_capacity(events.len());
-
-        for (event, req_body, resp_body) in events {
-            // Reuse pre-computed SHAs from LlmEvent when available (non-zero),
-            // avoiding redundant SHA-256 computations on the hot path.
-            let request_sha = if event.request_sha256 != [0u8; 32] {
-                event.request_sha256
-            } else {
-                sha256_bytes(req_body)
-            };
-            let response_sha = if event.response_sha256 != [0u8; 32] {
-                event.response_sha256
-            } else {
-                sha256_bytes(resp_body)
-            };
-            let provider_key = event.provider.id_key();
-
-            let req_components = split_request(&event.provider, req_body);
-            let resp_components = split_response(resp_body);
-
-            let total = req_components.len() + resp_components.len();
-            let mut component_links = Vec::with_capacity(total);
-            let mut request_blob_id: Option<[u8; 32]> = None;
-            let mut response_blob_id: Option<[u8; 32]> = None;
-
-            for comp in req_components.iter().chain(resp_components.iter()) {
-                let sha = sha256_bytes(&comp.data);
-                component_links.push((comp.kind.as_str(), sha));
-
-                if comp.kind == ComponentType::Messages || comp.kind == ComponentType::Raw {
-                    request_blob_id = Some(sha);
-                }
-                if comp.kind == ComponentType::Response {
-                    response_blob_id = Some(sha);
-                }
-
-                if seen_shas.insert(sha) {
-                    let dict_key = crate::compress::DictKey {
-                        provider: provider_key.into(),
-                        component_type: comp.kind.as_str().into(),
-                    };
-                    let has_dict = self.coder.has_dict(&dict_key);
-                    let compressed = self.coder.compress(&comp.data, Some(&dict_key))?;
-                    let (compression, dict_id) = if has_dict {
-                        let id = smol_str::SmolStr::new(format!(
-                            "{}_{}",
-                            provider_key,
-                            comp.kind.as_str()
-                        ));
-                        ("zstd_dict", Some(id))
-                    } else {
-                        ("zstd_raw", None)
-                    };
-                    unique_blobs.push(PreparedBlob {
-                        sha,
-                        component_type: comp.kind.as_str(),
-                        provider_key,
-                        uncompressed_len: comp.data.len(),
-                        compressed,
-                        compression,
-                        dict_id,
-                    });
-                }
-            }
-
-            batch_events.push(BatchEvent {
-                event,
-                event_id_bytes: event.id.as_ulid().to_bytes(),
-                provider_key,
-                request_sha,
-                response_sha,
-                request_blob_id,
-                response_blob_id,
-                component_links,
-                error_type: event.error.as_ref().map(error_type_str),
-                error_message: event.error.as_ref().map(|e| e.to_string()),
-                client_ip_str: event.client_ip.map(|ip| ip.to_string()),
-                trace_id_str: event.trace_id.map(|t| t.to_string()),
-                metadata_str: event.metadata.as_ref().and_then(|m| serde_json::to_string(m).ok()),
-            });
-        }
-
-        // ── Lock + single transaction ─────────────────────────────────
-        // Re-evaluate offload state before each batch flush.
-        self.refresh_offload_state();
-        let use_external = self.should_use_external_blobs();
-
-        let conn = self.write_conn()?;
-        let tx = conn.unchecked_transaction()?;
-
-        // Insert unique blobs with ON CONFLICT for cross-batch dedup.
-        {
-            if let Some(blob_store) = self.blob_store.as_ref().filter(|_| use_external) {
-                // External mode: metadata only in SQLite, data via BlobStore.
-                let mut blob_stmt = tx.prepare_cached(
-                    "INSERT INTO payload_blobs(
-                        sha256, component_type, provider, compression, dict_id,
-                        uncompressed_size, compressed_size, refcount, hit_count,
-                        data, first_seen_at
-                     ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, 0, NULL, strftime('%s','now'))
-                     ON CONFLICT(sha256) DO UPDATE SET
-                        refcount = refcount + 1,
-                        hit_count = hit_count + 1",
-                )?;
-                for blob in &unique_blobs {
-                    blob_stmt.execute(params![
-                        &blob.sha[..],
-                        blob.component_type,
-                        blob.provider_key,
-                        blob.compression,
-                        blob.dict_id.as_deref(),
-                        blob.uncompressed_len as i64,
-                        blob.compressed.len() as i64,
-                    ])?;
-                    blob_store.put(
-                        &blob.sha,
-                        &blob.compressed,
-                        crate::blob::BlobMeta {
-                            component_type: blob.component_type,
-                            provider: blob.provider_key,
-                        },
-                    )?;
-                }
-            } else {
-                // Embedded mode: data in payload_blobs.data column.
-                let mut blob_stmt = tx.prepare_cached(
-                    "INSERT INTO payload_blobs(
-                        sha256, component_type, provider, compression, dict_id,
-                        uncompressed_size, compressed_size, refcount, hit_count,
-                        data, first_seen_at
-                     ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, 0, ?8, strftime('%s','now'))
-                     ON CONFLICT(sha256) DO UPDATE SET
-                        refcount = refcount + 1,
-                        hit_count = hit_count + 1",
-                )?;
-                for blob in &unique_blobs {
-                    blob_stmt.execute(params![
-                        &blob.sha[..],
-                        blob.component_type,
-                        blob.provider_key,
-                        blob.compression,
-                        blob.dict_id.as_deref(),
-                        blob.uncompressed_len as i64,
-                        blob.compressed.len() as i64,
-                        &blob.compressed[..],
-                    ])?;
-                }
-            }
-
-            // Second pass: bump refcount for intra-batch duplicates.
-            // One UPDATE per duplicate SHA (instead of N-1 individual UPDATEs).
-            let mut bump_stmt = tx.prepare_cached(
-                "UPDATE payload_blobs SET refcount = refcount + ?1, hit_count = hit_count + ?1
-                 WHERE sha256 = ?2",
-            )?;
-            let mut ref_counts: std::collections::HashMap<[u8; 32], usize> =
-                std::collections::HashMap::with_capacity(unique_blobs.len());
-            for be in &batch_events {
-                for &(_, sha) in &be.component_links {
-                    *ref_counts.entry(sha).or_insert(0) += 1;
-                }
-            }
-            for (sha, count) in &ref_counts {
-                if *count > 1 {
-                    bump_stmt.execute(params![(*count - 1) as i64, &sha[..]])?;
-                }
-            }
-        }
-
-        {
-            let mut event_stmt = tx.prepare_cached(
-                "INSERT INTO llm_events(
-                    id, ts_ns, user_id, api_key_id, org_id, project_id, route_id,
-                    provider, model, model_family, endpoint, method, http_status,
-                    input_tokens, output_tokens, cache_read_input_tokens,
-                    cache_creation_input_tokens, reasoning_tokens,
-                    audio_input_tokens, audio_output_tokens, image_tokens, tool_use_tokens,
-                    cost_nanodollars, latency_ttft_ms, latency_total_ms, time_to_close_ms,
-                    streaming, tool_calls, reasoning, stream_incomplete,
-                    error_type, error_message,
-                    request_sha256, response_sha256, request_blob_id, response_blob_id,
-                    client_ip, user_agent, request_id, trace_id,
-                    source, ingested_at, metadata_json, tier
-                 ) VALUES(
-                    ?1, ?2, ?3, ?4, ?5, ?6, ?7,
-                    ?8, ?9, ?10, ?11, ?12, ?13,
-                    ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22,
-                    ?23, ?24, ?25, ?26,
-                    ?27, ?28, ?29, ?30,
-                    ?31, ?32,
-                    ?33, ?34, ?35, ?36,
-                    ?37, ?38, ?39, ?40,
-                    ?41, ?42, ?43, ?44
-                 )",
-            )?;
-
-            for pe in &batch_events {
-                let e = pe.event;
-                event_stmt.execute(params![
-                    pe.event_id_bytes.as_slice(),
-                    e.ts_ns,
-                    e.user_id.as_ref().map(|u| u.as_str()),
-                    e.api_key_id.as_ref().map(|a| a.as_str()),
-                    e.org_id.as_ref().map(|o| o.as_str()),
-                    e.project_id.as_ref().map(|p| p.as_str()),
-                    e.route_id.as_str(),
-                    pe.provider_key,
-                    e.model.as_str(),
-                    e.model_family.as_deref(),
-                    e.endpoint.as_str(),
-                    e.method.as_str(),
-                    e.http_status.map(i64::from),
-                    i64::from(e.usage.input_tokens),
-                    i64::from(e.usage.output_tokens),
-                    i64::from(e.usage.cache_read_input_tokens),
-                    i64::from(e.usage.cache_creation_input_tokens),
-                    i64::from(e.usage.reasoning_tokens),
-                    i64::from(e.usage.audio_input_tokens),
-                    i64::from(e.usage.audio_output_tokens),
-                    i64::from(e.usage.image_tokens),
-                    i64::from(e.usage.tool_use_tokens),
-                    e.cost_nanodollars,
-                    e.latency.ttft_ms.map(i64::from),
-                    i64::from(e.latency.total_ms),
-                    e.latency.time_to_close_ms.map(i64::from),
-                    e.flags.contains(EventFlags::STREAMING) as i64,
-                    e.flags.contains(EventFlags::TOOL_CALLS) as i64,
-                    e.flags.contains(EventFlags::REASONING) as i64,
-                    e.flags.contains(EventFlags::STREAM_INCOMPLETE) as i64,
-                    pe.error_type,
-                    &pe.error_message,
-                    &pe.request_sha[..],
-                    &pe.response_sha[..],
-                    pe.request_blob_id.as_ref().map(|b| &b[..]),
-                    pe.response_blob_id.as_ref().map(|b| &b[..]),
-                    &pe.client_ip_str,
-                    e.user_agent.as_deref(),
-                    e.request_id.as_deref(),
-                    &pe.trace_id_str,
-                    e.source.as_deref(),
-                    e.ingested_at,
-                    pe.metadata_str.as_deref(),
-                    e.tier.as_str(),
-                ])?;
-            }
-        }
-
-        {
-            let mut link_stmt = tx.prepare_cached(
-                "INSERT OR IGNORE INTO event_components(event_id, component_type, blob_sha256)
-                 VALUES(?1, ?2, ?3)",
-            )?;
-
-            for be in &batch_events {
-                for (comp_type, blob_sha) in &be.component_links {
-                    link_stmt.execute(params![&be.event_id_bytes[..], comp_type, &blob_sha[..]])?;
-                }
-            }
-        }
-
-        tx.commit()?;
-        Ok(batch_events.iter().map(|be| be.event.id).collect())
-    }
-
-    /// Single-trip INSERT ON CONFLICT: compress + insert, dedup on conflict.
-    ///
-    /// In embedded mode, the compressed data is stored in `payload_blobs.data`.
-    /// In external blob mode, data is written via the [`BlobStore`] and the
-    /// `data` column is set to `NULL`.
-    fn upsert_blob(
-        &self,
-        conn: &Connection,
-        sha: &[u8; 32],
-        data: &[u8],
-        component_type: &str,
-        provider: &str,
+    /// Execute the prepared INSERT for a single event.
+    fn execute_insert(
+        stmt: &mut rusqlite::CachedStatement<'_>,
+        event: &LlmEvent,
     ) -> Result<(), StoreError> {
-        let dict_key = crate::compress::DictKey {
-            provider: provider.into(),
-            component_type: component_type.into(),
-        };
-        let has_dict = self.coder.has_dict(&dict_key);
-        let compressed = self.coder.compress(data, Some(&dict_key))?;
-        let (compression, dict_id): (&str, Option<smol_str::SmolStr>) = if has_dict {
-            ("zstd_dict", Some(smol_str::SmolStr::new(format!("{provider}_{component_type}"))))
-        } else {
-            ("zstd_raw", None)
-        };
+        let error_type = event.error.as_ref().map(error_type_str);
+        let error_message = event.error.as_ref().map(|e| e.to_string());
+        let metadata_str =
+            event.metadata.as_ref().map(|v| serde_json::to_string(v).unwrap_or_default());
+        let client_ip_str = event.client_ip.map(|ip| ip.to_string());
+        let trace_id_str = event.trace_id.map(|t| t.to_string());
+        // Vestigial — dead columns kept for index stability.
+        let zeroed_sha = [0u8; 32];
 
-        if let Some(blob_store) =
-            self.blob_store.as_ref().filter(|_| self.should_use_external_blobs())
-        {
-            // External mode: metadata in SQLite, data via BlobStore.
-            conn.execute(
-                "INSERT INTO payload_blobs(
-                    sha256, component_type, provider, compression, dict_id,
-                    uncompressed_size, compressed_size, refcount, hit_count,
-                    data, first_seen_at
-                 ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, 0, NULL, strftime('%s','now'))
-                 ON CONFLICT(sha256) DO UPDATE SET
-                    refcount = refcount + 1,
-                    hit_count = hit_count + 1",
-                params![
-                    &sha[..],
-                    component_type,
-                    provider,
-                    compression,
-                    dict_id.as_deref(),
-                    data.len() as i64,
-                    compressed.len() as i64,
-                ],
-            )?;
-            blob_store.put(sha, &compressed, crate::blob::BlobMeta { component_type, provider })?;
-        } else {
-            // Embedded mode: data in SQLite payload_blobs.data.
-            conn.execute(
-                "INSERT INTO payload_blobs(
-                    sha256, component_type, provider, compression, dict_id,
-                    uncompressed_size, compressed_size, refcount, hit_count,
-                    data, first_seen_at
-                 ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, 0, ?8, strftime('%s','now'))
-                 ON CONFLICT(sha256) DO UPDATE SET
-                    refcount = refcount + 1,
-                    hit_count = hit_count + 1",
-                params![
-                    &sha[..],
-                    component_type,
-                    provider,
-                    compression,
-                    dict_id.as_deref(),
-                    data.len() as i64,
-                    compressed.len() as i64,
-                    &compressed[..],
-                ],
-            )?;
-        }
+        stmt.execute(params![
+            event.id.as_ulid().to_bytes().as_slice(),
+            event.ts_ns,
+            event.user_id.as_ref().map(|u| u.as_str()),
+            event.api_key_id.as_ref().map(|a| a.as_str()),
+            event.org_id.as_ref().map(|o| o.as_str()),
+            event.project_id.as_ref().map(|p| p.as_str()),
+            event.route_id.as_str(),
+            event.provider.id_key(),
+            event.model.as_str(),
+            event.model_family.as_deref(),
+            event.endpoint.as_str(),
+            event.method.as_str(),
+            event.http_status.map(i64::from),
+            i64::from(event.usage.input_tokens),
+            i64::from(event.usage.output_tokens),
+            i64::from(event.usage.cache_read_input_tokens),
+            i64::from(event.usage.cache_creation_input_tokens),
+            i64::from(event.usage.reasoning_tokens),
+            i64::from(event.usage.audio_input_tokens),
+            i64::from(event.usage.audio_output_tokens),
+            i64::from(event.usage.image_tokens),
+            i64::from(event.usage.tool_use_tokens),
+            event.cost_nanodollars,
+            event.latency.ttft_ms.map(i64::from),
+            i64::from(event.latency.total_ms),
+            event.latency.time_to_close_ms.map(i64::from),
+            event.flags.contains(EventFlags::STREAMING) as i64,
+            event.flags.contains(EventFlags::TOOL_CALLS) as i64,
+            event.flags.contains(EventFlags::REASONING) as i64,
+            event.flags.contains(EventFlags::STREAM_INCOMPLETE) as i64,
+            error_type,
+            error_message,
+            &zeroed_sha[..], // request_sha256 (vestigial)
+            &zeroed_sha[..], // response_sha256 (vestigial)
+            None::<&[u8]>,   // request_blob_id (vestigial)
+            None::<&[u8]>,   // response_blob_id (vestigial)
+            client_ip_str,
+            event.user_agent.as_deref(),
+            event.request_id.as_deref(),
+            trace_id_str,
+            event.source.as_deref(),
+            event.ingested_at,
+            metadata_str.as_deref(),
+            event.tier.as_str(),
+        ])?;
         Ok(())
+    }
+
+    /// Insert a single event (used by `append_event`).
+    fn insert_event(conn: &Connection, event: &LlmEvent) -> Result<(), StoreError> {
+        let mut stmt = Self::prepare_insert(conn)?;
+        Self::execute_insert(&mut stmt, event)
     }
 
     /// Retrieve an event by id.
@@ -848,66 +397,6 @@ impl Store {
         conn.query_row("SELECT * FROM llm_events WHERE id = ?1", [&id_bytes[..]], row_to_event)
             .optional()
             .map_err(StoreError::from)
-    }
-
-    /// Retrieve blob data for a specific component of an event.
-    ///
-    /// In embedded mode, reads from `payload_blobs.data`.  In external
-    /// blob mode, reads the SHA-256 from `event_components`, then
-    /// fetches data from the configured [`BlobStore`].
-    pub fn get_component(
-        &self,
-        event_id: &EventId,
-        component_type: &str,
-    ) -> Result<Option<Bytes>, StoreError> {
-        let conn = self.read_conn()?;
-        let id_bytes = event_id.as_ulid().to_bytes();
-
-        // Hybrid read: try SQLite data column first (works for embedded
-        // blobs and pre-migration blobs), then fall back to external store.
-        #[allow(clippy::type_complexity)] // reason: inline query result, not worth a named type
-        let row: Option<(Option<Vec<u8>>, Vec<u8>, String, String)> = conn
-            .query_row(
-                "SELECT pb.data, ec.blob_sha256, pb.provider, pb.compression
-                 FROM event_components ec
-                 JOIN payload_blobs pb ON pb.sha256 = ec.blob_sha256
-                 WHERE ec.event_id = ?1 AND ec.component_type = ?2",
-                params![&id_bytes[..], component_type],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-            )
-            .optional()?;
-
-        let Some((data_opt, sha_vec, provider, compression)) = row else {
-            return Ok(None);
-        };
-
-        // Resolve compressed bytes: SQLite data column → external store.
-        let compressed = if let Some(data) = data_opt {
-            // Blob data is in SQLite (embedded mode or pre-migration blob).
-            Bytes::from(data)
-        } else if let Some(ref blob_store) = self.blob_store {
-            // Blob data is in external store (S3/R2).
-            let mut sha = [0u8; 32];
-            sha.copy_from_slice(&sha_vec);
-            match blob_store.get(&sha)? {
-                Some(data) => data,
-                None => return Ok(None),
-            }
-        } else {
-            // data is NULL and no external store — blob is missing.
-            return Ok(None);
-        };
-
-        let dict_key = if compression == "zstd_dict" {
-            Some(crate::compress::DictKey {
-                provider: provider.into(),
-                component_type: component_type.into(),
-            })
-        } else {
-            None
-        };
-        let decompressed = self.coder.decompress(&compressed, dict_key.as_ref())?;
-        Ok(Some(Bytes::from(decompressed)))
     }
 
     /// Query events with filters and cursor-based pagination.
@@ -1067,117 +556,6 @@ impl Store {
             events.push(row?);
         }
         Ok(events)
-    }
-
-    /// Collect raw (uncompressed) payload samples for dictionary training.
-    ///
-    /// Returns up to `max_samples` decompressed blobs of the given
-    /// `component_type` and `provider`.  Uses hybrid read: tries SQLite
-    /// `data` column first, falls back to external blob store.
-    pub fn collect_dict_samples(
-        &self,
-        provider: &str,
-        component_type: &str,
-        max_samples: usize,
-    ) -> Result<Vec<Vec<u8>>, StoreError> {
-        let conn = self.read_conn()?;
-
-        let mut stmt = conn.prepare_cached(
-            "SELECT data, sha256 FROM payload_blobs
-             WHERE provider = ?1 AND component_type = ?2
-             ORDER BY hit_count DESC
-             LIMIT ?3",
-        )?;
-
-        let rows = stmt.query_map(params![provider, component_type, max_samples as i64], |r| {
-            let data: Option<Vec<u8>> = r.get(0)?;
-            let sha_vec: Vec<u8> = r.get(1)?;
-            Ok((data, sha_vec))
-        })?;
-
-        let mut samples = Vec::with_capacity(max_samples);
-        for row in rows {
-            let (data_opt, sha_vec) = row?;
-
-            let compressed = if let Some(data) = data_opt {
-                data
-            } else if let Some(ref blob_store) = self.blob_store {
-                let mut sha = [0u8; 32];
-                sha.copy_from_slice(&sha_vec);
-                match blob_store.get(&sha)? {
-                    Some(data) => data.to_vec(),
-                    None => continue,
-                }
-            } else {
-                continue;
-            };
-
-            let decompressed = self.coder.decompress(&compressed, None)?;
-            samples.push(decompressed);
-        }
-        Ok(samples)
-    }
-
-    /// Train a zstd dictionary from stored samples and persist it.
-    ///
-    /// Reads the most-referenced blobs of the given `(provider,
-    /// component_type)`, trains a dictionary, stores it in `zstd_dicts`,
-    /// and registers it in the coder for future compression.
-    ///
-    /// Returns the dict id on success, or `None` if too few samples.
-    pub fn train_dict(
-        &mut self,
-        provider: &str,
-        component_type: &str,
-        max_samples: usize,
-        dict_size: usize,
-    ) -> Result<Option<String>, StoreError> {
-        let samples = self.collect_dict_samples(provider, component_type, max_samples)?;
-        if samples.len() < 10 {
-            return Ok(None);
-        }
-
-        let sample_refs: Vec<&[u8]> = samples.iter().map(|s| s.as_slice()).collect();
-        let dict_bytes = zstd::dict::from_samples(&sample_refs, dict_size)
-            .map_err(|e| StoreError::Compression(format!("dict training failed: {e}")))?;
-
-        let dict_id = format!("{provider}_{component_type}");
-
-        {
-            let conn = self.write_conn()?;
-            conn.execute(
-                "INSERT OR REPLACE INTO zstd_dicts(id, provider, component_type, sample_count, created_at, data)
-                 VALUES(?1, ?2, ?3, ?4, strftime('%s','now'), ?5)",
-                params![&dict_id, provider, component_type, samples.len() as i64, &dict_bytes],
-            )?;
-        }
-
-        let key = crate::compress::DictKey {
-            provider: provider.into(),
-            component_type: component_type.into(),
-        };
-        self.coder.register_dict(key, dict_bytes)?;
-
-        Ok(Some(dict_id))
-    }
-
-    /// Load all trained dictionaries from the `zstd_dicts` table.
-    ///
-    /// Called during [`Store::init`] to pre-populate the coder.
-    fn load_dicts(conn: &Connection, coder: &mut ZstdCoder) -> Result<(), StoreError> {
-        let mut stmt = conn.prepare("SELECT provider, component_type, data FROM zstd_dicts")?;
-        let rows = stmt.query_map([], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Vec<u8>>(2)?))
-        })?;
-        for row in rows {
-            let (provider, component_type, data) = row?;
-            let key = crate::compress::DictKey {
-                provider: provider.into(),
-                component_type: component_type.into(),
-            };
-            coder.register_dict(key, data)?;
-        }
-        Ok(())
     }
 
     /// Roll up a day's events into `daily_rollups`.
@@ -1401,77 +779,12 @@ impl Store {
         Ok(result)
     }
 
-    /// Delete events older than `older_than_ns` and clean up blobs with
-    /// refcount reaching 0.  Uses set-based SQL — O(3) statements
-    /// regardless of event count.
-    ///
-    /// When an external blob store is configured, orphaned blobs are
-    /// also deleted from the external store after the SQLite transaction
-    /// commits.
+    /// Delete events older than `older_than_ns`.
     pub fn gc_expired(&self, older_than_ns: i64) -> Result<GcStats, StoreError> {
         let conn = self.write_conn()?;
-        let tx = conn.unchecked_transaction()?;
-
-        // Bulk-decrement refcounts for all components of expiring events.
-        tx.execute(
-            "UPDATE payload_blobs SET refcount = refcount - (
-                SELECT COUNT(*) FROM event_components ec
-                JOIN llm_events e ON ec.event_id = e.id
-                WHERE e.ts_ns < ?1 AND ec.blob_sha256 = payload_blobs.sha256
-             )
-             WHERE sha256 IN (
-                SELECT ec.blob_sha256 FROM event_components ec
-                JOIN llm_events e ON ec.event_id = e.id
-                WHERE e.ts_ns < ?1
-             )",
-            [older_than_ns],
-        )?;
-
-        // Delete component links.
-        tx.execute(
-            "DELETE FROM event_components WHERE event_id IN (
-                SELECT id FROM llm_events WHERE ts_ns < ?1
-             )",
-            [older_than_ns],
-        )?;
-
-        // Delete the events themselves.
         let events_deleted =
-            tx.execute("DELETE FROM llm_events WHERE ts_ns < ?1", [older_than_ns])?;
-
-        // Collect orphaned blob SHAs before deleting (for external store cleanup).
-        let orphaned_shas: Vec<[u8; 32]> = if self.blob_store.is_some() {
-            let mut stmt = tx.prepare("SELECT sha256 FROM payload_blobs WHERE refcount <= 0")?;
-            let rows = stmt.query_map([], |r| {
-                let v: Vec<u8> = r.get(0)?;
-                let mut sha = [0u8; 32];
-                sha.copy_from_slice(&v);
-                Ok(sha)
-            })?;
-            rows.filter_map(|r| r.ok()).collect()
-        } else {
-            Vec::new()
-        };
-
-        // Remove orphaned blob metadata (and data for embedded mode).
-        let blobs_deleted = tx.execute("DELETE FROM payload_blobs WHERE refcount <= 0", [])?;
-
-        tx.commit()?;
-
-        // Clean up external blob store after commit.
-        if let Some(ref blob_store) = self.blob_store {
-            for sha in &orphaned_shas {
-                if let Err(e) = blob_store.delete(sha) {
-                    tracing::warn!(
-                        sha = sha256_hex(sha),
-                        error = %e,
-                        "failed to delete orphaned blob from external store"
-                    );
-                }
-            }
-        }
-
-        Ok(GcStats { events_deleted, blobs_deleted })
+            conn.execute("DELETE FROM llm_events WHERE ts_ns < ?1", [older_than_ns])?;
+        Ok(GcStats { events_deleted, blobs_deleted: 0 })
     }
 
     /// Delete events for a specific tier older than `older_than_ns`.
@@ -1479,80 +792,11 @@ impl Store {
     /// Used by the tiered GC loop: one call per configured retention tier.
     pub fn gc_tier(&self, tier: &str, older_than_ns: i64) -> Result<GcStats, StoreError> {
         let conn = self.write_conn()?;
-        let tx = conn.unchecked_transaction()?;
-
-        // Bulk-decrement refcounts for components of expiring events in this tier.
-        tx.execute(
-            "UPDATE payload_blobs SET refcount = refcount - (
-                SELECT COUNT(*) FROM event_components ec
-                JOIN llm_events e ON ec.event_id = e.id
-                WHERE e.ts_ns < ?1 AND e.tier = ?2 AND ec.blob_sha256 = payload_blobs.sha256
-             )
-             WHERE sha256 IN (
-                SELECT ec.blob_sha256 FROM event_components ec
-                JOIN llm_events e ON ec.event_id = e.id
-                WHERE e.ts_ns < ?1 AND e.tier = ?2
-             )",
-            params![older_than_ns, tier],
-        )?;
-
-        // Delete component links.
-        tx.execute(
-            "DELETE FROM event_components WHERE event_id IN (
-                SELECT id FROM llm_events WHERE ts_ns < ?1 AND tier = ?2
-             )",
-            params![older_than_ns, tier],
-        )?;
-
-        // Delete the events.
-        let events_deleted = tx.execute(
+        let events_deleted = conn.execute(
             "DELETE FROM llm_events WHERE ts_ns < ?1 AND tier = ?2",
             params![older_than_ns, tier],
         )?;
-
-        // Collect orphaned blob SHAs for external store cleanup.
-        let orphaned_shas: Vec<[u8; 32]> = if self.blob_store.is_some() {
-            let mut stmt = tx.prepare("SELECT sha256 FROM payload_blobs WHERE refcount <= 0")?;
-            let rows = stmt.query_map([], |r| {
-                let v: Vec<u8> = r.get(0)?;
-                let mut sha = [0u8; 32];
-                sha.copy_from_slice(&v);
-                Ok(sha)
-            })?;
-            rows.filter_map(|r| r.ok()).collect()
-        } else {
-            Vec::new()
-        };
-
-        // Remove orphaned blobs.
-        let blobs_deleted = tx.execute("DELETE FROM payload_blobs WHERE refcount <= 0", [])?;
-
-        tx.commit()?;
-
-        // Clean up external blob store after commit.
-        if let Some(ref blob_store) = self.blob_store {
-            for sha in &orphaned_shas {
-                if let Err(e) = blob_store.delete(sha) {
-                    tracing::warn!(
-                        sha = sha256_hex(sha),
-                        error = %e,
-                        "failed to delete orphaned blob from external store"
-                    );
-                }
-            }
-        }
-
-        Ok(GcStats { events_deleted, blobs_deleted })
-    }
-
-    /// Get the refcount for a blob by its SHA-256.
-    pub fn blob_refcount(&self, sha: &[u8; 32]) -> Result<Option<i64>, StoreError> {
-        let conn = self.read_conn()?;
-        conn.query_row("SELECT refcount FROM payload_blobs WHERE sha256 = ?1", [&sha[..]], |r| {
-            r.get(0)
-        })
-        .optional()
-        .map_err(StoreError::from)
+        Ok(GcStats { events_deleted, blobs_deleted: 0 })
     }
 
     /// Lightweight health probe — executes `SELECT 1` on a read connection.
@@ -1563,36 +807,6 @@ impl Store {
         let conn = self.read_conn()?;
         conn.query_row("SELECT 1", [], |_| Ok(()))?;
         Ok(())
-    }
-
-    /// Count total blob rows.
-    pub fn blob_count(&self) -> Result<usize, StoreError> {
-        let conn = self.read_conn()?;
-        let count: i64 = conn.query_row("SELECT COUNT(*) FROM payload_blobs", [], |r| r.get(0))?;
-        #[allow(clippy::cast_sign_loss)]
-        Ok(count as usize)
-    }
-
-    /// Total stored bytes (compressed) across all blobs.
-    pub fn total_compressed_bytes(&self) -> Result<i64, StoreError> {
-        let conn = self.read_conn()?;
-        let total: i64 = conn.query_row(
-            "SELECT COALESCE(SUM(compressed_size), 0) FROM payload_blobs",
-            [],
-            |r| r.get(0),
-        )?;
-        Ok(total)
-    }
-
-    /// Total uncompressed bytes across all blobs (for compression ratio).
-    pub fn total_uncompressed_bytes(&self) -> Result<i64, StoreError> {
-        let conn = self.read_conn()?;
-        let total: i64 = conn.query_row(
-            "SELECT COALESCE(SUM(uncompressed_size), 0) FROM payload_blobs",
-            [],
-            |r| r.get(0),
-        )?;
-        Ok(total)
     }
 
     /// Run a WAL checkpoint to truncate the write-ahead log.
@@ -1617,82 +831,6 @@ impl Store {
         Ok(())
     }
 
-    /// Migrate a batch of embedded blobs to the external blob store.
-    ///
-    /// Reads up to `batch_size` blobs that have non-NULL `data` in
-    /// `payload_blobs`, PUTs them to the external store, then sets
-    /// `data = NULL` in SQLite to free space.
-    ///
-    /// Returns the number of blobs migrated.  Returns 0 when no
-    /// embedded blobs remain or no external store is configured.
-    pub fn drain_embedded_blobs(&self, batch_size: usize) -> Result<usize, StoreError> {
-        let blob_store = match &self.blob_store {
-            Some(bs) => bs,
-            None => return Ok(0),
-        };
-
-        // Read a batch of blobs that still have embedded data.
-        let shas_and_data: Vec<([u8; 32], Vec<u8>, String, String)> = {
-            let conn = self.read_conn()?;
-            let mut stmt = conn.prepare(
-                "SELECT sha256, data, component_type, provider FROM payload_blobs
-                 WHERE data IS NOT NULL
-                 LIMIT ?1",
-            )?;
-            let rows = stmt.query_map([batch_size as i64], |r| {
-                let sha_vec: Vec<u8> = r.get(0)?;
-                let mut sha = [0u8; 32];
-                sha.copy_from_slice(&sha_vec);
-                let data: Vec<u8> = r.get(1)?;
-                let comp: String = r.get(2)?;
-                let prov: String = r.get(3)?;
-                Ok((sha, data, comp, prov))
-            })?;
-            rows.filter_map(|r| r.ok()).collect()
-        };
-
-        if shas_and_data.is_empty() {
-            return Ok(0);
-        }
-
-        let count = shas_and_data.len();
-
-        // PUT each blob to external store.
-        for (sha, data, comp, prov) in &shas_and_data {
-            blob_store.put(
-                sha,
-                data,
-                crate::blob::BlobMeta { component_type: comp, provider: prov },
-            )?;
-        }
-
-        // NULL out the data column in SQLite.
-        let conn = self.write_conn()?;
-        let tx = conn.unchecked_transaction()?;
-        {
-            let mut stmt =
-                tx.prepare_cached("UPDATE payload_blobs SET data = NULL WHERE sha256 = ?1")?;
-            for (sha, _, _, _) in &shas_and_data {
-                stmt.execute([&sha[..]])?;
-            }
-        }
-        tx.commit()?;
-
-        tracing::info!(blobs = count, "drained embedded blobs to external store");
-        Ok(count)
-    }
-
-    /// Number of blobs still stored embedded in SQLite (non-NULL data).
-    pub fn embedded_blob_count(&self) -> Result<usize, StoreError> {
-        let conn = self.read_conn()?;
-        let count: i64 =
-            conn.query_row("SELECT COUNT(*) FROM payload_blobs WHERE data IS NOT NULL", [], |r| {
-                r.get(0)
-            })?;
-        #[allow(clippy::cast_sign_loss)]
-        Ok(count as usize)
-    }
-
     /// Database file size in bytes (page_count × page_size).
     pub fn db_size_bytes(&self) -> Result<u64, StoreError> {
         let conn = self.read_conn()?;
@@ -1702,60 +840,13 @@ impl Store {
         Ok((page_count * page_size) as u64)
     }
 
-    /// Delete a single event by ID, cleaning up component links and
-    /// decrementing blob refcounts. Removes orphaned blobs.
+    /// Delete a single event by ID.
     ///
     /// Returns `true` if the event existed and was deleted.
     pub fn delete_event(&self, id: &EventId) -> Result<bool, StoreError> {
         let conn = self.write_conn()?;
-        let tx = conn.unchecked_transaction()?;
         let id_bytes = id.as_ulid().to_bytes();
-
-        // Decrement blob refcounts.
-        tx.execute(
-            "UPDATE payload_blobs SET refcount = refcount - 1 \
-             WHERE sha256 IN (SELECT blob_sha256 FROM event_components WHERE event_id = ?1)",
-            [&id_bytes[..]],
-        )?;
-
-        // Delete component links.
-        tx.execute("DELETE FROM event_components WHERE event_id = ?1", [&id_bytes[..]])?;
-
-        // Delete the event.
-        let deleted = tx.execute("DELETE FROM llm_events WHERE id = ?1", [&id_bytes[..]])?;
-
-        // Collect orphaned blob SHAs before deleting (for external store).
-        let orphaned_shas: Vec<[u8; 32]> = if self.blob_store.is_some() {
-            let mut stmt = tx.prepare("SELECT sha256 FROM payload_blobs WHERE refcount <= 0")?;
-            let rows = stmt.query_map([], |r| {
-                let v: Vec<u8> = r.get(0)?;
-                let mut sha = [0u8; 32];
-                sha.copy_from_slice(&v);
-                Ok(sha)
-            })?;
-            rows.filter_map(|r| r.ok()).collect()
-        } else {
-            Vec::new()
-        };
-
-        // Clean up orphaned blob metadata.
-        tx.execute("DELETE FROM payload_blobs WHERE refcount <= 0", [])?;
-
-        tx.commit()?;
-
-        // Clean up external blob store after commit.
-        if let Some(ref blob_store) = self.blob_store {
-            for sha in &orphaned_shas {
-                if let Err(e) = blob_store.delete(sha) {
-                    tracing::warn!(
-                        sha = sha256_hex(sha),
-                        error = %e,
-                        "failed to delete orphaned blob from external store"
-                    );
-                }
-            }
-        }
-
+        let deleted = conn.execute("DELETE FROM llm_events WHERE id = ?1", [&id_bytes[..]])?;
         Ok(deleted > 0)
     }
 
@@ -1776,34 +867,189 @@ impl Store {
         }
         Ok(())
     }
-}
 
-struct PreparedBlob {
-    sha: [u8; 32],
-    component_type: &'static str,
-    /// Provider that produced this blob (for correct dict_id tagging).
-    provider_key: &'static str,
-    uncompressed_len: usize,
-    compressed: Vec<u8>,
-    /// Pre-computed compression tag and dict id — avoids `format!()` under lock.
-    compression: &'static str,
-    dict_id: Option<smol_str::SmolStr>,
-}
+    // ── Archive support ──────────────────────────────────────────────────
 
-fn sha256_bytes(data: &[u8]) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    hasher.update(data);
-    hasher.finalize().into()
-}
+    /// Roll up all days that have events in the given timestamp range.
+    ///
+    /// Called before archival to ensure `daily_rollups` data persists
+    /// even after source events are deleted.
+    pub fn rollup_days_for_range(&self, from_ns: i64, to_ns: i64) -> Result<(), StoreError> {
+        let from_day = from_ns / 1_000_000_000 / 86400 * 86400;
+        let to_day = to_ns / 1_000_000_000 / 86400 * 86400;
 
-/// Format a SHA-256 hash as a lowercase hex string (single allocation).
-pub(crate) fn sha256_hex(sha: &[u8; 32]) -> String {
-    let mut s = String::with_capacity(64);
-    for b in sha {
-        use std::fmt::Write;
-        let _ = write!(s, "{b:02x}");
+        let mut day = from_day;
+        while day <= to_day {
+            self.rollup_day(day)?;
+            day += 86400;
+        }
+        Ok(())
     }
-    s
+
+    /// Fetch all events older than `older_than_ns` for archival.
+    ///
+    /// Ordered by `user_id, ts_ns` so the caller can group efficiently.
+    pub fn query_events_for_archive(
+        &self,
+        older_than_ns: i64,
+    ) -> Result<Vec<LlmEvent>, StoreError> {
+        let conn = self.read_conn()?;
+        let mut stmt = conn
+            .prepare_cached("SELECT * FROM llm_events WHERE ts_ns < ?1 ORDER BY user_id, ts_ns")?;
+        let rows = stmt.query_map([older_than_ns], row_to_event)?;
+        let mut events = Vec::new();
+        for row in rows {
+            events.push(row?);
+        }
+        Ok(events)
+    }
+
+    /// Record an archive manifest after a successful S3 upload.
+    #[cfg(feature = "s3")]
+    pub fn insert_archive_manifest(&self, m: &ArchiveManifest) -> Result<(), StoreError> {
+        let conn = self.write_conn()?;
+        conn.execute(
+            "INSERT INTO archive_manifests(
+                archive_id, user_id, day, s3_key, event_count,
+                min_ts_ns, max_ts_ns, compressed_bytes, created_at
+             ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                m.archive_id,
+                m.user_id,
+                m.day,
+                m.s3_key,
+                m.event_count as i64,
+                m.min_ts_ns,
+                m.max_ts_ns,
+                m.compressed_bytes as i64,
+                m.created_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Delete events by a list of primary keys.
+    ///
+    /// Used after confirmed S3 upload to remove archived events from SQLite.
+    pub fn delete_events_by_ids(&self, ids: &[EventId]) -> Result<usize, StoreError> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let conn = self.write_conn()?;
+        let tx = conn.unchecked_transaction()?;
+        let mut total = 0usize;
+        {
+            let mut stmt = tx.prepare_cached("DELETE FROM llm_events WHERE id = ?1")?;
+            for id in ids {
+                total += stmt.execute([&id.as_ulid().to_bytes()[..]])?;
+            }
+        }
+        tx.commit()?;
+        Ok(total)
+    }
+
+    /// Check if any archived data exists for a given time range.
+    pub fn has_archived_data(
+        &self,
+        from_ts_ns: Option<i64>,
+        to_ts_ns: Option<i64>,
+    ) -> Result<bool, StoreError> {
+        let conn = self.read_conn()?;
+        let (sql, params_vec): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = match (
+            from_ts_ns, to_ts_ns,
+        ) {
+            (Some(from), Some(to)) => (
+                "SELECT 1 FROM archive_manifests WHERE max_ts_ns >= ?1 AND min_ts_ns <= ?2 LIMIT 1"
+                    .to_owned(),
+                vec![Box::new(from), Box::new(to)],
+            ),
+            (Some(from), None) => (
+                "SELECT 1 FROM archive_manifests WHERE max_ts_ns >= ?1 LIMIT 1".to_owned(),
+                vec![Box::new(from)],
+            ),
+            (None, Some(to)) => (
+                "SELECT 1 FROM archive_manifests WHERE min_ts_ns <= ?1 LIMIT 1".to_owned(),
+                vec![Box::new(to)],
+            ),
+            (None, None) => ("SELECT 1 FROM archive_manifests LIMIT 1".to_owned(), vec![]),
+        };
+
+        let params_ref: Vec<&dyn rusqlite::types::ToSql> =
+            params_vec.iter().map(|b| b.as_ref()).collect();
+        let exists: bool =
+            conn.query_row(&sql, params_ref.as_slice(), |_| Ok(true)).optional()?.unwrap_or(false);
+        Ok(exists)
+    }
+
+    /// List archive manifests matching a filter.
+    pub fn list_archives(
+        &self,
+        user_id: Option<&str>,
+        from_ts_ns: Option<i64>,
+        to_ts_ns: Option<i64>,
+    ) -> Result<Vec<ArchiveManifest>, StoreError> {
+        let conn = self.read_conn()?;
+
+        let mut sql = String::from(
+            "SELECT archive_id, user_id, day, s3_key, event_count, \
+             min_ts_ns, max_ts_ns, compressed_bytes, created_at \
+             FROM archive_manifests WHERE 1=1",
+        );
+        let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::with_capacity(3);
+        let mut idx = 0usize;
+
+        if let Some(uid) = user_id {
+            idx += 1;
+            sql.push_str(&format!(" AND user_id = ?{idx}"));
+            params_vec.push(Box::new(uid.to_owned()));
+        }
+        if let Some(from) = from_ts_ns {
+            idx += 1;
+            sql.push_str(&format!(" AND max_ts_ns >= ?{idx}"));
+            params_vec.push(Box::new(from));
+        }
+        if let Some(to) = to_ts_ns {
+            idx += 1;
+            sql.push_str(&format!(" AND min_ts_ns <= ?{idx}"));
+            params_vec.push(Box::new(to));
+        }
+        sql.push_str(" ORDER BY min_ts_ns ASC");
+
+        let params_ref: Vec<&dyn rusqlite::types::ToSql> =
+            params_vec.iter().map(|b| b.as_ref()).collect();
+        let mut stmt = conn.prepare_cached(&sql)?;
+        let rows = stmt.query_map(params_ref.as_slice(), |r| {
+            Ok(ArchiveManifest {
+                archive_id: r.get(0)?,
+                user_id: r.get(1)?,
+                day: r.get(2)?,
+                s3_key: r.get(3)?,
+                event_count: r.get::<_, i64>(4)? as usize,
+                min_ts_ns: r.get(5)?,
+                max_ts_ns: r.get(6)?,
+                compressed_bytes: r.get::<_, i64>(7)? as usize,
+                created_at: r.get(8)?,
+            })
+        })?;
+
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row?);
+        }
+        Ok(result)
+    }
+
+    /// Summary of all archived data (for the CLI `archive-status` command).
+    pub fn archive_summary(&self) -> Result<(usize, usize, i64), StoreError> {
+        let conn = self.read_conn()?;
+        let (files, events, bytes): (i64, i64, i64) = conn.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(event_count), 0), COALESCE(SUM(compressed_bytes), 0) \
+             FROM archive_manifests",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?;
+        Ok((files as usize, events as usize, bytes))
+    }
 }
 
 /// Column indices for SELECT * FROM llm_events.  Using positional access
@@ -2090,26 +1336,12 @@ mod tests {
         }
     }
 
-    fn test_req_body() -> Bytes {
-        Bytes::from(
-            r#"{"model":"gpt-4o","messages":[{"role":"system","content":"You are helpful."},{"role":"user","content":"Hello!"}]}"#,
-        )
-    }
-
-    fn test_resp_body() -> Bytes {
-        Bytes::from(
-            r#"{"id":"chatcmpl-abc","choices":[{"message":{"role":"assistant","content":"Hi there!"}}],"usage":{"prompt_tokens":100,"completion_tokens":50}}"#,
-        )
-    }
-
     #[test]
     fn round_trip_append_get() {
         let store = Store::open_in_memory().unwrap();
         let event = test_event();
-        let req = test_req_body();
-        let resp = test_resp_body();
 
-        let id = store.append_event(&event, &req, &resp).unwrap();
+        let id = store.append_event(&event).unwrap();
 
         let loaded = store.get_event(&id).unwrap().expect("event should exist");
         assert_eq!(loaded.id, event.id);
@@ -2120,54 +1352,10 @@ mod tests {
         assert_eq!(loaded.latency.ttft_ms, Some(25));
         assert!(loaded.flags.contains(EventFlags::STREAMING));
         assert_eq!(loaded.user_agent.as_deref(), Some("test/1.0"));
-
-        let sys = store.get_component(&id, "system_prompt").unwrap();
-        assert!(sys.is_some(), "system_prompt component should exist");
-
-        let msgs = store.get_component(&id, "messages").unwrap();
-        assert!(msgs.is_some(), "messages component should exist");
-
-        let response = store.get_component(&id, "response").unwrap();
-        assert!(response.is_some(), "response component should exist");
-        assert_eq!(response.unwrap(), resp);
     }
 
     #[test]
-    fn dedup_shared_system_prompt() {
-        let store = Store::open_in_memory().unwrap();
-
-        // Use canonical serde_json output — `split_request` assumes the
-        // bytes come from `serde_json::to_vec` (as the pipeline produces).
-        let v1: serde_json::Value = serde_json::from_str(
-            r#"{"messages":[{"role":"system","content":"Be helpful."},{"role":"user","content":"A"}]}"#,
-        ).unwrap();
-        let v2: serde_json::Value = serde_json::from_str(
-            r#"{"messages":[{"role":"system","content":"Be helpful."},{"role":"user","content":"B"}]}"#,
-        ).unwrap();
-
-        let e1 = test_event();
-        let req1 = Bytes::from(serde_json::to_vec(&v1).unwrap());
-
-        let mut e2 = test_event();
-        e2.id = EventId::new();
-        e2.ts_ns += 1;
-        let req2 = Bytes::from(serde_json::to_vec(&v2).unwrap());
-
-        let resp = test_resp_body();
-
-        store.append_event(&e1, &req1, &resp).unwrap();
-        store.append_event(&e2, &req2, &resp).unwrap();
-
-        let sp_sha = sha256_bytes(
-            &serde_json::to_vec(&serde_json::json!([{"role":"system","content":"Be helpful."}]))
-                .unwrap(),
-        );
-        let rc = store.blob_refcount(&sp_sha).unwrap();
-        assert_eq!(rc, Some(2), "system_prompt blob should have refcount=2");
-    }
-
-    #[test]
-    fn gc_deletes_events_and_orphan_blobs() {
+    fn gc_deletes_events() {
         let store = Store::open_in_memory().unwrap();
 
         let mut e1 = test_event();
@@ -2176,13 +1364,8 @@ mod tests {
         e2.id = EventId::new();
         e2.ts_ns = 2_000;
 
-        let req = Bytes::from(
-            r#"{"messages":[{"role":"system","content":"Be helpful."},{"role":"user","content":"X"}]}"#,
-        );
-        let resp = test_resp_body();
-
-        store.append_event(&e1, &req, &resp).unwrap();
-        store.append_event(&e2, &req, &resp).unwrap();
+        store.append_event(&e1).unwrap();
+        store.append_event(&e2).unwrap();
 
         let stats = store.gc_expired(1500).unwrap();
         assert_eq!(stats.events_deleted, 1);
@@ -2190,10 +1373,6 @@ mod tests {
 
         let stats = store.gc_expired(3000).unwrap();
         assert_eq!(stats.events_deleted, 1);
-        assert!(stats.blobs_deleted > 0);
-
-        let blobs_after = store.blob_count().unwrap();
-        assert_eq!(blobs_after, 0, "all blobs should be gone");
     }
 
     #[test]
@@ -2207,11 +1386,8 @@ mod tests {
         e2.user_id = Some(UserId::from("bob"));
         e2.ts_ns += 1;
 
-        let req = test_req_body();
-        let resp = test_resp_body();
-
-        store.append_event(&e1, &req, &resp).unwrap();
-        store.append_event(&e2, &req, &resp).unwrap();
+        store.append_event(&e1).unwrap();
+        store.append_event(&e2).unwrap();
 
         let filter = EventFilter { user_id: Some(SmolStr::new("alice")), ..Default::default() };
         let results = store.query(&filter, 100, None).unwrap();
@@ -2230,10 +1406,8 @@ mod tests {
     fn query_summary_returns_correct_fields() {
         let store = Store::open_in_memory().unwrap();
         let event = test_event();
-        let req = test_req_body();
-        let resp = test_resp_body();
 
-        store.append_event(&event, &req, &resp).unwrap();
+        store.append_event(&event).unwrap();
 
         let filter = EventFilter { user_id: Some(SmolStr::new("user_1")), ..Default::default() };
         let results = store.query_summary(&filter, 10, None).unwrap();
@@ -2249,33 +1423,5 @@ mod tests {
         assert_eq!(s.total_ms, 300);
         assert_eq!(s.ttft_ms, Some(25));
         assert!(s.streaming);
-    }
-
-    #[test]
-    fn train_dict_from_samples() {
-        let mut store = Store::open_in_memory().unwrap();
-
-        // Insert events with 20 distinct system prompts (need >= 10 unique blobs).
-        for i in 0..20 {
-            let mut event = test_event();
-            event.id = EventId::new();
-            event.ts_ns += i as i64;
-
-            let sys = format!("You are assistant variant {i}. Help the user with task {i}.");
-            let v: serde_json::Value = serde_json::from_str(&format!(
-                r#"{{"messages":[{{"role":"system","content":{sys_json}}},{{"role":"user","content":"Q{i}"}}]}}"#,
-                sys_json = serde_json::to_string(&sys).unwrap()
-            ))
-            .unwrap();
-            let req = Bytes::from(serde_json::to_vec(&v).unwrap());
-            let resp = test_resp_body();
-            store.append_event(&event, &req, &resp).unwrap();
-        }
-
-        let result = store.train_dict("openai", "system_prompt", 100, 4096);
-        assert!(result.is_ok());
-        let dict_id = result.unwrap();
-        assert!(dict_id.is_some(), "should have enough samples to train");
-        assert_eq!(dict_id.unwrap(), "openai_system_prompt");
     }
 }

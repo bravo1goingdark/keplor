@@ -1,10 +1,10 @@
 //! [`BatchWriter`] — async event writer that accumulates events and flushes
 //! them in bulk transactions for high throughput.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use bytes::Bytes;
 use tokio::sync::mpsc;
 
 use keplor_core::{EventId, LlmEvent};
@@ -38,15 +38,16 @@ impl Default for BatchConfig {
 /// On shutdown, call [`BatchWriter::shutdown`] to drain all pending
 /// events before the process exits.
 pub struct BatchWriter {
-    tx: std::sync::Mutex<Option<mpsc::Sender<WriteRequest>>>,
+    /// Channel sender — cloneable, no mutex needed for send operations.
+    tx: mpsc::Sender<WriteRequest>,
+    /// Set to `true` after shutdown to reject new writes fast.
+    shutdown: AtomicBool,
     channel_capacity: usize,
     flush_handle: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 struct WriteRequest {
     event: LlmEvent,
-    req_body: Bytes,
-    resp_body: Bytes,
     result_tx: Option<tokio::sync::oneshot::Sender<Result<EventId, StoreError>>>,
 }
 
@@ -60,7 +61,8 @@ impl BatchWriter {
         let (tx, rx) = mpsc::channel(capacity);
         let flush_handle = tokio::spawn(flush_loop(store, rx, config));
         Self {
-            tx: std::sync::Mutex::new(Some(tx)),
+            tx,
+            shutdown: AtomicBool::new(false),
             channel_capacity: capacity,
             flush_handle: tokio::sync::Mutex::new(Some(flush_handle)),
         }
@@ -69,37 +71,58 @@ impl BatchWriter {
     /// Submit an event for batched writing.
     ///
     /// Returns once the event is durably flushed.
-    pub async fn write(
-        &self,
-        event: LlmEvent,
-        req_body: Bytes,
-        resp_body: Bytes,
-    ) -> Result<EventId, StoreError> {
-        let tx = {
-            let guard = self.tx.lock().unwrap_or_else(|e| e.into_inner());
-            guard.clone().ok_or(StoreError::ChannelClosed)?
-        };
+    pub async fn write(&self, event: LlmEvent) -> Result<EventId, StoreError> {
+        if self.shutdown.load(Ordering::Relaxed) {
+            return Err(StoreError::ChannelClosed);
+        }
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-        tx.send(WriteRequest { event, req_body, resp_body, result_tx: Some(result_tx) })
+        self.tx
+            .send(WriteRequest { event, result_tx: Some(result_tx) })
             .await
             .map_err(|_| StoreError::ChannelClosed)?;
         result_rx.await.map_err(|_| StoreError::ChannelClosed)?
     }
 
-    /// Submit an event without waiting for the flush.
-    pub fn write_fire_and_forget(
-        &self,
-        event: LlmEvent,
-        req_body: Bytes,
-        resp_body: Bytes,
-    ) -> Result<(), StoreError> {
-        let guard = self.tx.lock().unwrap_or_else(|e| e.into_inner());
-        let tx = guard.as_ref().ok_or(StoreError::ChannelClosed)?;
-        tx.try_send(WriteRequest { event, req_body, resp_body, result_tx: None }).map_err(|e| {
-            match e {
-                mpsc::error::TrySendError::Full(_) => StoreError::ChannelFull,
-                mpsc::error::TrySendError::Closed(_) => StoreError::ChannelClosed,
+    /// Submit multiple events and await all their flush confirmations.
+    ///
+    /// All events are sent to the channel first, then all oneshot
+    /// receivers are awaited concurrently.  This avoids the serial-await
+    /// problem where each event waits for a separate flush cycle.
+    pub async fn write_many(&self, events: Vec<LlmEvent>) -> Vec<Result<EventId, StoreError>> {
+        if self.shutdown.load(Ordering::Relaxed) {
+            return events.iter().map(|_| Err(StoreError::ChannelClosed)).collect();
+        }
+
+        let mut receivers = Vec::with_capacity(events.len());
+        for event in events {
+            let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+            if self.tx.send(WriteRequest { event, result_tx: Some(result_tx) }).await.is_err() {
+                receivers.push(None);
+            } else {
+                receivers.push(Some(result_rx));
             }
+        }
+
+        let mut results = Vec::with_capacity(receivers.len());
+        for rx in receivers {
+            match rx {
+                Some(rx) => {
+                    results.push(rx.await.unwrap_or(Err(StoreError::ChannelClosed)));
+                },
+                None => results.push(Err(StoreError::ChannelClosed)),
+            }
+        }
+        results
+    }
+
+    /// Submit an event without waiting for the flush.
+    pub fn write_fire_and_forget(&self, event: LlmEvent) -> Result<(), StoreError> {
+        if self.shutdown.load(Ordering::Relaxed) {
+            return Err(StoreError::ChannelClosed);
+        }
+        self.tx.try_send(WriteRequest { event, result_tx: None }).map_err(|e| match e {
+            mpsc::error::TrySendError::Full(_) => StoreError::ChannelFull,
+            mpsc::error::TrySendError::Closed(_) => StoreError::ChannelClosed,
         })
     }
 
@@ -107,8 +130,7 @@ impl BatchWriter {
     ///
     /// Returns 0 if the channel is closed.
     pub fn queue_depth(&self) -> usize {
-        let guard = self.tx.lock().unwrap_or_else(|e| e.into_inner());
-        guard.as_ref().map(|tx| tx.max_capacity() - tx.capacity()).unwrap_or(0)
+        self.tx.max_capacity() - self.tx.capacity()
     }
 
     /// Maximum channel capacity.
@@ -118,20 +140,20 @@ impl BatchWriter {
 
     /// Gracefully shut down the batch writer.
     ///
-    /// Drops the sender to close the channel, then waits for the flush
-    /// loop to drain all pending events up to `timeout`.
+    /// Sets the shutdown flag to reject new writes, then waits for the
+    /// flush loop to drain all pending events up to `timeout`.
     ///
     /// Returns `true` if the flush loop completed within the deadline,
     /// `false` if the timeout expired (some events may be lost).
     pub async fn shutdown(&self, timeout: Duration) -> bool {
-        // Drop the sender to close the channel — the flush loop will
-        // see `None` from `rx.recv()` and drain remaining events.
-        {
-            let mut guard = self.tx.lock().unwrap_or_else(|e| e.into_inner());
-            guard.take();
-        }
+        // Signal writers to stop — new write/write_fire_and_forget calls
+        // will return ChannelClosed immediately.
+        self.shutdown.store(true, Ordering::Relaxed);
 
-        // Take and await the flush handle.
+        // Take and await the flush handle. The channel stays open until
+        // all senders are dropped (including the one in this struct),
+        // which happens when BatchWriter is dropped. The flush loop
+        // drains remaining buffered events when it sees the channel close.
         let handle = self.flush_handle.lock().await.take();
         if let Some(handle) = handle {
             tokio::time::timeout(timeout, handle).await.is_ok()
@@ -191,17 +213,17 @@ async fn flush(store: &Arc<Store>, buffer: &mut Vec<WriteRequest>) {
 
     let mut senders: Vec<Option<tokio::sync::oneshot::Sender<Result<EventId, StoreError>>>> =
         Vec::with_capacity(pending.len());
-    let mut batch: Vec<(LlmEvent, Bytes, Bytes)> = Vec::with_capacity(pending.len());
+    let mut batch: Vec<LlmEvent> = Vec::with_capacity(pending.len());
 
     for req in pending {
         senders.push(req.result_tx);
-        batch.push((req.event, req.req_body, req.resp_body));
+        batch.push(req.event);
     }
 
     let store = Arc::clone(store);
     let result = tokio::task::spawn_blocking(move || store.append_batch(&batch))
         .await
-        .unwrap_or_else(|e| Err(StoreError::Compression(e.to_string())));
+        .unwrap_or_else(|e| Err(StoreError::Internal(e.to_string())));
 
     match result {
         Ok(ids) => {
@@ -218,7 +240,7 @@ async fn flush(store: &Arc<Store>, buffer: &mut Vec<WriteRequest>) {
             let msg = e.to_string();
             tracing::error!(events = count, error = %msg, "batch flush failed");
             for tx in senders.into_iter().flatten() {
-                let _ = tx.send(Err(StoreError::Compression(msg.clone())));
+                let _ = tx.send(Err(StoreError::Internal(msg.clone())));
             }
         },
     }

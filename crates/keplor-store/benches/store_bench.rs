@@ -2,11 +2,9 @@
 
 #![allow(clippy::unwrap_used)]
 
-use bytes::Bytes;
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use keplor_core::*;
 use keplor_store::Store;
-use sha2::{Digest, Sha256};
 use smol_str::SmolStr;
 
 // ── Helpers ────────────────────────────────────────────────────────────
@@ -44,81 +42,12 @@ fn make_event(i: usize) -> LlmEvent {
     }
 }
 
-fn system_prompt() -> String {
-    "You are a helpful assistant that answers questions concisely and accurately. \
-     Follow these guidelines carefully when responding to the user. Always provide \
-     structured, well-organized responses with clear headings and bullet points \
-     where appropriate. Include relevant examples and code snippets when discussing \
-     technical topics."
-        .to_string()
-}
-
-fn make_request(i: usize) -> Bytes {
-    let sys = system_prompt();
-    let msg = format!("Question {i}: help with topic {t}", t = i % 7);
-    Bytes::from(format!(
-        r#"{{"model":"gpt-4o","messages":[{{"role":"system","content":{sys_json}}},{{"role":"user","content":"{msg}"}}]}}"#,
-        sys_json = serde_json::to_string(sys.as_str()).unwrap(),
-    ))
-}
-
-fn make_response(i: usize) -> Bytes {
-    Bytes::from(format!(
-        r#"{{"id":"chatcmpl-{i:06}","object":"chat.completion","choices":[{{"index":0,"message":{{"role":"assistant","content":"Here is my response to your question number {i}."}},"finish_reason":"stop"}}],"usage":{{"prompt_tokens":100,"completion_tokens":50,"total_tokens":150}}}}"#
-    ))
-}
-
-fn sha256_bytes(data: &[u8]) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    hasher.update(data);
-    hasher.finalize().into()
-}
-
 // ── Benchmarks ─────────────────────────────────────────────────────────
-
-fn bench_sha256(c: &mut Criterion) {
-    let mut group = c.benchmark_group("sha256");
-    for size in [256, 1024, 4096, 16384] {
-        let data = vec![0xABu8; size];
-        group.throughput(Throughput::Bytes(size as u64));
-        group.bench_with_input(BenchmarkId::from_parameter(size), &data, |b, data| {
-            b.iter(|| black_box(sha256_bytes(data)));
-        });
-    }
-    group.finish();
-}
-
-fn bench_zstd_compress(c: &mut Criterion) {
-    let mut group = c.benchmark_group("zstd_compress");
-    let req = make_request(0);
-    let resp = make_response(0);
-
-    group.throughput(Throughput::Bytes(req.len() as u64));
-    group.bench_function("request_body", |b| {
-        b.iter(|| black_box(zstd::bulk::compress(&req, 3).unwrap()));
-    });
-
-    group.throughput(Throughput::Bytes(resp.len() as u64));
-    group.bench_function("response_body", |b| {
-        b.iter(|| black_box(zstd::bulk::compress(&resp, 3).unwrap()));
-    });
-    group.finish();
-}
-
-fn bench_split_request(c: &mut Criterion) {
-    use keplor_store::components::split_request;
-    let body = make_request(42);
-
-    c.bench_function("split_request_openai", |b| {
-        b.iter(|| black_box(split_request(&Provider::OpenAI, &body)));
-    });
-}
 
 fn bench_append_batch(c: &mut Criterion) {
     let mut group = c.benchmark_group("append_batch");
     for batch_size in [32, 64, 128, 256] {
-        let events: Vec<(LlmEvent, Bytes, Bytes)> =
-            (0..batch_size).map(|i| (make_event(i), make_request(i), make_response(i))).collect();
+        let events: Vec<LlmEvent> = (0..batch_size).map(make_event).collect();
 
         group.throughput(Throughput::Elements(batch_size as u64));
         group.bench_with_input(BenchmarkId::from_parameter(batch_size), &events, |b, events| {
@@ -135,14 +64,12 @@ fn bench_append_batch(c: &mut Criterion) {
 
 fn bench_append_event(c: &mut Criterion) {
     let event = make_event(0);
-    let req = make_request(0);
-    let resp = make_response(0);
 
     c.bench_function("append_event_single", |b| {
         b.iter_with_setup(
             || Store::open_in_memory().unwrap(),
             |store| {
-                black_box(store.append_event(&event, &req, &resp).unwrap());
+                black_box(store.append_event(&event).unwrap());
             },
         );
     });
@@ -151,8 +78,7 @@ fn bench_append_event(c: &mut Criterion) {
 fn bench_query(c: &mut Criterion) {
     let store = Store::open_in_memory().unwrap();
     // Seed 1000 events.
-    let events: Vec<(LlmEvent, Bytes, Bytes)> =
-        (0..1000).map(|i| (make_event(i), make_request(i), make_response(i))).collect();
+    let events: Vec<LlmEvent> = (0..1000).map(make_event).collect();
     store.append_batch(&events).unwrap();
 
     let filter_none = keplor_store::EventFilter::default();
@@ -175,49 +101,5 @@ fn bench_query(c: &mut Criterion) {
     group.finish();
 }
 
-/// Like `make_event` but with pre-computed SHAs — matching what the
-/// server pipeline produces.  This exercises the double-SHA elimination
-/// in `append_batch`.
-fn make_event_with_sha(i: usize, req: &[u8], resp: &[u8]) -> LlmEvent {
-    let mut e = make_event(i);
-    e.request_sha256 = sha256_bytes(req);
-    e.response_sha256 = sha256_bytes(resp);
-    e
-}
-
-fn bench_append_batch_precomputed_sha(c: &mut Criterion) {
-    let mut group = c.benchmark_group("append_batch_precomputed_sha");
-    for batch_size in [64, 256] {
-        let events: Vec<(LlmEvent, Bytes, Bytes)> = (0..batch_size)
-            .map(|i| {
-                let req = make_request(i);
-                let resp = make_response(i);
-                let event = make_event_with_sha(i, &req, &resp);
-                (event, req, resp)
-            })
-            .collect();
-
-        group.throughput(Throughput::Elements(batch_size as u64));
-        group.bench_with_input(BenchmarkId::from_parameter(batch_size), &events, |b, events| {
-            b.iter_with_setup(
-                || Store::open_in_memory().unwrap(),
-                |store| {
-                    black_box(store.append_batch(events).unwrap());
-                },
-            );
-        });
-    }
-    group.finish();
-}
-
-criterion_group!(
-    benches,
-    bench_sha256,
-    bench_zstd_compress,
-    bench_split_request,
-    bench_append_batch,
-    bench_append_batch_precomputed_sha,
-    bench_append_event,
-    bench_query,
-);
+criterion_group!(benches, bench_append_batch, bench_append_event, bench_query,);
 criterion_main!(benches);

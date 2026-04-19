@@ -1,6 +1,6 @@
 [package]
 name         = "keplor-store"
-description  = "SQLite + content-addressed payload blob store with zstd compression."
+description  = "SQLite storage engine for LLM events and daily rollups."
 version      = { workspace = true }
 edition      = { workspace = true }
 rust-version = { workspace = true }
@@ -15,7 +15,7 @@ workspace = true
 [features]
 default = ["batch"]
 batch   = ["dep:tokio", "dep:metrics"]
-s3      = ["dep:object_store"]
+s3      = ["dep:object_store", "dep:zstd"]
 
 [dependencies]
 keplor-core = { path = "../keplor-core" }
@@ -23,16 +23,15 @@ bytes       = { workspace = true }
 rusqlite    = { workspace = true }
 serde       = { workspace = true }
 serde_json  = { workspace = true }
-sha2        = { workspace = true }
 smol_str    = { version = "0.3", features = ["serde"] }
 thiserror   = { workspace = true }
 ulid        = { workspace = true }
 http        = "1"
 tracing     = { workspace = true }
-zstd        = { workspace = true }
 tokio       = { workspace = true, optional = true, features = ["sync", "time", "rt", "macros"] }
 metrics     = { workspace = true, optional = true }
 object_store = { version = "0.13", default-features = false, features = ["aws"], optional = true }
+zstd         = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio     = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }

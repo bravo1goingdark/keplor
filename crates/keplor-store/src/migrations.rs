@@ -12,6 +12,9 @@ static MIGRATIONS: &[(u32, &str)] = &[
     (4, MIGRATION_0004),
     (5, MIGRATION_0005),
     (6, MIGRATION_0006),
+    (7, MIGRATION_0007),
+    (8, MIGRATION_0008),
+    (9, MIGRATION_0009),
 ];
 
 const MIGRATION_0001: &str = r"
@@ -158,6 +161,51 @@ DROP TABLE payload_blobs;
 ALTER TABLE payload_blobs_new RENAME TO payload_blobs;
 ";
 
+const MIGRATION_0007: &str = r"
+-- Remove blob subsystem tables.
+-- Dead columns in llm_events (request_sha256, response_sha256,
+-- request_blob_id, response_blob_id) are intentionally retained
+-- to avoid a STRICT-mode table rebuild and column index renumbering.
+-- They will be written as zeroed/NULL going forward.
+DROP TABLE IF EXISTS event_components;
+DROP TABLE IF EXISTS payload_blobs;
+DROP TABLE IF EXISTS zstd_dicts;
+";
+
+const MIGRATION_0008: &str = r"
+-- Track archived event chunks uploaded to S3/R2.
+CREATE TABLE archive_manifests (
+  archive_id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  day TEXT NOT NULL,
+  s3_key TEXT NOT NULL,
+  event_count INTEGER NOT NULL,
+  min_ts_ns INTEGER NOT NULL,
+  max_ts_ns INTEGER NOT NULL,
+  compressed_bytes INTEGER NOT NULL,
+  created_at INTEGER NOT NULL
+) STRICT;
+
+CREATE INDEX idx_archive_user_day ON archive_manifests(user_id, day);
+CREATE INDEX idx_archive_ts ON archive_manifests(min_ts_ns, max_ts_ns);
+";
+
+// -- Migration 9: covering indexes for quota index-only scans ----
+//
+// Widen (user_id, ts_ns) and (api_key_id, ts_ns) to include
+// cost_nanodollars so quota_summary() can do an index-only scan
+// without touching the main table.  Drop the redundant single-column
+// source index (idx_events_source_ts already covers it).
+const MIGRATION_0009: &str = r"
+DROP INDEX IF EXISTS idx_events_user_ts;
+CREATE INDEX idx_events_user_ts ON llm_events(user_id, ts_ns, cost_nanodollars);
+
+DROP INDEX IF EXISTS idx_events_key_ts;
+CREATE INDEX idx_events_key_ts ON llm_events(api_key_id, ts_ns, cost_nanodollars);
+
+DROP INDEX IF EXISTS idx_events_source;
+";
+
 /// Apply all unapplied migrations.
 pub(crate) fn migrate(conn: &Connection) -> Result<(), StoreError> {
     conn.execute_batch(
@@ -213,7 +261,7 @@ mod tests {
         migrate(&conn).unwrap();
         let ver: u32 =
             conn.query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(ver, 6);
+        assert_eq!(ver, 9);
     }
 
     #[test]
@@ -223,16 +271,14 @@ mod tests {
         migrate(&conn).unwrap();
         let ver: u32 =
             conn.query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(ver, 6);
+        assert_eq!(ver, 9);
     }
 
     #[test]
     fn tables_exist_after_migration() {
         let conn = Connection::open_in_memory().unwrap();
         migrate(&conn).unwrap();
-        for table in
-            &["llm_events", "payload_blobs", "event_components", "zstd_dicts", "daily_rollups"]
-        {
+        for table in &["llm_events", "daily_rollups", "archive_manifests"] {
             let exists: bool = conn
                 .query_row(
                     "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1",
