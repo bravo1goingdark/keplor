@@ -36,18 +36,21 @@ pub struct PipelineServer {
     gc_interval_secs: u64,
     retention_tiers: Vec<crate::config::RetentionTier>,
     wal_checkpoint_secs: u64,
-    blob_offload_threshold_mb: u64,
+    #[cfg(feature = "s3")]
+    archive_config: Option<crate::config::ArchiveConfig>,
     tls_config: Option<Arc<rustls::ServerConfig>>,
 }
 
 impl PipelineServer {
     /// Build a new server from a pipeline, config, and Prometheus handle.
+    ///
+    /// Returns an error if TLS is configured with invalid cert/key files.
     pub fn new(
         pipeline: Pipeline,
         keys: ApiKeySet,
         config: &ServerConfig,
         metrics_handle: PrometheusHandle,
-    ) -> Self {
+    ) -> Result<Self, std::io::Error> {
         let writer = pipeline.writer_arc();
         let store = pipeline.store_arc();
         let default_tier = SmolStr::new(&config.retention.default_tier);
@@ -93,28 +96,17 @@ impl PipelineServer {
             authed = authed.layer(middleware::from_fn(rate_limit::make_rate_limit_middleware(rl)));
         }
 
+        let request_timeout = Duration::from_secs(config.server.request_timeout_secs);
+        let max_connections = config.server.max_connections;
+
+        // Timeout + concurrency limit applied only to authed routes.
+        // Health and metrics are excluded so observability is never
+        // starved when the connection pool is saturated.
         let authed = authed
             .layer(middleware::from_fn(move |req, next| {
                 let keys = Arc::clone(&keys);
                 auth::require_api_key(keys, req, next)
             }))
-            .with_state(state.clone());
-
-        let public = Router::new()
-            .route("/health", get(routes::health))
-            .route("/metrics", get(routes::metrics_handler))
-            .with_state(state);
-
-        let request_timeout = Duration::from_secs(config.server.request_timeout_secs);
-        let max_connections = config.server.max_connections;
-
-        // Timeout + concurrency limit applied to the full router.
-        // Health and metrics endpoints are included — the concurrency
-        // limit is high enough (default 10,000) that health probes
-        // should not be blocked under normal conditions.
-        let router = Router::new()
-            .merge(authed)
-            .merge(public)
             .layer(
                 ServiceBuilder::new()
                     .layer(HandleErrorLayer::new(|_: tower::BoxError| async {
@@ -123,35 +115,60 @@ impl PipelineServer {
                     .layer(tower::timeout::TimeoutLayer::new(request_timeout))
                     .layer(tower::limit::ConcurrencyLimitLayer::new(max_connections)),
             )
+            .with_state(state.clone());
+
+        let public = Router::new()
+            .route("/health", get(routes::health))
+            .route("/metrics", get(routes::metrics_handler))
+            .with_state(state);
+
+        let router = Router::new()
+            .merge(authed)
+            .merge(public)
             .layer(middleware::from_fn(request_id::propagate_request_id))
             .layer(TraceLayer::new_for_http())
             .layer(build_cors_layer(&config.cors));
 
-        let tls_config = config.tls.as_ref().map(|tls| {
-            use rustls_pki_types::pem::PemObject;
-            use rustls_pki_types::{CertificateDer, PrivateKeyDer};
+        let tls_config = match config.tls.as_ref() {
+            Some(tls) => {
+                use rustls_pki_types::pem::PemObject;
+                use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 
-            let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_file_iter(&tls.cert_path)
-                .unwrap_or_else(|e| panic!("failed to read cert {}: {e}", tls.cert_path.display()))
-                .filter_map(|c| c.ok())
-                .collect();
+                let certs: Vec<CertificateDer<'static>> =
+                    CertificateDer::pem_file_iter(&tls.cert_path)
+                        .map_err(|e| {
+                            std::io::Error::new(
+                                std::io::ErrorKind::InvalidInput,
+                                format!("failed to read TLS cert {}: {e}", tls.cert_path.display()),
+                            )
+                        })?
+                        .filter_map(|c| c.ok())
+                        .collect();
 
-            let key = PrivateKeyDer::from_pem_file(&tls.key_path)
-                .unwrap_or_else(|e| panic!("failed to read key {}: {e}", tls.key_path.display()));
+                let key = PrivateKeyDer::from_pem_file(&tls.key_path).map_err(|e| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("failed to read TLS key {}: {e}", tls.key_path.display()),
+                    )
+                })?;
 
-            let server_config = rustls::ServerConfig::builder()
-                .with_no_client_auth()
-                .with_single_cert(certs, key)
-                .unwrap_or_else(|e| panic!("invalid TLS config: {e}"));
+                let server_config = rustls::ServerConfig::builder()
+                    .with_no_client_auth()
+                    .with_single_cert(certs, key)
+                    .map_err(|e| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            format!("invalid TLS config: {e}"),
+                        )
+                    })?;
 
-            Arc::new(server_config)
-        });
+                tracing::info!("TLS enabled");
+                Some(Arc::new(server_config))
+            },
+            None => None,
+        };
 
-        if tls_config.is_some() {
-            tracing::info!("TLS enabled");
-        }
-
-        Self {
+        Ok(Self {
             router,
             addr: config.server.listen_addr,
             shutdown_timeout: Duration::from_secs(config.server.shutdown_timeout_secs),
@@ -161,9 +178,10 @@ impl PipelineServer {
             gc_interval_secs: config.storage.gc_interval_secs,
             retention_tiers: config.retention.tiers.clone(),
             wal_checkpoint_secs: config.storage.wal_checkpoint_secs,
-            blob_offload_threshold_mb: config.storage.blob_offload_threshold_mb,
+            #[cfg(feature = "s3")]
+            archive_config: config.archive.clone(),
             tls_config,
-        }
+        })
     }
 
     /// Start the server and block until shutdown.
@@ -193,6 +211,68 @@ impl PipelineServer {
         let gc_interval_secs = self.gc_interval_secs;
         let wal_checkpoint_secs = self.wal_checkpoint_secs;
 
+        // Spawn archive + GC combined loop when archive is configured.
+        // Archive runs BEFORE GC to prevent data loss when
+        // archive_after_days > tier retention days.
+        #[cfg(feature = "s3")]
+        if let Some(ref archive_cfg) = self.archive_config {
+            let s3_config = keplor_store::ArchiveS3Config {
+                bucket: archive_cfg.bucket.clone(),
+                endpoint: archive_cfg.endpoint.clone(),
+                region: archive_cfg.region.clone(),
+                access_key_id: archive_cfg.access_key_id.clone(),
+                secret_access_key: archive_cfg.secret_access_key.clone(),
+                prefix: archive_cfg.prefix.clone(),
+                path_style: archive_cfg.path_style,
+            };
+            match keplor_store::Archiver::new(
+                Arc::clone(&store),
+                &s3_config,
+                tokio::runtime::Handle::current(),
+            ) {
+                Ok(archiver) => {
+                    // Validate S3 connectivity at startup — fail fast on
+                    // bad credentials instead of discovering errors hours
+                    // later on the first archive cycle.
+                    if let Err(e) = archiver.probe() {
+                        tracing::error!(
+                            error = %e,
+                            "S3 connectivity check failed — archival disabled. \
+                             Check bucket, endpoint, and credentials in [archive]"
+                        );
+                    } else {
+                        let archive_after_hours = if archive_cfg.archive_after_hours > 0 {
+                            archive_cfg.archive_after_hours
+                        } else {
+                            archive_cfg.archive_after_days * 24
+                        };
+                        let archive_threshold_mb = archive_cfg.archive_threshold_mb;
+                        let batch_size = archive_cfg.archive_batch_size;
+                        let interval_secs = archive_cfg.archive_interval_secs;
+                        let archive_store = Arc::clone(&store);
+                        tracing::info!(
+                            bucket = archive_cfg.bucket,
+                            archive_after_hours,
+                            archive_threshold_mb,
+                            interval_secs,
+                            "event archival configured — S3 connectivity verified"
+                        );
+                        tokio::spawn(archive_loop(
+                            Arc::new(archiver),
+                            archive_store,
+                            archive_after_hours,
+                            archive_threshold_mb,
+                            batch_size,
+                            interval_secs,
+                        ));
+                    }
+                },
+                Err(e) => {
+                    tracing::error!(error = %e, "failed to initialize archiver — archival disabled");
+                },
+            }
+        }
+
         // Spawn tiered GC task if retention tiers are configured.
         if gc_interval_secs > 0 && !self.retention_tiers.is_empty() {
             let gc_store = Arc::clone(&store);
@@ -202,13 +282,6 @@ impl PipelineServer {
             // Legacy fallback: global retention with no tiers.
             let gc_store = Arc::clone(&store);
             tokio::spawn(gc_loop(gc_store, gc_retention_days, gc_interval_secs));
-        }
-
-        // Spawn blob drain task when smart routing is configured.
-        if self.blob_offload_threshold_mb > 0 && store.has_external_blob_store() {
-            let drain_store = Arc::clone(&store);
-            let threshold = self.blob_offload_threshold_mb;
-            tokio::spawn(blob_drain_loop(drain_store, threshold));
         }
 
         // Spawn WAL checkpoint task.
@@ -273,8 +346,27 @@ fn build_cors_layer(config: &crate::config::CorsConfig) -> CorsLayer {
 
 async fn shutdown_signal() {
     let ctrl_c = tokio::signal::ctrl_c();
-    tokio::pin!(ctrl_c);
-    ctrl_c.await.ok();
+
+    #[cfg(unix)]
+    {
+        let Ok(mut sigterm) =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        else {
+            // Fall back to SIGINT-only if SIGTERM registration fails.
+            ctrl_c.await.ok();
+            return;
+        };
+        tokio::select! {
+            _ = ctrl_c => {},
+            _ = sigterm.recv() => {},
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        ctrl_c.await.ok();
+    }
+
     tracing::info!("shutdown signal received, stopping new connections...");
 }
 
@@ -351,67 +443,88 @@ async fn gc_loop(store: Arc<keplor_store::Store>, retention_days: u64, interval_
     }
 }
 
-/// Background task that migrates embedded blobs to the external store
-/// when the SQLite database exceeds the offload threshold.
+/// Periodically checkpoint the WAL to keep it from growing unbounded.
+/// Periodically archive old events to S3/R2.
 ///
-/// Runs every 60 seconds.  Each tick drains up to 100 blobs, then
-/// runs VACUUM if blobs were drained and the DB is still above the
-/// threshold.  Stops draining once no embedded blobs remain or the
-/// DB is below the threshold.
-async fn blob_drain_loop(store: Arc<keplor_store::Store>, threshold_mb: u64) {
-    let interval = Duration::from_secs(60);
-    let threshold_bytes = threshold_mb * 1024 * 1024;
-    let batch_size: usize = 100;
-
+/// Runs every `interval_secs` (default 3600 = 1 hour).
+/// Checks both age and size triggers.
+#[cfg(feature = "s3")]
+async fn archive_loop(
+    archiver: Arc<keplor_store::Archiver>,
+    store: Arc<keplor_store::Store>,
+    archive_after_hours: u64,
+    archive_threshold_mb: u64,
+    batch_size: usize,
+    interval_secs: u64,
+) {
+    let interval = Duration::from_secs(interval_secs);
     loop {
         tokio::time::sleep(interval).await;
 
-        // Only drain when DB is above threshold.
-        let db_size = {
-            let s = Arc::clone(&store);
-            tokio::task::spawn_blocking(move || s.db_size_bytes())
-                .await
-                .unwrap_or(Ok(0))
-                .unwrap_or(0)
-        };
+        let should_archive = {
+            let mut trigger = false;
 
-        if db_size < threshold_bytes {
-            continue;
-        }
-
-        // Drain a batch of embedded blobs to external store.
-        let drain_store = Arc::clone(&store);
-        let drained =
-            tokio::task::spawn_blocking(move || drain_store.drain_embedded_blobs(batch_size))
-                .await
-                .unwrap_or(Ok(0))
-                .unwrap_or(0);
-
-        if drained == 0 {
-            continue;
-        }
-
-        // Check if more blobs remain; if not, VACUUM to reclaim space.
-        let remaining = {
-            let s = Arc::clone(&store);
-            tokio::task::spawn_blocking(move || s.embedded_blob_count())
-                .await
-                .unwrap_or(Ok(0))
-                .unwrap_or(0)
-        };
-
-        if remaining == 0 {
-            let vacuum_store = Arc::clone(&store);
-            match tokio::task::spawn_blocking(move || vacuum_store.vacuum()).await {
-                Ok(Ok(())) => tracing::info!("vacuum completed after blob drain"),
-                Ok(Err(e)) => tracing::warn!(error = %e, "vacuum failed"),
-                Err(e) => tracing::warn!(error = %e, "vacuum task panicked"),
+            // Age-based trigger.
+            if archive_after_hours > 0 {
+                trigger = true;
             }
+
+            // Size-based trigger.
+            if archive_threshold_mb > 0 {
+                let threshold_bytes = archive_threshold_mb * 1024 * 1024;
+                let db_size = {
+                    let s = Arc::clone(&store);
+                    tokio::task::spawn_blocking(move || s.db_size_bytes())
+                        .await
+                        .unwrap_or(Ok(0))
+                        .unwrap_or(0)
+                };
+                if db_size >= threshold_bytes {
+                    trigger = true;
+                }
+            }
+            trigger
+        };
+
+        if !should_archive {
+            continue;
+        }
+
+        let cutoff_ns = if archive_after_hours > 0 {
+            let now_ns = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as i64;
+            now_ns - (archive_after_hours as i64 * 3_600 * 1_000_000_000)
+        } else {
+            // Size-only trigger: archive everything older than 1 day.
+            let now_ns = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as i64;
+            now_ns - 86_400_000_000_000
+        };
+
+        let archiver = Arc::clone(&archiver);
+        let bs = batch_size;
+        match tokio::task::spawn_blocking(move || archiver.archive_old_events(cutoff_ns, bs)).await
+        {
+            Ok(Ok(result)) => {
+                if result.events_archived > 0 {
+                    tracing::info!(
+                        events = result.events_archived,
+                        files = result.files_uploaded,
+                        compressed_bytes = result.compressed_bytes,
+                        "archive cycle completed"
+                    );
+                }
+            },
+            Ok(Err(e)) => tracing::warn!(error = %e, "archive cycle failed"),
+            Err(e) => tracing::warn!(error = %e, "archive task panicked"),
         }
     }
 }
 
-/// Periodically checkpoint the WAL to keep it from growing unbounded.
 async fn wal_checkpoint_loop(store: Arc<keplor_store::Store>, interval_secs: u64) {
     let interval = Duration::from_secs(interval_secs);
     loop {
@@ -445,12 +558,20 @@ impl axum::serve::Listener for TlsListener {
     async fn accept(&mut self) -> (Self::Io, Self::Addr) {
         loop {
             match self.inner.accept().await {
-                Ok((tcp, addr)) => match self.acceptor.accept(tcp).await {
-                    Ok(tls) => return (tls, addr),
-                    Err(e) => {
-                        tracing::debug!(error = %e, "TLS handshake failed");
-                        continue;
-                    },
+                Ok((tcp, addr)) => {
+                    // 10s timeout prevents a slow/stalled client from
+                    // blocking the accept loop indefinitely.
+                    match tokio::time::timeout(Duration::from_secs(10), self.acceptor.accept(tcp))
+                        .await
+                    {
+                        Ok(Ok(tls)) => return (tls, addr),
+                        Ok(Err(e)) => {
+                            tracing::debug!(error = %e, "TLS handshake failed");
+                        },
+                        Err(_) => {
+                            tracing::debug!("TLS handshake timed out after 10s");
+                        },
+                    }
                 },
                 Err(e) => {
                     tracing::error!(error = %e, "TCP accept failed");

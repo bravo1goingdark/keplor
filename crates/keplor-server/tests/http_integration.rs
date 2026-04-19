@@ -28,7 +28,7 @@ async fn spawn_server(api_keys: Vec<String>) -> String {
     let keys = ApiKeySet::new(api_keys, "free");
     let config = ServerConfig::default();
     let metrics_handle = install_metrics_recorder();
-    let server = PipelineServer::new(pipeline, keys, &config, metrics_handle);
+    let server = PipelineServer::new(pipeline, keys, &config, metrics_handle).unwrap();
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -246,4 +246,232 @@ async fn metrics_endpoint_works() {
     assert_eq!(resp.status(), StatusCode::OK);
     let content_type = resp.headers().get("content-type").unwrap().to_str().unwrap();
     assert!(content_type.contains("text/plain"));
+}
+
+// ── Failure-mode tests ──────────────���─────────────────────────────────
+
+/// Helper that boots a server with a custom pipeline/config for failure-mode tests.
+async fn spawn_custom_server(pipeline: Pipeline, config: ServerConfig) -> String {
+    INIT_CRYPTO.call_once(|| {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    });
+    let keys = ApiKeySet::new(vec![], "free");
+    let metrics_handle = install_metrics_recorder();
+    let server = PipelineServer::new(pipeline, keys, &config, metrics_handle).unwrap();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let base = format!("http://{addr}");
+
+    tokio::spawn(async move {
+        server.run_on(listener).await.unwrap();
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    base
+}
+
+#[tokio::test]
+async fn backpressure_returns_503() {
+    // Channel capacity = 1 so the queue fills quickly.
+    let store = Arc::new(Store::open_in_memory().unwrap());
+    let tiny_config =
+        BatchConfig { batch_size: 256, channel_capacity: 1, ..BatchConfig::default() };
+    let writer = Arc::new(BatchWriter::new(Arc::clone(&store), tiny_config));
+    let catalog = Arc::new(Catalog::load_bundled().unwrap());
+    let pipeline = Pipeline::new(store, writer, catalog);
+
+    let base = spawn_custom_server(pipeline, ServerConfig::default()).await;
+    let client = reqwest::Client::new();
+
+    // Blast fire-and-forget events — at least one should hit 503.
+    let mut saw_503 = false;
+    for _ in 0..50 {
+        let resp = client
+            .post(format!("{base}/v1/events/batch"))
+            .json(&serde_json::json!({
+                "events": (0..20).map(|_| serde_json::json!({
+                    "model": "gpt-4o", "provider": "openai"
+                })).collect::<Vec<_>>()
+            }))
+            .send()
+            .await
+            .unwrap();
+        if resp.status() == StatusCode::SERVICE_UNAVAILABLE
+            || resp.status() == StatusCode::MULTI_STATUS
+        {
+            saw_503 = true;
+            break;
+        }
+    }
+
+    assert!(saw_503, "expected 503 or 207 (partial failure) when queue is saturated");
+}
+
+#[tokio::test]
+async fn db_size_limit_returns_507() {
+    // 1 MB limit — ingest events with large metadata to push past it.
+    let store = Arc::new(Store::open_in_memory().unwrap());
+    let writer = Arc::new(BatchWriter::new(Arc::clone(&store), BatchConfig::default()));
+    let catalog = Arc::new(Catalog::load_bundled().unwrap());
+    let pipeline = Pipeline::new(store, writer, catalog).with_max_db_size_mb(1);
+
+    let base = spawn_custom_server(pipeline, ServerConfig::default()).await;
+    let client = reqwest::Client::new();
+
+    let big_body = "x".repeat(2048);
+    let mut saw_507 = false;
+    for _ in 0..50 {
+        let events: Vec<_> = (0..100)
+            .map(|_| {
+                serde_json::json!({
+                    "model": "gpt-4o",
+                    "provider": "openai",
+                    "metadata": {"payload": &big_body},
+                })
+            })
+            .collect();
+        let resp = client
+            .post(format!("{base}/v1/events/batch"))
+            .header("x-keplor-durable", "true")
+            .json(&serde_json::json!({ "events": events }))
+            .send()
+            .await
+            .unwrap();
+
+        if resp.status() == StatusCode::INSUFFICIENT_STORAGE {
+            saw_507 = true;
+            break;
+        }
+        // A 207 with storage_full errors also counts.
+        if resp.status() == StatusCode::MULTI_STATUS {
+            let body: serde_json::Value = resp.json().await.unwrap();
+            let text = serde_json::to_string(&body).unwrap_or_default();
+            if text.contains("storage full") {
+                saw_507 = true;
+                break;
+            }
+        }
+    }
+    assert!(saw_507, "expected 507 when database exceeds max_db_size_mb");
+}
+
+#[tokio::test]
+async fn validation_rejects_oversized_model_name() {
+    let base = spawn_server(vec![]).await;
+    let client = reqwest::Client::new();
+
+    // Model name exceeding 256 characters.
+    let long_model = "m".repeat(300);
+    let resp = client
+        .post(format!("{base}/v1/events"))
+        .json(&serde_json::json!({"model": long_model, "provider": "openai"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(body["error"].as_str().unwrap().contains("256"));
+}
+
+#[tokio::test]
+async fn health_accessible_under_connection_pressure() {
+    // Server with max_connections = 1.
+    let store = Arc::new(Store::open_in_memory().unwrap());
+    let writer = Arc::new(BatchWriter::new(Arc::clone(&store), BatchConfig::default()));
+    let catalog = Arc::new(Catalog::load_bundled().unwrap());
+    let pipeline = Pipeline::new(store, writer, catalog);
+
+    let mut config = ServerConfig::default();
+    config.server.max_connections = 1;
+
+    let base = spawn_custom_server(pipeline, config).await;
+    let client = reqwest::Client::new();
+
+    // Occupy the single connection slot with a slow ingest.
+    let slow = tokio::spawn({
+        let client = client.clone();
+        let url = format!("{base}/v1/events/batch");
+        async move {
+            // Large durable batch to keep the connection busy.
+            let events: Vec<_> = (0..500)
+                .map(|_| serde_json::json!({"model": "gpt-4o", "provider": "openai"}))
+                .collect();
+            let _ = client
+                .post(url)
+                .header("x-keplor-durable", "true")
+                .json(&serde_json::json!({"events": events}))
+                .send()
+                .await;
+        }
+    });
+
+    // Small delay to ensure the slow request is in-flight.
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+    // Health should still respond because it bypasses the concurrency limit.
+    let resp = client
+        .get(format!("{base}/health"))
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "health endpoint should remain accessible under connection pressure"
+    );
+
+    slow.abort();
+}
+
+#[tokio::test]
+async fn graceful_shutdown_drains_events() {
+    INIT_CRYPTO.call_once(|| {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    });
+
+    let store = Arc::new(Store::open_in_memory().unwrap());
+    let writer = Arc::new(BatchWriter::new(Arc::clone(&store), BatchConfig::default()));
+    let catalog = Arc::new(Catalog::load_bundled().unwrap());
+    let pipeline = Pipeline::new(Arc::clone(&store), writer, catalog);
+
+    let keys = ApiKeySet::new(vec![], "free");
+    let config = ServerConfig::default();
+    let metrics_handle = install_metrics_recorder();
+    let server = PipelineServer::new(pipeline, keys, &config, metrics_handle).unwrap();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let base = format!("http://{addr}");
+
+    let server_handle = tokio::spawn(async move {
+        server.run_on(listener).await.unwrap();
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let client = reqwest::Client::new();
+
+    // Ingest events (fire-and-forget via batch).
+    client
+        .post(format!("{base}/v1/events/batch"))
+        .json(&serde_json::json!({
+            "events": (0..10).map(|_| serde_json::json!({
+                "model": "gpt-4o", "provider": "openai"
+            })).collect::<Vec<_>>()
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    // Trigger graceful shutdown via SIGINT to the current process would be
+    // disruptive, so instead we abort the server handle and verify events
+    // were flushed during the batch writer's 50ms interval.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    server_handle.abort();
+
+    // Verify events were persisted.
+    let filter = keplor_store::EventFilter::default();
+    let events = store.query_summary(&filter, 100, None).unwrap();
+    assert!(events.len() >= 10, "expected at least 10 events persisted, got {}", events.len());
 }

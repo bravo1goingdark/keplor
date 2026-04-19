@@ -65,7 +65,7 @@ async fn spawn_tls_server(certs: &CertPair) -> String {
     };
 
     let metrics_handle = install_metrics_recorder();
-    let server = PipelineServer::new(pipeline, keys, &config, metrics_handle);
+    let server = PipelineServer::new(pipeline, keys, &config, metrics_handle).unwrap();
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
