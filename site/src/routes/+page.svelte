@@ -164,10 +164,10 @@ resp = requests.post(
     <div class="grid md:grid-cols-2 gap-x-16 gap-y-14 reveal-stagger">
       {#each [
         { title: 'Automatic cost accounting', desc: 'Bundled LiteLLM pricing catalog covers 2,263 models across all major providers. Handles cache discounts, reasoning tokens, batch pricing, and audio/image tokens. Cost stored as int64 nanodollars for precision.' },
-        { title: 'Full request & response capture', desc: 'Every prompt and completion stored with zstd compression and content-hash deduplication. Trained dictionaries push compression to 30-80x on real traffic. Optionally offload blobs to S3, R2, or MinIO.' },
+        { title: 'Full request & response capture', desc: 'Every prompt and completion stored alongside event metadata. Optionally archive old events to Cloudflare R2, AWS S3, or MinIO as compressed JSONL files to keep SQLite lean.' },
         { title: 'Multi-tenant with tiered retention', desc: 'Assign API keys to named retention tiers: free (7 days), pro (90 days), team (180 days), or any custom tier. GC runs per-tier automatically. Tier names and durations are fully configurable.' },
         { title: 'Real-time aggregation API', desc: 'Quota checks, daily rollups, and period statistics via REST. Filter by user, API key, model, provider, or time range. Cursor-based pagination for large result sets.' },
-        { title: 'Smart blob routing', desc: 'Blobs start in SQLite. Set a size threshold and they auto-offload to Cloudflare R2, AWS S3, or MinIO when the DB grows. GC shrinks the DB? Blobs go back to SQLite. Hybrid reader handles mixed storage seamlessly.' },
+        { title: 'Event archival to S3/R2', desc: 'Archive old events as compressed JSONL to Cloudflare R2, AWS S3, or MinIO. Age-based and size-based triggers. Daily rollups preserved in SQLite. Automatic 6-hour archive cycles with per-chunk error isolation.' },
         { title: 'Zero-dep single binary', desc: 'Static musl binary under 10 MB. SQLite with WAL mode and connection pooling. One-command Docker deploy. No JVM, no runtime, no cloud account required.' },
         { title: 'Server-side key attribution', desc: 'Authenticated keys are injected server-side, preventing clients from spoofing cost attribution. Each key carries a tier, so billing and retention are always tied to the actual caller.' },
         { title: '12 providers, one API', desc: 'OpenAI, Anthropic, Gemini, Bedrock, Azure, Mistral, Groq, xAI, DeepSeek, Cohere, Ollama, and any OpenAI-compatible endpoint. Provider-specific token handling built in.' },

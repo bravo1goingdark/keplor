@@ -307,7 +307,7 @@ Aggregated statistics over a time range, optionally grouped by model.
 
 ### DELETE /v1/events/:id
 
-Delete a single event by ID. Cleans up blob references and orphaned blobs.
+Delete a single event by ID.
 
 **Auth:** Required when keys are configured.
 
@@ -352,12 +352,12 @@ Liveness probe with DB and queue status. No auth.
   "version": "0.1.0",
   "db": "connected",
   "queue_depth": 42,
-  "queue_capacity": 8192,
+  "queue_capacity": 32768,
   "queue_utilization_pct": 0
 }
 ```
 
-Returns `503` with `"status": "degraded"` if the database is unreachable. The `queue_depth` / `queue_capacity` fields show how full the batch writer channel is — useful for back-pressure monitoring.
+Returns `503` with `"status": "degraded"` if the database is unreachable. The `queue_depth` / `queue_capacity` fields show how full the batch writer channel is — useful for back-pressure monitoring. Health and metrics endpoints bypass the connection concurrency limit, so they remain accessible even when the server is fully saturated.
 
 ### GET /metrics
 
@@ -556,7 +556,6 @@ db_path = "keplor.db"              # SQLite file path
 retention_days = 90                 # legacy global GC (0 = disabled; prefer [retention] tiers)
 wal_checkpoint_secs = 300           # WAL truncation interval (0 = disabled)
 gc_interval_secs = 3600            # how often GC runs (0 = disabled)
-blob_offload_threshold_mb = 0      # auto-offload when SQLite exceeds this (0 = manual)
 
 [auth]
 api_keys = []                       # simple format (open mode when empty)
@@ -584,8 +583,9 @@ days = 90
 # days = 180
 
 [pipeline]
-batch_size = 64                     # events per batched write (max 100,000)
+batch_size = 64                     # events per batched write (max 100,000; use 256 for high throughput)
 max_body_bytes = 10485760           # 10 MB max request body (max 100 MB)
+channel_capacity = 32768            # batch writer queue depth (raise for bursty traffic)
 
 [idempotency]
 enabled = true                      # default
@@ -597,13 +597,19 @@ enabled = false                     # default (disabled)
 requests_per_second = 100.0         # per API key
 burst = 200                         # max burst size
 
-# Optional: offload blobs to S3/R2 (requires --features s3)
-# [blob_storage]
-# bucket = "keplor-blobs"
-# endpoint = "https://<account>.r2.cloudflarestorage.com"
+# Optional: archive old events to S3/R2 (requires --features s3)
+# [archive]
+# bucket = "keplor-archive"
+# endpoint = "https://<account-id>.r2.cloudflarestorage.com"
 # region = "auto"
 # access_key_id = "..."
 # secret_access_key = "..."
+# prefix = "events"
+# archive_after_days = 30
+# archive_after_hours = 0           # sub-day: overrides days when non-zero (set 1 for hourly offload)
+# archive_threshold_mb = 500
+# archive_batch_size = 10000
+# archive_interval_secs = 3600      # how often the archive loop runs
 
 # Optional TLS — when present, server listens with HTTPS
 # [tls]
@@ -611,13 +617,13 @@ burst = 200                         # max burst size
 # key_path = "/etc/keplor/key.pem"
 ```
 
-### Blob Storage (S3 / Cloudflare R2 / MinIO)
+### Event Archival (S3 / Cloudflare R2 / MinIO)
 
-By default, Keplor stores request/response bodies in the SQLite database alongside event metadata. For deployments where disk is constrained (e.g. free-tier VMs) or you want to decouple storage, you can offload blob data to any S3-compatible object store.
+For long-term retention beyond what SQLite should hold, Keplor archives old events to any S3-compatible object store as compressed JSONL files. Archived events are deleted from SQLite to keep it lean, while daily rollups are preserved for fast aggregation queries.
 
-**What moves:** Only the compressed request/response body bytes. Event metadata (timestamps, tokens, cost, user IDs) stays in SQLite for fast queries.
+**What moves:** Entire events — serialized to JSONL, compressed with zstd, uploaded as files partitioned by `user_id` and day (Hive-style: `user_id=alice/day=2026-04-15/`).
 
-**What stays:** All query, stats, rollup, and quota endpoints work identically. The only difference is that viewing full request/response bodies (`get_component`) fetches from the object store instead of SQLite.
+**What stays:** Daily rollups, archive manifests, and recent events remain in SQLite. All query, stats, rollup, and quota endpoints continue working on the data that remains.
 
 #### Build with S3 support
 
@@ -630,111 +636,83 @@ cargo build --release --target x86_64-unknown-linux-musl -p keplor-cli \
 
 R2 has a generous free tier (10 GB storage, no egress fees) and is S3-compatible.
 
-1. Create a bucket in the Cloudflare dashboard (e.g. `keplor-blobs`)
+1. Create a bucket in the Cloudflare dashboard (e.g. `keplor-archive`)
 2. Create an R2 API token with read/write permissions
 3. Add to `keplor.toml`:
 
 ```toml
-[blob_storage]
-bucket = "keplor-blobs"
+[archive]
+bucket = "keplor-archive"
 endpoint = "https://<account-id>.r2.cloudflarestorage.com"
 region = "auto"
 access_key_id = "your-r2-access-key"
 secret_access_key = "your-r2-secret-key"
+prefix = "events"
+archive_after_days = 30
 ```
 
 #### AWS S3 setup
 
 ```toml
-[blob_storage]
-bucket = "keplor-blobs"
+[archive]
+bucket = "keplor-archive"
 endpoint = "https://s3.us-east-1.amazonaws.com"
 region = "us-east-1"
 access_key_id = "AKIA..."
 secret_access_key = "..."
+prefix = "events"
+archive_after_days = 30
 ```
 
 #### MinIO (self-hosted S3)
 
 ```toml
-[blob_storage]
-bucket = "keplor-blobs"
+[archive]
+bucket = "keplor-archive"
 endpoint = "http://localhost:9000"
 region = "us-east-1"
 access_key_id = "minioadmin"
 secret_access_key = "minioadmin"
 path_style = true                   # required for MinIO
+archive_after_days = 30
 ```
 
 #### Configuration reference
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `bucket` | string | | Bucket name |
-| `endpoint` | string | | S3 endpoint URL |
+| `bucket` | string | | S3 bucket name (required) |
+| `endpoint` | string | | S3 endpoint URL (required) |
 | `region` | string | | Region (`"auto"` for R2, `"us-east-1"` for AWS) |
-| `access_key_id` | string | | Access key |
-| `secret_access_key` | string | | Secret key |
-| `prefix` | string | `""` | Optional key prefix (e.g. `"blobs/"`) |
-| `path_style` | bool | `false` | Use path-style addressing (required for MinIO) |
+| `access_key_id` | string | | Access key (required) |
+| `secret_access_key` | string | | Secret key (required) |
+| `prefix` | string | `""` | Key prefix in bucket (e.g. `"events"`) |
+| `path_style` | bool | `false` | Path-style addressing (required for MinIO) |
+| `archive_after_days` | u64 | `30` | Archive events older than this many days |
+| `archive_after_hours` | u64 | `0` | Sub-day archival threshold (hours). Overrides `archive_after_days` when non-zero. Set to `1` for hourly offload. |
+| `archive_threshold_mb` | u64 | `0` | Also archive when SQLite exceeds this size (MB). 0 = age-only. |
+| `archive_batch_size` | usize | `10000` | Maximum events per JSONL archive file |
+| `archive_interval_secs` | u64 | `3600` | How often the archive loop runs (seconds). Default: 1 hour. |
 
-#### How deduplication works
+#### How archival works
 
-Blobs are keyed by their SHA-256 hash. Identical payloads (e.g. repeated system prompts) produce the same key, so S3 PUTs are naturally idempotent. No coordination needed.
+Every `archive_interval_secs` (default 1 hour), Keplor checks whether archival should run (age-based, size-based, or both). When triggered:
 
-#### Garbage collection with external blobs
+1. **Force rollup** for affected days (preserves daily aggregations after deletion)
+2. **Query events** older than `archive_after_days`, ordered by `(user_id, ts_ns)`
+3. **Group by user + day**, serialize to JSONL, compress with zstd level 3, upload to S3/R2
+4. **Record manifest** in SQLite (`archive_manifests` table) for audit/tracking
+5. **Delete archived events** from SQLite, then VACUUM to reclaim disk space
 
-When events are deleted (via retention GC or the DELETE API), Keplor:
-1. Decrements the blob's reference count in SQLite
-2. If the count reaches zero, deletes the blob from the object store
+S3 connectivity is verified at startup — bad credentials cause an immediate error instead of a silent failure hours later on the first archive cycle.
 
-Failed external deletes are logged as warnings but don't block GC. Orphaned blobs in S3 waste storage but don't cause correctness issues.
+#### Failure handling
 
-#### Smart routing (automatic offloading)
+Each chunk (user + day) is archived independently. If one upload fails, the remaining chunks continue. Failed events stay in SQLite and are retried on the next archive cycle. VACUUM warnings are logged but don't block the process.
 
-Set `blob_offload_threshold_mb` to start in SQLite and offload automatically when the database grows:
+#### Important: archive_after_days vs. retention
 
-```toml
-[storage]
-blob_offload_threshold_mb = 500   # stay in SQLite until 500 MB
-
-[blob_storage]
-bucket = "keplor-blobs"
-endpoint = "https://<account-id>.r2.cloudflarestorage.com"
-region = "auto"
-access_key_id = "..."
-secret_access_key = "..."
-```
-
-| Threshold | Behavior |
-|-----------|----------|
-| `0` (default) | All new blobs go to external store when `[blob_storage]` is configured |
-| `> 0` | Embedded until SQLite exceeds threshold, then auto-offload |
-| No `[blob_storage]` | Always embedded regardless of threshold |
-
-When the threshold is exceeded, Keplor does three things automatically:
-
-1. **Routes new blobs to S3/R2** — the offload flag flips on each batch flush (~50ms)
-2. **Drains old embedded blobs** — a background task (every 60s) reads embedded blobs from SQLite, PUTs them to S3/R2, and sets `data = NULL` (100 blobs per tick)
-3. **Runs VACUUM** — once all embedded blobs are drained, `VACUUM` reclaims the disk space so the database file actually shrinks
-
-When the DB shrinks back below the threshold, the flag flips and new blobs go to SQLite again. The hybrid reader handles mixed embedded + external blobs seamlessly.
-
-```
-SQLite < threshold         SQLite >= threshold
-+--------------------+     +--------------------------+
-| New blobs → SQLite | --> | New blobs → S3/R2        |
-|                    |     | Drain old blobs → S3/R2  |
-|                    |     | SET data = NULL           |
-|                    | <-- | VACUUM → DB shrinks       |
-+--------------------+     +--------------------------+
-```
-
-#### Migration from embedded to S3
-
-With smart routing (`blob_offload_threshold_mb > 0`), migration is fully automatic — the drain loop handles it. No manual scripts needed.
-
-Without smart routing (threshold = 0), old blobs stay in SQLite and are readable via the hybrid reader until they expire via GC.
+If `archive_after_days` is greater than the shortest retention tier, GC will delete events before they can be archived. Keplor warns about this at startup. Set `archive_after_days` lower than your shortest tier's `days` value.
 
 ### Environment Variable Overrides
 
@@ -1025,10 +1003,7 @@ name = "team"
 days = 180
 ```
 
-GC runs every `storage.gc_interval_secs` (default: 3600 = 1 hour), one pass per tier. Each pass:
-- Deletes events of that tier older than the tier's retention window
-- Decrements blob refcounts and removes orphaned blobs
-- If an external blob store (S3/R2) is configured, deletes orphaned blobs from external storage
+GC runs every `storage.gc_interval_secs` (default: 3600 = 1 hour), one pass per tier. Each pass deletes events of that tier older than the tier's retention window.
 
 Set `days = 0` on a tier to keep events forever. Set `storage.gc_interval_secs = 0` to disable automated GC entirely (you can still run `keplor gc --older-than-days N` manually).
 

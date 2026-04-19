@@ -34,10 +34,7 @@ ID                           PROVIDER       MODEL                   TOKENS      
 === Keplor Storage Statistics ===
 Database:             keplor.db
 Total events:         1
-Unique blobs:         2
-Compressed size:      156 bytes
-Uncompressed size:    312 bytes
-Compression ratio:    2.0x`;
+Database size:        0.1 MB`;
 </script>
 
 <svelte:head>
@@ -78,6 +75,6 @@ $ cp target/release/keplor /usr/local/bin/" />
 <p>
   <a href="{base}/docs/integration">Integration Guide</a> &mdash; Python, Node.js, LiteLLM, S3/R2 setup, tiered retention.<br />
   <a href="{base}/docs/api-reference">API Reference</a> &mdash; full endpoint docs.<br />
-  <a href="{base}/docs/configuration">Configuration</a> &mdash; auth, blob storage, retention tiers, tuning.<br />
+  <a href="{base}/docs/configuration">Configuration</a> &mdash; auth, archival, retention tiers, tuning.<br />
   <a href="{base}/docs/cli">CLI Reference</a> &mdash; all commands.
 </p>

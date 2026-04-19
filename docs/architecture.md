@@ -7,10 +7,10 @@ Keplor is an LLM logs ingestion and cost-accounting server. External systems POS
 ```
 keplor-core       Zero-dep types: Event, Provider, Usage, Cost, error enums.
 keplor-pricing    LiteLLM pricing catalog, cost computation (nanodollars).
-keplor-store      SQLite storage, zstd compression, batch writer, GC, rollups.
+keplor-store      SQLite storage, batch writer, GC, rollups, S3/R2 archival.
 keplor-server     HTTP server, ingestion pipeline, auth, rate limiting, CORS.
-keplor-cli        The `keplor` binary (run, migrate, query, stats, gc, rollup).
-xtask             Build automation (refresh-catalog, size-audit).
+keplor-cli        The `keplor` binary (run, migrate, query, stats, gc, rollup, archive).
+xtask             Build automation (refresh-catalog, mem-audit).
 ```
 
 Dependency flow: `cli → server → {store, pricing} → core`.
@@ -31,7 +31,7 @@ Client (app/gateway/SDK)
 │    1. validate (field constraints, size limits)   │
 │    2. normalize (provider enum, model lowercase)  │
 │    3. compute cost (LiteLLM catalog lookup)       │
-│    4. build LlmEvent + SHA-256 body hashes        │
+│    4. build LlmEvent                              │
 │    5. write to BatchWriter channel                │
 └──────────────────────────────────────────────────┘
   │
@@ -43,8 +43,10 @@ Client (app/gateway/SDK)
 │    - Accumulates events in memory (up to 256)    │
 │    - Flushes every 50ms or when batch is full    │
 │    - Bulk INSERT in single SQLite transaction     │
-│    - Content-addressed blob storage (dedup)       │
-│    - zstd compression with trained dictionaries   │
+│                                                  │
+│  Archiver (optional, every 1h):                  │
+│    - Serializes old events to JSONL + zstd        │
+│    - Uploads to S3/R2, deletes from SQLite        │
 └──────────────────────────────────────────────────┘
 ```
 
@@ -53,25 +55,23 @@ Client (app/gateway/SDK)
 | Table | Purpose |
 |-------|---------|
 | `schema_version` | Migration versioning |
-| `llm_events` | Fact table — one row per ingested event (23 columns) |
-| `payload_blobs` | Content-addressed blob store (SHA-256 keyed) |
-| `event_components` | Junction: event ↔ blob (request, response, metadata) |
-| `zstd_dicts` | Trained compression dictionaries per (provider, component_type) |
+| `llm_events` | Fact table — one row per ingested event (44 columns) |
 | `daily_rollups` | Pre-aggregated daily cost/usage summaries |
+| `archive_manifests` | Tracks archived JSONL files in S3/R2 (optional) |
 
-9 indices cover timestamp, user/key/model/provider/source lookups.
+9 indices cover timestamp, user/key/model/provider/source/tier lookups.
 
 ## Key design decisions
 
 **SQLite + WAL mode**: Zero-dep default. Read/write connection split (1 writer, 4 readers) prevents writer starvation. WAL checkpoints run every 300s + on shutdown.
 
-**Batch writer**: Events queue in an mpsc channel (capacity 8192). Background task flushes in bulk transactions. Single-event endpoint (`POST /v1/events`) awaits flush confirmation. Batch endpoint (`POST /v1/events/batch`) is fire-and-forget by default; set `X-Keplor-Durable: true` for confirmed writes.
+**Batch writer**: Events queue in an mpsc channel (capacity 32768, configurable). Background task flushes in bulk transactions. Single-event endpoint (`POST /v1/events`) awaits flush confirmation. Batch endpoint (`POST /v1/events/batch`) is fire-and-forget by default; set `X-Keplor-Durable: true` for confirmed writes.
 
-**Content-addressed blobs**: Request/response bodies are SHA-256 hashed. Identical payloads (e.g., repeated system prompts) are stored once with a reference count.
-
-**zstd with trained dictionaries**: Dictionaries are trained per (provider, component_type) to exploit the repetitive structure of LLM JSON. Targets 30-80x compression on conversational traffic.
+**Event archival**: Old events are archived to S3/R2 as zstd-compressed JSONL files, partitioned by (user_id, day). Daily rollups are preserved in SQLite. Archive manifests track what was uploaded. Runs every hour by default (configurable via `archive_interval_secs`) with per-chunk error isolation.
 
 **Cost in nanodollars (int64)**: Avoids floating-point rounding. 1 nanodollar = 10^-9 USD. Max representable: ~$9.2 billion.
+
+**Health/metrics bypass connection limits**: The `/health` and `/metrics` endpoints are not subject to the `max_connections` concurrency limit, so observability remains accessible under full saturation.
 
 ## API endpoints
 

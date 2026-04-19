@@ -404,36 +404,27 @@ tier = "pro"</code></pre>
 <h2 id="operations">Production operations</h2>
 
 <h3>Configuration</h3>
-<Pre code={'[server]\nlisten_addr = "0.0.0.0:8080"\nshutdown_timeout_secs = 25       # drain batch writer + WAL checkpoint\nrequest_timeout_secs = 30        # per-request timeout (408 on exceed)\nmax_connections = 10000          # concurrent connection limit (503 on exceed)\n\n[storage]\ndb_path = "keplor.db"\nretention_days = 90              # legacy global GC (prefer [retention] tiers)\nwal_checkpoint_secs = 300        # WAL truncation interval\ngc_interval_secs = 3600          # GC run frequency (0 = disabled)\n\n[auth]\napi_keys = ["prod-svc:sk-abc"]   # simple format (empty = open mode)\n\n# Extended format with tier:\n# [[auth.api_key_entries]]\n# id = "pro-user"\n# secret = "sk-pro-key"\n# tier = "pro"\n\n[retention]\ndefault_tier = "free"\n\n[[retention.tiers]]\nname = "free"\ndays = 7\n\n[[retention.tiers]]\nname = "pro"\ndays = 90\n\n[pipeline]\nbatch_size = 64\nmax_body_bytes = 10485760        # 10 MB\n\n[idempotency]\nenabled = true                   # dedup retries via Idempotency-Key header\nttl_secs = 300                   # 5 minute cache TTL\nmax_entries = 100000\n\n[rate_limit]\nenabled = false                  # per-key rate limiting (429 on exceed)\nrequests_per_second = 100.0\nburst = 200\n\n# [tls]                          # optional HTTPS\n# cert_path = "/etc/keplor/cert.pem"\n# key_path = "/etc/keplor/key.pem"'} />
+<Pre code={'[server]\nlisten_addr = "0.0.0.0:8080"\nshutdown_timeout_secs = 25       # drain batch writer + WAL checkpoint\nrequest_timeout_secs = 30        # per-request timeout (408 on exceed)\nmax_connections = 10000          # concurrent connection limit (65000 for 50K+ users)\n\n[storage]\ndb_path = "keplor.db"\nretention_days = 90              # legacy global GC (prefer [retention] tiers)\nwal_checkpoint_secs = 300        # WAL truncation interval\ngc_interval_secs = 3600          # GC run frequency (0 = disabled)\nread_pool_size = 4               # SQLite read connections (use 16 for high concurrency)\n\n[auth]\napi_keys = ["prod-svc:sk-abc"]   # simple format (empty = open mode)\n\n# Extended format with tier:\n# [[auth.api_key_entries]]\n# id = "pro-user"\n# secret = "sk-pro-key"\n# tier = "pro"\n\n[retention]\ndefault_tier = "free"\n\n[[retention.tiers]]\nname = "free"\ndays = 7\n\n[[retention.tiers]]\nname = "pro"\ndays = 90\n\n[pipeline]\nbatch_size = 64                  # use 256 for high throughput\nmax_body_bytes = 10485760        # 10 MB\nchannel_capacity = 32768         # batch writer queue depth\n\n[idempotency]\nenabled = true                   # dedup retries via Idempotency-Key header\nttl_secs = 300                   # 5 minute cache TTL\nmax_entries = 100000\n\n[rate_limit]\nenabled = false                  # per-key rate limiting (429 on exceed)\nrequests_per_second = 100.0\nburst = 200\n\n# [tls]                          # optional HTTPS\n# cert_path = "/etc/keplor/cert.pem"\n# key_path = "/etc/keplor/key.pem"'} />
 <p>Override any field with <code>KEPLOR_&lt;SECTION&gt;_&lt;FIELD&gt;</code> environment variables. See <a href="{base}/docs/configuration">Configuration</a> for the full reference.</p>
 
-<h3>Blob storage (S3 / R2 / MinIO)</h3>
-<p>By default, request/response bodies are stored in SQLite alongside event metadata. To offload blobs to an S3-compatible object store, build with the <code>s3</code> feature and add a <code>[blob_storage]</code> section.</p>
+<h3>Event archival (S3 / R2 / MinIO)</h3>
+<p>For long-term retention beyond what SQLite should hold, archive old events to any S3-compatible object store. Build with the <code>s3</code> feature and add an <code>[archive]</code> section.</p>
 
-<p><strong>What moves:</strong> Only compressed body bytes. Event metadata (timestamps, tokens, cost) stays in SQLite for fast queries.</p>
+<p><strong>What moves:</strong> Entire events &mdash; serialized to JSONL, compressed with zstd, uploaded as files partitioned by user and day. Daily rollups stay in SQLite for fast aggregation.</p>
 
 <h4>Cloudflare R2</h4>
 <p>R2 has 10 GB free storage and zero egress fees.</p>
-<Pre code={'[blob_storage]\nbucket = "keplor-blobs"\nendpoint = "https://<account-id>.r2.cloudflarestorage.com"\nregion = "auto"\naccess_key_id = "your-r2-access-key"\nsecret_access_key = "your-r2-secret-key"'} />
+<Pre code={'[archive]\nbucket = "keplor-archive"\nendpoint = "https://<account-id>.r2.cloudflarestorage.com"\nregion = "auto"\naccess_key_id = "your-r2-access-key"\nsecret_access_key = "your-r2-secret-key"\nprefix = "events"\narchive_after_days = 30'} />
 
 <h4>AWS S3</h4>
-<Pre code={'[blob_storage]\nbucket = "keplor-blobs"\nendpoint = "https://s3.us-east-1.amazonaws.com"\nregion = "us-east-1"\naccess_key_id = "AKIA..."\nsecret_access_key = "..."'} />
+<Pre code={'[archive]\nbucket = "keplor-archive"\nendpoint = "https://s3.us-east-1.amazonaws.com"\nregion = "us-east-1"\naccess_key_id = "AKIA..."\nsecret_access_key = "..."\nprefix = "events"\narchive_after_days = 30'} />
 
 <h4>MinIO (self-hosted)</h4>
-<Pre code={'[blob_storage]\nbucket = "keplor-blobs"\nendpoint = "http://localhost:9000"\nregion = "us-east-1"\naccess_key_id = "minioadmin"\nsecret_access_key = "minioadmin"\npath_style = true    # required for MinIO'} />
+<Pre code={'[archive]\nbucket = "keplor-archive"\nendpoint = "http://localhost:9000"\nregion = "us-east-1"\naccess_key_id = "minioadmin"\nsecret_access_key = "minioadmin"\npath_style = true    # required for MinIO\narchive_after_days = 30'} />
 
-<p>Blobs are keyed by SHA-256 hash, so identical payloads (repeated system prompts) are naturally deduplicated. GC automatically deletes orphaned blobs from the external store when events expire.</p>
+<p>Archival runs every <code>archive_interval_secs</code> (default 1 hour). Events are grouped by <code>(user_id, day)</code>, compressed, and uploaded. Archived events are deleted from SQLite; VACUUM reclaims disk space. S3 connectivity is verified at startup.</p>
 
-<h4>Smart routing</h4>
-<p>Don't want to offload immediately? Set a SQLite size threshold &mdash; blobs stay in SQLite until the database grows past it, then automatically route to S3/R2:</p>
-<Pre code={'[storage]\nblob_offload_threshold_mb = 500   # embedded until 500 MB, then auto-offload\n\n[blob_storage]\nbucket = "keplor-blobs"\nendpoint = "https://<account-id>.r2.cloudflarestorage.com"\nregion = "auto"\naccess_key_id = "..."\nsecret_access_key = "..."'} />
-<p>When the threshold is exceeded, Keplor does three things automatically:</p>
-<ol>
-  <li>Routes new blobs to S3/R2</li>
-  <li>Drains old embedded blobs to S3/R2 in the background (100 blobs every 60s)</li>
-  <li>Runs <code>VACUUM</code> once all blobs are drained to reclaim disk space</li>
-</ol>
-<p>When the DB shrinks back below the threshold, new blobs go to SQLite again. See <a href="{base}/docs/blob-storage">Blob Storage</a> for the full lifecycle.</p>
+<p><strong>Important:</strong> Set <code>archive_after_days</code> lower than your shortest retention tier, or GC will delete events before archival. See <a href="{base}/docs/blob-storage">Event Archival</a> for the full lifecycle.</p>
 
 <p>Build command: <code>cargo build --release --features mimalloc,s3</code></p>
 
@@ -445,7 +436,7 @@ tier = "pro"</code></pre>
 <p>On SIGINT/SIGTERM, Keplor stops accepting connections, drains the batch writer (flushes all pending events), runs a WAL checkpoint, and exits. Drain waits up to <code>shutdown_timeout_secs</code>.</p>
 
 <h3>Automated GC</h3>
-<p>Keplor runs tiered garbage collection every <code>gc_interval_secs</code> (default: 1 hour). Each configured retention tier gets its own pass &mdash; free-tier events older than 7 days are deleted independently of pro-tier events at 90 days. Orphaned blobs are removed from both SQLite and external storage (S3/R2) automatically.</p>
+<p>Keplor runs tiered garbage collection every <code>gc_interval_secs</code> (default: 1 hour). Each configured retention tier gets its own pass &mdash; free-tier events older than 7 days are deleted independently of pro-tier events at 90 days.</p>
 <p>Set <code>gc_interval_secs = 0</code> to disable. You can still run <code>keplor gc --older-than-days N</code> manually.</p>
 
 <h2 id="metrics">Prometheus metrics</h2>

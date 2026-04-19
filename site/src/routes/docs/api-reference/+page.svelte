@@ -82,7 +82,7 @@
   "version": "0.1.0",
   "db": "connected",
   "queue_depth": 0,
-  "queue_capacity": 8192,
+  "queue_capacity": 32768,
   "queue_utilization_pct": 0
 }`;
 
@@ -224,7 +224,7 @@ keplor_events_ingested_total{provider="openai"} 42`;
 <Pre code={statsResponse} />
 
 <h2 id="delete-single"><span class="method method-delete">DELETE</span> /v1/events/:id</h2>
-<p>Delete a single event by ID. Cleans up blob references and orphaned blobs.</p>
+<p>Delete a single event by ID.</p>
 <p>Returns <code>204 No Content</code> if deleted, <code>404 Not Found</code> if the event does not exist.</p>
 
 <h2 id="delete-bulk"><span class="method method-delete">DELETE</span> /v1/events?older_than_days=N</h2>
