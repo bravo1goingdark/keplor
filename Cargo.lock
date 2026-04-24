@@ -1336,6 +1336,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "http",
  "keplor-core",
  "keplor-pricing",
  "keplor-server",
@@ -1343,6 +1344,7 @@ dependencies = [
  "mimalloc",
  "serde_json",
  "smol_str",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
