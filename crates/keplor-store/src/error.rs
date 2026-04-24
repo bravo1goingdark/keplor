@@ -20,6 +20,14 @@ pub enum StoreError {
     #[error("internal: {0}")]
     Internal(String),
 
+    /// Filesystem / stdio error.
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
+
+    /// Backend-specific error not otherwise classified.
+    #[error("{0}")]
+    Other(String),
+
     /// The batch writer channel is full — back-pressure signal.
     #[error("batch writer channel full")]
     ChannelFull,

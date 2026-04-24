@@ -16,6 +16,8 @@ pub mod archive;
 pub mod batch;
 pub mod error;
 pub mod filter;
+pub mod kdb_store;
+pub mod mapping;
 mod migrations;
 pub mod store;
 pub mod stored_event;
