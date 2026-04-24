@@ -21,7 +21,8 @@ use object_store::path::Path as ObjPath;
 use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
 
 use crate::error::StoreError;
-use crate::store::{ArchiveManifest, Store};
+use crate::kdb_store::KdbStore;
+use crate::store::ArchiveManifest;
 use crate::stored_event::StoredEvent;
 
 /// S3 connection configuration for the archiver.
@@ -45,7 +46,7 @@ pub struct ArchiveS3Config {
 
 /// Archives old events from SQLite to S3/R2.
 pub struct Archiver {
-    store: Arc<Store>,
+    store: Arc<KdbStore>,
     client: Box<dyn ObjectStore>,
     prefix: String,
 }
@@ -53,7 +54,7 @@ pub struct Archiver {
 impl Archiver {
     /// Create a new archiver.
     pub fn new(
-        store: Arc<Store>,
+        store: Arc<KdbStore>,
         config: &ArchiveS3Config,
         rt: tokio::runtime::Handle,
     ) -> Result<Self, StoreError> {
@@ -395,7 +396,7 @@ mod tests {
             LlmEvent {
                 id: EventId::new(),
                 ts_ns,
-                user_id: user.map(|u| UserId::from(u)),
+                user_id: user.map(UserId::from),
                 api_key_id: None,
                 org_id: None,
                 project_id: None,

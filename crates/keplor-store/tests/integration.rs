@@ -62,6 +62,9 @@ async fn concurrent_writes_8_tasks() {
         h.await.unwrap();
     }
 
+    // KeplorDB queries only see rotated segments — force a flush.
+    store.wal_checkpoint().unwrap();
+
     // Verify all 400 events were stored.
     let filter = keplor_store::EventFilter::default();
     let events = store.query(&filter, 500, None).unwrap();

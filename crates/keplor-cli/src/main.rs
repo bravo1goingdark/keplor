@@ -25,11 +25,15 @@ enum Cli {
         #[arg(long)]
         json_logs: bool,
     },
-    /// Run database migrations.
+    /// Verify / initialise a data directory.
+    ///
+    /// Opens the store, which creates the directory + per-tier engines
+    /// if missing and refuses to mount a directory written under a
+    /// mismatched schema id. Idempotent.
     Migrate {
-        /// Path to the SQLite database.
-        #[arg(short, long, default_value = "keplor.db")]
-        db: PathBuf,
+        /// KeplorDB data directory.
+        #[arg(short = 'd', long, default_value = "./keplor_data")]
+        data_dir: PathBuf,
     },
     /// Query stored events.
     Query {
@@ -48,33 +52,36 @@ enum Cli {
         /// Maximum results.
         #[arg(long, default_value = "20")]
         limit: u32,
-        /// Path to the SQLite database.
-        #[arg(short, long, default_value = "keplor.db")]
-        db: PathBuf,
+        /// KeplorDB data directory.
+        #[arg(short = 'd', long, default_value = "./keplor_data")]
+        data_dir: PathBuf,
     },
     /// Print storage statistics.
     Stats {
-        /// Path to the SQLite database.
-        #[arg(short, long, default_value = "keplor.db")]
-        db: PathBuf,
+        /// KeplorDB data directory.
+        #[arg(short = 'd', long, default_value = "./keplor_data")]
+        data_dir: PathBuf,
     },
-    /// Delete events older than a threshold.
+    /// Delete segments older than a threshold.
     Gc {
         /// Delete events older than this many days.
         #[arg(long)]
         older_than_days: u32,
-        /// Path to the SQLite database.
-        #[arg(short, long, default_value = "keplor.db")]
-        db: PathBuf,
+        /// KeplorDB data directory.
+        #[arg(short = 'd', long, default_value = "./keplor_data")]
+        data_dir: PathBuf,
     },
-    /// Backfill daily rollups from stored events.
+    /// Flush WAL buffers into segments (KeplorDB's analog of a daily
+    /// rollup — the `--days` flag is retained for CLI compatibility
+    /// but is now a no-op since rollups are accumulated on every
+    /// write).
     Rollup {
-        /// Number of past days to roll up (including today).
+        /// Legacy: accepted for compatibility, ignored.
         #[arg(long, default_value = "30")]
         days: u32,
-        /// Path to the SQLite database.
-        #[arg(short, long, default_value = "keplor.db")]
-        db: PathBuf,
+        /// KeplorDB data directory.
+        #[arg(short = 'd', long, default_value = "./keplor_data")]
+        data_dir: PathBuf,
     },
     /// Archive old events to S3/R2 (requires --features s3).
     #[cfg(feature = "s3")]
@@ -88,9 +95,9 @@ enum Cli {
     },
     /// Show archive status and manifest summary.
     ArchiveStatus {
-        /// Path to the SQLite database.
-        #[arg(short, long, default_value = "keplor.db")]
-        db: PathBuf,
+        /// KeplorDB data directory.
+        #[arg(short = 'd', long, default_value = "./keplor_data")]
+        data_dir: PathBuf,
     },
     /// One-shot migration from a SQLite store into a KeplorDB data dir.
     ///
@@ -117,16 +124,16 @@ fn main() -> Result<()> {
 
     match cli {
         Cli::Run { config, json_logs } => run_server(config, json_logs),
-        Cli::Migrate { db } => migrate(db),
-        Cli::Query { user_id, model, provider, source, limit, db } => {
-            query(db, user_id, model, provider, source, limit)
+        Cli::Migrate { data_dir } => migrate(data_dir),
+        Cli::Query { user_id, model, provider, source, limit, data_dir } => {
+            query(data_dir, user_id, model, provider, source, limit)
         },
-        Cli::Stats { db } => stats(db),
-        Cli::Gc { older_than_days, db } => gc(db, older_than_days),
-        Cli::Rollup { days, db } => rollup(db, days),
+        Cli::Stats { data_dir } => stats(data_dir),
+        Cli::Gc { older_than_days, data_dir } => gc(data_dir, older_than_days),
+        Cli::Rollup { days, data_dir } => rollup(data_dir, days),
         #[cfg(feature = "s3")]
         Cli::Archive { config, older_than_days } => archive(config, older_than_days),
-        Cli::ArchiveStatus { db } => archive_status(db),
+        Cli::ArchiveStatus { data_dir } => archive_status(data_dir),
         Cli::MigrateFromSqlite { source, dest, batch_size } => {
             migrate_from_sqlite(source, dest, batch_size)
         },
@@ -162,12 +169,20 @@ fn run_server(config_path: PathBuf, json_logs: bool) -> Result<()> {
 
         // Open storage.
         let store = {
-            let db_path = &config.storage.db_path;
-            let pool_size = config.storage.read_pool_size;
-
-            let store = keplor_store::Store::open_with_pool_size(db_path, pool_size)
-                .with_context(|| format!("failed to open db at {}", db_path.display()))?;
-
+            let kdb_config = keplor_store::KdbConfig {
+                data_dir: config.storage.data_dir.clone(),
+                wal_max_events: config.storage.wal_max_events,
+                wal_sync_interval: config.storage.wal_sync_interval,
+                wal_sync_bytes: config.storage.wal_sync_bytes,
+                wal_shard_count: config.storage.wal_shard_count,
+                mmap_cache_capacity: config.storage.mmap_cache_capacity,
+                rollup_replay_days: config.storage.rollup_replay_days,
+                eager_tiers: keplor_store::KdbConfig::new(config.storage.data_dir.clone())
+                    .eager_tiers,
+            };
+            let store = keplor_store::Store::open(kdb_config).with_context(|| {
+                format!("failed to open data dir at {}", config.storage.data_dir.display())
+            })?;
             Arc::new(store)
         };
 
@@ -221,24 +236,24 @@ fn run_server(config_path: PathBuf, json_logs: bool) -> Result<()> {
     })
 }
 
-fn migrate(db: PathBuf) -> Result<()> {
+fn migrate(data_dir: PathBuf) -> Result<()> {
     init_tracing(false);
-    let _store = keplor_store::Store::open(&db)
-        .with_context(|| format!("failed to open/migrate db at {}", db.display()))?;
-    println!("migrations applied to {}", db.display());
+    let _store = keplor_store::Store::open(keplor_store::KdbConfig::new(data_dir.clone()))
+        .with_context(|| format!("failed to open data dir at {}", data_dir.display()))?;
+    println!("data dir ready at {} (schema id verified)", data_dir.display());
     Ok(())
 }
 
 fn query(
-    db: PathBuf,
+    data_dir: PathBuf,
     user_id: Option<String>,
     model: Option<String>,
     provider: Option<String>,
     source: Option<String>,
     limit: u32,
 ) -> Result<()> {
-    let store = keplor_store::Store::open(&db)
-        .with_context(|| format!("failed to open db at {}", db.display()))?;
+    let store = keplor_store::Store::open(keplor_store::KdbConfig::new(data_dir.clone()))
+        .with_context(|| format!("failed to open data dir at {}", data_dir.display()))?;
 
     let filter = keplor_store::EventFilter {
         user_id: user_id.map(smol_str::SmolStr::new),
@@ -288,31 +303,25 @@ fn query(
     Ok(())
 }
 
-fn stats(db: PathBuf) -> Result<()> {
-    let store = keplor_store::Store::open(&db)
-        .with_context(|| format!("failed to open db at {}", db.display()))?;
+fn stats(data_dir: PathBuf) -> Result<()> {
+    let store = keplor_store::Store::open(keplor_store::KdbConfig::new(data_dir.clone()))
+        .with_context(|| format!("failed to open data dir at {}", data_dir.display()))?;
 
     let filter = keplor_store::EventFilter::default();
-    let events = store.query(&filter, 1, None).context("query failed")?;
-    let total_events = if events.is_empty() {
-        0
-    } else {
-        store.query(&filter, u32::MAX, None).map(|e| e.len()).unwrap_or(0)
-    };
-
+    let total_events = store.query(&filter, u32::MAX, None).map(|e| e.len()).unwrap_or(0);
     let db_size = store.db_size_bytes().unwrap_or(0);
 
     println!("=== Keplor Storage Statistics ===");
-    println!("Database:             {}", db.display());
+    println!("Data directory:       {}", data_dir.display());
     println!("Total events:         {total_events}");
-    println!("Database size:        {:.2} MB", db_size as f64 / (1024.0 * 1024.0));
+    println!("Total segment size:   {:.2} MB", db_size as f64 / (1024.0 * 1024.0));
     Ok(())
 }
 
-fn gc(db: PathBuf, older_than_days: u32) -> Result<()> {
+fn gc(data_dir: PathBuf, older_than_days: u32) -> Result<()> {
     init_tracing(false);
-    let store = keplor_store::Store::open(&db)
-        .with_context(|| format!("failed to open db at {}", db.display()))?;
+    let store = keplor_store::Store::open(keplor_store::KdbConfig::new(data_dir.clone()))
+        .with_context(|| format!("failed to open data dir at {}", data_dir.display()))?;
 
     let cutoff_ns = {
         let now = std::time::SystemTime::now()
@@ -324,29 +333,22 @@ fn gc(db: PathBuf, older_than_days: u32) -> Result<()> {
 
     let stats = store.gc_expired(cutoff_ns).context("gc failed")?;
     println!(
-        "GC complete: deleted {} events (cutoff: {} days ago)",
+        "GC complete: dropped {} segments (cutoff: {} days ago)",
         stats.events_deleted, older_than_days
     );
     Ok(())
 }
 
-fn rollup(db: PathBuf, days: u32) -> Result<()> {
+fn rollup(data_dir: PathBuf, _days: u32) -> Result<()> {
     init_tracing(false);
-    let store = keplor_store::Store::open(&db)
-        .with_context(|| format!("failed to open db at {}", db.display()))?;
+    let store = keplor_store::Store::open(keplor_store::KdbConfig::new(data_dir.clone()))
+        .with_context(|| format!("failed to open data dir at {}", data_dir.display()))?;
 
-    let now_secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .context("system clock error")?
-        .as_secs() as i64;
-    let today = now_secs - (now_secs % 86400);
-
-    for i in 0..days {
-        let day = today - (i as i64) * 86400;
-        store.rollup_day(day).with_context(|| format!("rollup failed for day {day}"))?;
-    }
-
-    println!("rolled up {days} days ending at {today} (epoch seconds)");
+    // KeplorDB rollups accumulate on every append — there is no batch
+    // backfill to run. `wal_checkpoint` rotates any pending WAL buffer
+    // into segments so the in-memory rollup store is durable.
+    store.wal_checkpoint().context("wal_checkpoint failed")?;
+    println!("rollup is now continuous; WAL flushed to segments at {}", data_dir.display());
     Ok(())
 }
 
@@ -361,11 +363,19 @@ fn archive(config_path: PathBuf, older_than_days_override: Option<u32>) -> Resul
         config.archive.as_ref().ok_or_else(|| anyhow::anyhow!("no [archive] section in config"))?;
 
     let store = Arc::new(
-        keplor_store::Store::open_with_pool_size(
-            &config.storage.db_path,
-            config.storage.read_pool_size,
-        )
-        .with_context(|| format!("failed to open db at {}", config.storage.db_path.display()))?,
+        keplor_store::Store::open(keplor_store::KdbConfig {
+            data_dir: config.storage.data_dir.clone(),
+            wal_max_events: config.storage.wal_max_events,
+            wal_sync_interval: config.storage.wal_sync_interval,
+            wal_sync_bytes: config.storage.wal_sync_bytes,
+            wal_shard_count: config.storage.wal_shard_count,
+            mmap_cache_capacity: config.storage.mmap_cache_capacity,
+            rollup_replay_days: config.storage.rollup_replay_days,
+            eager_tiers: keplor_store::KdbConfig::new(config.storage.data_dir.clone()).eager_tiers,
+        })
+        .with_context(|| {
+            format!("failed to open data dir at {}", config.storage.data_dir.display())
+        })?,
     );
 
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -409,14 +419,14 @@ fn archive(config_path: PathBuf, older_than_days_override: Option<u32>) -> Resul
     Ok(())
 }
 
-fn archive_status(db: PathBuf) -> Result<()> {
-    let store = keplor_store::Store::open(&db)
-        .with_context(|| format!("failed to open db at {}", db.display()))?;
+fn archive_status(data_dir: PathBuf) -> Result<()> {
+    let store = keplor_store::Store::open(keplor_store::KdbConfig::new(data_dir.clone()))
+        .with_context(|| format!("failed to open data dir at {}", data_dir.display()))?;
 
     let (files, events, bytes) = store.archive_summary().context("query archive summary")?;
 
     println!("=== Archive Status ===");
-    println!("Database:        {}", db.display());
+    println!("Data directory:  {}", data_dir.display());
     println!("Archive files:   {files}");
     println!("Archived events: {events}");
     println!("Compressed size: {:.2} MB", bytes as f64 / (1024.0 * 1024.0));
@@ -451,7 +461,7 @@ fn init_tracing(json: bool) {
 
 fn migrate_from_sqlite(source: PathBuf, dest: PathBuf, batch_size: u32) -> Result<()> {
     use keplor_store::kdb_store::{KdbConfig, KdbStore};
-    use keplor_store::Store;
+    use keplor_store::SqliteStore;
 
     init_tracing(false);
 
@@ -464,7 +474,7 @@ fn migrate_from_sqlite(source: PathBuf, dest: PathBuf, batch_size: u32) -> Resul
         dest.display()
     );
 
-    let src = Store::open(&source)
+    let src = SqliteStore::open(&source)
         .with_context(|| format!("failed to open source db at {}", source.display()))?;
     let dst = KdbStore::open(KdbConfig::new(dest.clone()))
         .with_context(|| format!("failed to open destination at {}", dest.display()))?;
@@ -492,7 +502,7 @@ struct MigrateStats {
 /// Core migration loop — no tracing init, no global state. Tests call
 /// this directly.
 fn run_migration(
-    src: &keplor_store::Store,
+    src: &keplor_store::SqliteStore,
     dst: &keplor_store::kdb_store::KdbStore,
     batch_size: u32,
     checkpoint_path: &std::path::Path,
@@ -607,7 +617,7 @@ mod migration_tests {
     use keplor_store::kdb_store::{KdbConfig, KdbStore};
     #[cfg(feature = "s3")]
     use keplor_store::ArchiveManifest;
-    use keplor_store::Store;
+    use keplor_store::SqliteStore as Store;
     use smol_str::SmolStr;
 
     fn sample_event(tier: &str, ts_ns: i64, user: &str, cost: i64) -> LlmEvent {
@@ -690,7 +700,7 @@ mod migration_tests {
         assert_eq!(q.cost_nanodollars, 25_000);
 
         // Manifest made it over.
-        let ms = dst.list_archives(Some("alice"), None, None, 100, 0).unwrap();
+        let ms = dst.list_archives(Some("alice"), None, None).unwrap();
         assert_eq!(ms.len(), 1);
         assert_eq!(ms[0].archive_id, "a1");
 

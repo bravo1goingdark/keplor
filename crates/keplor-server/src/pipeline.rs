@@ -508,6 +508,9 @@ mod tests {
         .unwrap();
         let resp = pipeline.ingest(event, None, None, "free").await.unwrap();
 
+        // KeplorDB reads only see rotated segments; flush before query.
+        store.wal_checkpoint().unwrap();
+
         let id: EventId = resp.id.parse().unwrap();
         let loaded = store.get_event(&id).unwrap().expect("event should exist");
         assert_eq!(loaded.model, "gpt-4o");
@@ -531,6 +534,7 @@ mod tests {
         )
         .unwrap();
         let resp = pipeline.ingest(event, None, None, "free").await.unwrap();
+        pipeline.store().wal_checkpoint().unwrap();
         let id: EventId = resp.id.parse().unwrap();
         let loaded = pipeline.store().get_event(&id).unwrap().unwrap();
         assert!(loaded.ts_ns > 1_705_000_000_000_000_000);
@@ -562,6 +566,7 @@ mod tests {
 
         // Simulate server-side key attribution overriding client-provided value.
         let resp = pipeline.ingest(event, Some("real-key"), None, "pro").await.unwrap();
+        store.wal_checkpoint().unwrap();
         let id: EventId = resp.id.parse().unwrap();
         let loaded = store.get_event(&id).unwrap().expect("event should exist");
         assert_eq!(

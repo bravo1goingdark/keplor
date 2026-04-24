@@ -310,7 +310,11 @@ async fn backpressure_returns_503() {
 
 #[tokio::test]
 async fn db_size_limit_returns_507() {
-    // 1 MB limit — ingest events with large metadata to push past it.
+    // 1 MB limit — ingest events with unique, incompressible metadata
+    // to push past it. KeplorDB segments are zstd-compressed, so the
+    // metadata payloads must vary per-event (a repeated string like
+    // `"x".repeat(2048)` compresses to near-zero).
+    use rand::{rngs::StdRng, Rng, SeedableRng};
     let store = Arc::new(Store::open_in_memory().unwrap());
     let writer = Arc::new(BatchWriter::new(Arc::clone(&store), BatchConfig::default()));
     let catalog = Arc::new(Catalog::load_bundled().unwrap());
@@ -319,15 +323,19 @@ async fn db_size_limit_returns_507() {
     let base = spawn_custom_server(pipeline, ServerConfig::default()).await;
     let client = reqwest::Client::new();
 
-    let big_body = "x".repeat(2048);
+    let mut rng = StdRng::seed_from_u64(42);
     let mut saw_507 = false;
-    for _ in 0..50 {
+    for _ in 0..200 {
         let events: Vec<_> = (0..100)
             .map(|_| {
+                // 512 random alphanumerics per event — does not
+                // compress, so segment size grows predictably.
+                let payload: String =
+                    (0..512).map(|_| rng.gen_range(b'!'..=b'~') as char).collect();
                 serde_json::json!({
                     "model": "gpt-4o",
                     "provider": "openai",
-                    "metadata": {"payload": &big_body},
+                    "metadata": {"payload": payload},
                 })
             })
             .collect();

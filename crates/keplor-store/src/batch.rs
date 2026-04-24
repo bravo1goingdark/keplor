@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 use keplor_core::{EventId, LlmEvent};
 
 use crate::error::StoreError;
-use crate::store::Store;
+use crate::kdb_store::KdbStore;
 
 /// Configuration for the [`BatchWriter`].
 #[derive(Debug, Clone)]
@@ -56,7 +56,7 @@ impl BatchWriter {
     ///
     /// The background flush task runs until [`BatchWriter::shutdown`] is
     /// called or all senders are dropped.
-    pub fn new(store: Arc<Store>, config: BatchConfig) -> Self {
+    pub fn new(store: Arc<KdbStore>, config: BatchConfig) -> Self {
         let capacity = config.channel_capacity;
         let (tx, rx) = mpsc::channel(capacity);
         let flush_handle = tokio::spawn(flush_loop(store, rx, config));
@@ -163,7 +163,11 @@ impl BatchWriter {
     }
 }
 
-async fn flush_loop(store: Arc<Store>, mut rx: mpsc::Receiver<WriteRequest>, config: BatchConfig) {
+async fn flush_loop(
+    store: Arc<KdbStore>,
+    mut rx: mpsc::Receiver<WriteRequest>,
+    config: BatchConfig,
+) {
     let mut buffer: Vec<WriteRequest> = Vec::with_capacity(config.batch_size);
     let mut interval = tokio::time::interval(config.flush_interval);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -205,9 +209,18 @@ async fn flush_loop(store: Arc<Store>, mut rx: mpsc::Receiver<WriteRequest>, con
     }
 }
 
-/// Flush buffered writes via `spawn_blocking` so the synchronous SQLite
-/// I/O never blocks a tokio worker thread.
-async fn flush(store: &Arc<Store>, buffer: &mut Vec<WriteRequest>) {
+/// Flush buffered writes via `spawn_blocking` so disk I/O never
+/// blocks a tokio worker thread.
+///
+/// After the batch lands we call `wal_checkpoint` to rotate the in-WAL
+/// events into segment files — KeplorDB queries only see rotated
+/// segments, so without this step no event written through the
+/// [`BatchWriter`] would ever become visible to `POST /v1/events`
+/// follow-up reads. The cost is one segment file per flush cycle;
+/// under the default 50 ms cadence that's ~1200 tiny segments/minute
+/// at idle, which keplor's segment-level GC reclaims on the retention
+/// schedule.
+async fn flush(store: &Arc<KdbStore>, buffer: &mut Vec<WriteRequest>) {
     let pending = std::mem::take(buffer);
     let count = pending.len();
 
@@ -221,9 +234,13 @@ async fn flush(store: &Arc<Store>, buffer: &mut Vec<WriteRequest>) {
     }
 
     let store = Arc::clone(store);
-    let result = tokio::task::spawn_blocking(move || store.append_batch(&batch))
-        .await
-        .unwrap_or_else(|e| Err(StoreError::Internal(e.to_string())));
+    let result = tokio::task::spawn_blocking(move || {
+        store.append_batch(&batch)?;
+        store.wal_checkpoint()?;
+        Ok::<_, StoreError>(batch.iter().map(|e| e.id).collect::<Vec<_>>())
+    })
+    .await
+    .unwrap_or_else(|e| Err(StoreError::Internal(e.to_string())));
 
     match result {
         Ok(ids) => {

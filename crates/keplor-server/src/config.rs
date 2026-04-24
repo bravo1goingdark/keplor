@@ -67,34 +67,56 @@ impl Default for ListenConfig {
 }
 
 /// Storage configuration.
+///
+/// The on-disk layout is now a KeplorDB data directory — one segment
+/// tree per retention tier under `{data_dir}/tier={name}/`. The
+/// `db_path` name survives the cutover as a backwards-compatible alias
+/// in deployed TOMLs; it points at a directory now, not a SQLite file.
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct StorageConfig {
-    /// Path to the SQLite database file.
-    pub db_path: PathBuf,
+    /// Path to the KeplorDB data directory.
+    #[serde(alias = "db_path")]
+    pub data_dir: PathBuf,
     /// Automatic GC: delete events older than this many days. 0 = disabled.
     pub retention_days: u64,
-    /// WAL checkpoint interval in seconds. 0 = disabled.
+    /// WAL checkpoint (segment rotation) interval in seconds. 0 = disabled.
     pub wal_checkpoint_secs: u64,
     /// Maximum database size in megabytes. 0 = unlimited.
     /// When exceeded, ingestion returns HTTP 507 until space is freed (by GC
     /// or manual deletion).
     pub max_db_size_mb: u64,
-    /// Number of read connections in the pool. Default: 4.
-    pub read_pool_size: usize,
     /// GC run interval in seconds. Default: 3600 (1 hour). 0 = disabled.
     pub gc_interval_secs: u64,
+    /// Events-per-shard before forced rotation. Default 500k.
+    pub wal_max_events: u32,
+    /// fsync interval for batched writes. Default 64.
+    pub wal_sync_interval: u32,
+    /// Byte threshold for batched fsync. Default 256 KiB.
+    pub wal_sync_bytes: u64,
+    /// Per-engine WAL shard count. Default 4.
+    pub wal_shard_count: usize,
+    /// Mmap'd segment file LRU cache capacity. Default 256.
+    pub mmap_cache_capacity: usize,
+    /// Days of historical segments to replay into the rollup store on
+    /// open. Default 7.
+    pub rollup_replay_days: u32,
 }
 
 impl Default for StorageConfig {
     fn default() -> Self {
         Self {
-            db_path: PathBuf::from("keplor.db"),
+            data_dir: PathBuf::from("./keplor_data"),
             retention_days: 90,
             wal_checkpoint_secs: 300,
             max_db_size_mb: 0,
-            read_pool_size: 4,
             gc_interval_secs: 3600,
+            wal_max_events: 500_000,
+            wal_sync_interval: 64,
+            wal_sync_bytes: 256 * 1024,
+            wal_shard_count: 4,
+            mmap_cache_capacity: 256,
+            rollup_replay_days: 7,
         }
     }
 }
@@ -375,8 +397,8 @@ impl ServerConfig {
                 self.pipeline.max_body_bytes
             ));
         }
-        if self.storage.db_path.as_os_str().is_empty() {
-            return Err("storage.db_path must not be empty".into());
+        if self.storage.data_dir.as_os_str().is_empty() {
+            return Err("storage.data_dir must not be empty".into());
         }
         if self.server.request_timeout_secs == 0 || self.server.request_timeout_secs > 300 {
             return Err(format!(
@@ -387,10 +409,10 @@ impl ServerConfig {
         if self.server.max_connections == 0 {
             return Err("server.max_connections must be > 0".into());
         }
-        if self.storage.read_pool_size == 0 || self.storage.read_pool_size > 64 {
+        if self.storage.wal_shard_count == 0 || self.storage.wal_shard_count > 64 {
             return Err(format!(
-                "storage.read_pool_size = {} must be in [1, 64]",
-                self.storage.read_pool_size
+                "storage.wal_shard_count = {} must be in [1, 64]",
+                self.storage.wal_shard_count
             ));
         }
         if let Some(tls) = &self.tls {
@@ -470,7 +492,7 @@ mod tests {
     fn defaults_are_sane() {
         let cfg = ServerConfig::default();
         assert_eq!(cfg.server.listen_addr.port(), 8080);
-        assert_eq!(cfg.storage.db_path, PathBuf::from("keplor.db"));
+        assert_eq!(cfg.storage.data_dir, PathBuf::from("./keplor_data"));
         assert!(cfg.auth.api_keys.is_empty());
         assert_eq!(cfg.pipeline.batch_size, 64);
     }
@@ -495,9 +517,9 @@ mod tests {
     }
 
     #[test]
-    fn empty_db_path_rejected() {
+    fn empty_data_dir_rejected() {
         let mut cfg = ServerConfig::default();
-        cfg.storage.db_path = PathBuf::new();
+        cfg.storage.data_dir = PathBuf::new();
         assert!(cfg.validate().is_err());
     }
 }

@@ -59,6 +59,7 @@ tempfile   = "3"
 rustls     = { workspace = true }
 criterion  = { workspace = true }
 dhat       = { workspace = true }
+rand       = "0.8"
 
 [[bench]]
 name    = "pipeline_bench"

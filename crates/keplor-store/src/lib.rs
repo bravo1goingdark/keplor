@@ -1,11 +1,14 @@
 //! # keplor-store
 //!
-//! Local-first storage: the `llm_events` fact table and `daily_rollups`
-//! aggregation.
+//! KeplorDB-backed storage for the `llm_events` fact table + archive
+//! manifests. Ingest via [`BatchWriter`] for amortised per-batch fsync
+//! on throughput paths, or [`KdbStore::append_event_durable`] for
+//! per-event sync.
 //!
-//! For high-throughput ingestion, use [`BatchWriter`] which accumulates
-//! events and flushes in bulk transactions (amortising `BEGIN`/`COMMIT`
-//! overhead).  For single-event writes, use [`Store::append_event`].
+//! The legacy SQLite backend ([`SqliteStore`]) is retained only as a
+//! migration source — the `keplor migrate-from-sqlite` subcommand
+//! opens both sides and copies events across. It is **not** on any
+//! runtime ingest path.
 
 #![deny(missing_docs)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
@@ -28,7 +31,14 @@ pub use archive::{ArchiveResult, ArchiveS3Config, Archiver};
 pub use batch::{BatchConfig, BatchWriter};
 pub use error::StoreError;
 pub use filter::{Cursor, EventFilter};
-pub use store::{
-    AggregateRow, ArchiveManifest, EventSummary, GcStats, QuotaSummary, RollupRow, Store,
-};
+pub use kdb_store::{KdbConfig, KdbStore};
+pub use store::{AggregateRow, ArchiveManifest, EventSummary, GcStats, QuotaSummary, RollupRow};
 pub use stored_event::StoredEvent;
+
+/// The legacy SQLite-backed store. Retained as a read-only migration
+/// source (`keplor migrate-from-sqlite`); no runtime path writes to it.
+pub use store::Store as SqliteStore;
+
+/// Primary event store — alias for [`KdbStore`] at the public API
+/// surface so existing `keplor_store::Store` call sites stay compiling.
+pub use kdb_store::KdbStore as Store;

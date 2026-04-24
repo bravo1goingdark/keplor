@@ -1397,6 +1397,7 @@ dependencies = [
  "metrics",
  "metrics-exporter-prometheus",
  "mimalloc",
+ "rand 0.8.5",
  "rcgen",
  "reqwest",
  "rustls",

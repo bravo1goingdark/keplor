@@ -530,24 +530,36 @@ impl KdbStore {
         Ok(())
     }
 
-    /// Fetch events below a timestamp for the archiver.
+    /// Fetch every event below a timestamp for the archiver.
+    ///
+    /// Matches the SQLite `Store::query_events_for_archive` signature
+    /// (no limit) — the archiver groups by `(user_id, day)` before
+    /// uploading, so it needs the full set. For very large archives
+    /// this can hold many events in memory; callers that want bounded
+    /// memory should range-partition `older_than_ns` themselves.
     pub fn query_events_for_archive(
         &self,
         older_than_ns: i64,
-        limit: u32,
     ) -> Result<Vec<LlmEvent>, StoreError> {
         let qf = QueryFilter::<D> { to_ts_ns: Some(older_than_ns), ..Default::default() };
         let mut out: Vec<(i64, LlmEvent)> = Vec::new();
         for eng in self.all_engines() {
-            let rows = eng.query_recent(&qf, limit as usize).map_err(kdb_err)?;
+            let rows = eng.query_recent(&qf, usize::MAX).map_err(kdb_err)?;
             for r in rows {
                 let ev = mapping::from_event_ref(&r).map_err(map_err)?;
                 out.push((ev.ts_ns, ev));
             }
         }
-        // Archiver prefers oldest first.
-        out.sort_by(|a, b| a.0.cmp(&b.0));
-        out.truncate(limit as usize);
+        // Archiver groups by user; SQLite ordered by (user_id, ts_ns),
+        // we match that here so grouping produces identical chunks.
+        out.sort_by(|a, b| {
+            a.1.user_id
+                .as_ref()
+                .map(|u| u.as_str())
+                .unwrap_or("")
+                .cmp(b.1.user_id.as_ref().map(|u| u.as_str()).unwrap_or(""))
+                .then_with(|| a.0.cmp(&b.0))
+        });
         Ok(out.into_iter().map(|(_, e)| e).collect())
     }
 
@@ -557,29 +569,32 @@ impl KdbStore {
         store.insert(m.clone())
     }
 
-    /// True iff a manifest exists for `(user_id, day)` whose range
-    /// overlaps the filter window.
+    /// True iff any archived manifest overlaps the requested window.
+    ///
+    /// Matches the SQLite `Store::has_archived_data` signature — the
+    /// `/v1/events` route flips the response's `has_archived_data`
+    /// flag based on this, and that route does not filter by user.
     pub fn has_archived_data(
         &self,
-        user_id: Option<&str>,
-        from_ts_ns: i64,
-        to_ts_ns: i64,
+        from_ts_ns: Option<i64>,
+        to_ts_ns: Option<i64>,
     ) -> Result<bool, StoreError> {
         let store = self.manifests.lock().map_err(|e| StoreError::Other(e.to_string()))?;
-        Ok(store.any_overlapping(user_id, from_ts_ns, to_ts_ns))
+        let from = from_ts_ns.unwrap_or(i64::MIN);
+        let to = to_ts_ns.unwrap_or(i64::MAX);
+        Ok(store.any_overlapping(None, from, to))
     }
 
-    /// List manifests matching the filter.
+    /// List manifests matching the filter — unpaginated, matches the
+    /// SQLite signature.
     pub fn list_archives(
         &self,
         user_id: Option<&str>,
         from_ts_ns: Option<i64>,
         to_ts_ns: Option<i64>,
-        limit: u32,
-        offset: u32,
     ) -> Result<Vec<ArchiveManifest>, StoreError> {
         let store = self.manifests.lock().map_err(|e| StoreError::Other(e.to_string()))?;
-        Ok(store.list(user_id, from_ts_ns, to_ts_ns, limit, offset))
+        Ok(store.list(user_id, from_ts_ns, to_ts_ns, u32::MAX, 0))
     }
 
     /// Aggregate counts + bytes + oldest-ts for the CLI's
@@ -850,5 +865,27 @@ mod tests {
         store.append_event(&sample("enterprise", 1_700_000_000_000_000_000, 100)).unwrap();
         let map = store.engines.load();
         assert!(map.contains_key("enterprise"));
+    }
+
+    #[test]
+    fn query_filters_by_user_id_dim() {
+        let store = KdbStore::open_in_memory().unwrap();
+        let ts = 1_700_000_000_000_000_000i64;
+        store.append_event(&sample("free", ts, 100)).unwrap();
+        store.wal_checkpoint().unwrap();
+
+        // Unfiltered → returns the event.
+        let all = store.query(&EventFilter::default(), 50, None).unwrap();
+        assert_eq!(all.len(), 1, "unfiltered query should see the event");
+
+        // Filter by matching user — returns it.
+        let f = EventFilter { user_id: Some(SmolStr::new("alice")), ..Default::default() };
+        let matched = store.query(&f, 50, None).unwrap();
+        assert_eq!(matched.len(), 1, "user_id=alice filter should match");
+
+        // Filter by other user — returns empty.
+        let f = EventFilter { user_id: Some(SmolStr::new("bob")), ..Default::default() };
+        let unmatched = store.query(&f, 50, None).unwrap();
+        assert!(unmatched.is_empty(), "user_id=bob filter should not match alice");
     }
 }
