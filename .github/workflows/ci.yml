@@ -84,10 +84,18 @@ jobs:
       - name: Clone sibling keplordb
         working-directory: ${{ github.workspace }}/..
         run: git clone --depth 1 https://github.com/themankindproject/keplordb.git
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: dtolnay/rust-toolchain@master
         with:
-          command: check
-          arguments: --all-features
+          toolchain: "1.93.0"
+      # Install cargo-deny natively rather than using the Embark
+      # Docker action — the action mounts only $GITHUB_WORKSPACE into
+      # the container, so the sibling keplordb clone is invisible from
+      # inside it and the path-dep fails to resolve.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo deny --all-features check
 
   # ---- 5. static musl build + size gate -------------------------------------
   musl-size:
