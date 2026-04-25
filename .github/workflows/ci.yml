@@ -17,6 +17,13 @@ env:
   CARGO_NET_RETRY: 10
   RUSTUP_MAX_RETRIES: 10
 
+# keplor-store has a path-dep on the sibling keplordb repo
+# (`path = "../../../keplordb/crates/keplordb"`). Every job that resolves
+# the dependency graph (fmt does too — `cargo fmt --all` shells out to
+# `cargo metadata`) must clone that sibling into the matching layout
+# before running cargo. The clone step is hand-rolled because
+# actions/checkout@v4 rejects `path` values that escape $GITHUB_WORKSPACE.
+
 jobs:
   # ---- 1. formatting --------------------------------------------------------
   fmt:
@@ -24,6 +31,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Clone sibling keplordb
+        working-directory: ${{ github.workspace }}/..
+        run: git clone --depth 1 https://github.com/themankindproject/keplordb.git
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.93.0"
@@ -36,6 +46,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Clone sibling keplordb
+        working-directory: ${{ github.workspace }}/..
+        run: git clone --depth 1 https://github.com/themankindproject/keplordb.git
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.93.0"
@@ -50,6 +63,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Clone sibling keplordb
+        working-directory: ${{ github.workspace }}/..
+        run: git clone --depth 1 https://github.com/themankindproject/keplordb.git
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.93.0"
@@ -65,6 +81,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Clone sibling keplordb
+        working-directory: ${{ github.workspace }}/..
+        run: git clone --depth 1 https://github.com/themankindproject/keplordb.git
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check
@@ -76,6 +95,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Clone sibling keplordb
+        working-directory: ${{ github.workspace }}/..
+        run: git clone --depth 1 https://github.com/themankindproject/keplordb.git
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.93.0"
