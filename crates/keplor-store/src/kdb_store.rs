@@ -33,7 +33,7 @@ use smol_str::SmolStr;
 use crate::error::StoreError;
 use crate::filter::{Cursor, EventFilter};
 use crate::mapping::{self, C, D, DIM_API_KEY_ID, DIM_USER_ID, L, SCHEMA_ID};
-use crate::store::{AggregateRow, ArchiveManifest, EventSummary, GcStats, QuotaSummary, RollupRow};
+use crate::types::{AggregateRow, ArchiveManifest, EventSummary, GcStats, QuotaSummary, RollupRow};
 
 mod manifests;
 

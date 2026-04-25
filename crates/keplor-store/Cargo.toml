@@ -1,6 +1,6 @@
 [package]
 name         = "keplor-store"
-description  = "SQLite storage engine for LLM events and daily rollups."
+description  = "KeplorDB-backed storage for LLM events, rollups, and archive manifests."
 version      = { workspace = true }
 edition      = { workspace = true }
 rust-version = { workspace = true }
@@ -13,16 +13,19 @@ publish      = { workspace = true }
 workspace = true
 
 [features]
-default = ["batch"]
-batch   = ["dep:tokio", "dep:metrics"]
-s3      = ["dep:object_store", "dep:zstd"]
+default              = ["batch"]
+batch                = ["dep:tokio", "dep:metrics"]
+s3                   = ["dep:object_store", "dep:zstd"]
+# Compile in the legacy SQLite store as a read-only migration source.
+# Adds the `rusqlite` (bundled) dep — costs ~2-3 MB on the static binary.
+migrate-from-sqlite  = ["dep:rusqlite"]
 
 [dependencies]
 keplor-core = { path = "../keplor-core" }
 keplordb    = { path = "../../../keplordb/crates/keplordb" }
 arc-swap    = "1"
 bytes       = { workspace = true }
-rusqlite    = { workspace = true }
+rusqlite    = { workspace = true, optional = true }
 serde       = { workspace = true }
 serde_json  = { workspace = true }
 smol_str    = { version = "0.3", features = ["serde"] }

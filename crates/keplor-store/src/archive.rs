@@ -22,8 +22,8 @@ use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
 
 use crate::error::StoreError;
 use crate::kdb_store::KdbStore;
-use crate::store::ArchiveManifest;
 use crate::stored_event::StoredEvent;
+use crate::types::ArchiveManifest;
 
 /// S3 connection configuration for the archiver.
 #[derive(Debug, Clone)]

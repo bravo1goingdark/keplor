@@ -55,7 +55,8 @@ Run through this before every production deployment.
 
 - [ ] Build with mimalloc: `--features mimalloc` (49% throughput gain)
 - [ ] Build as static musl binary: `--target x86_64-unknown-linux-musl`
-- [ ] Verify binary size: `ls -lh target/x86_64-unknown-linux-musl/release/keplor` (must be <12 MB)
+- [ ] Verify binary size: `ls -lh target/x86_64-unknown-linux-musl/release/keplor` (must be <10 MB on a default build, <12 MB with `migrate-from-sqlite`)
+- [ ] **Do not** enable `--features migrate-from-sqlite` on production builds unless you actually need to import a legacy SQLite db — it links `rusqlite` (~2 MB) and adds the `keplor migrate-from-sqlite` subcommand.
 - [ ] Run the acceptance gate: `just ci` (fmt, clippy, tests, supply-chain audit)
 
 ### Configuration
@@ -71,7 +72,7 @@ Run through this before every production deployment.
 ### System
 
 - [ ] File descriptor limit: `LimitNOFILE=65535` in systemd (or `ulimit -n 65535`)
-- [ ] Dedicated data directory with sufficient disk space for the SQLite DB + WAL
+- [ ] Dedicated data directory with sufficient disk space for the KeplorDB segments + WAL shards
 - [ ] Use `--json-logs` for structured log aggregation (Datadog, Loki, etc.)
 - [ ] Set `KEPLOR_LOG=info` (or `RUST_LOG=info`) — avoid `debug`/`trace` in production
 
@@ -81,11 +82,11 @@ Run through this before every production deployment.
 - [ ] Alert on `keplor_batch_flush_errors_total` increasing (DB write failures)
 - [ ] Alert on `queue_utilization_pct > 80` in `/health` (back-pressure)
 - [ ] Alert on `keplor_auth_failures_total` spikes (credential stuffing)
-- [ ] Monitor disk usage — SQLite + WAL can grow between GC runs
+- [ ] Monitor disk usage — KeplorDB segments accumulate between GC runs
 
 ### Backup
 
-- [ ] Schedule daily backups: `sqlite3 keplor.db ".backup /backups/keplor-$(date +%Y%m%d).db"`
+- [ ] Schedule daily snapshots of the KeplorDB data dir (rsync / filesystem snapshot — see Backup section below)
 - [ ] Test restore procedure at least once before go-live
 
 ### Smoke test
@@ -149,72 +150,114 @@ Scrape `GET /metrics` for:
 
 ## Backup and Restore
 
+Keplor stores everything in a single data directory (default
+`./keplor_data` or `storage.data_dir` in the config). The directory
+contains per-tier KeplorDB engines (sharded WALs + immutable `.kdb`
+segments) and the `manifests.jsonl` archive sidecar.
+
 ### Backup
 
-Keplor uses SQLite with WAL mode. To create a consistent backup:
+**Option 1: Filesystem snapshot (recommended)**
 
-**Option 1: Online backup via CLI (recommended)**
+If your filesystem supports atomic snapshots (ZFS, Btrfs, LVM), snapshot
+the data directory while Keplor runs. KeplorDB segments are immutable
+once rotated, and active WAL shards are crash-safe (their headers and
+records are fsync'd on the durable write paths), so a snapshot is a
+valid restore source.
 
 ```bash
-# Checkpoint WAL first, then copy
-keplor gc --older-than-days 99999 --db keplor.db  # no-op GC forces WAL checkpoint
-cp keplor.db keplor.db.backup
+# ZFS example
+zfs snapshot tank/keplor@daily-$(date +%Y%m%d)
+zfs send tank/keplor@daily-$(date +%Y%m%d) | ssh backup-host "zfs recv ..."
 ```
 
 **Option 2: Stop and copy**
 
 ```bash
-# Stop Keplor (graceful shutdown checkpoints WAL automatically)
+# Graceful shutdown drains the BatchWriter and runs a final wal_checkpoint.
 docker compose stop keplor
 
-# Copy the database file
-cp /var/lib/keplor/keplor.db /backups/keplor-$(date +%Y%m%d).db
+# Copy the data directory
+tar -C /var/lib -czf /backups/keplor-$(date +%Y%m%d).tar.gz keplor
 
-# Restart
 docker compose start keplor
 ```
 
-**Option 3: sqlite3 .backup command**
+**Option 3: Online rsync after a checkpoint**
 
 ```bash
-sqlite3 /var/lib/keplor/keplor.db ".backup /backups/keplor-$(date +%Y%m%d).db"
+# Force a WAL checkpoint (rotates active WAL into a sealed segment).
+keplor rollup --data-dir /var/lib/keplor
+
+# Rsync the (mostly immutable) data directory.
+rsync -a --inplace /var/lib/keplor/ /backups/keplor-$(date +%Y%m%d)/
 ```
 
-This is safe to run while Keplor is writing — SQLite's `.backup` command handles WAL correctly.
+Concurrent writes during the rsync may leave the trailing WAL shards
+inconsistent at the byte level; KeplorDB's recovery code tolerates a
+truncated trailing record on reopen, so the restore will simply lose
+events that hadn't yet rotated to a segment.
 
 ### Restore
 
 ```bash
 docker compose stop keplor
-cp /backups/keplor-20260418.db /var/lib/keplor/keplor.db
+rm -rf /var/lib/keplor
+tar -C /var/lib -xzf /backups/keplor-20260418.tar.gz
 docker compose start keplor
 ```
 
 ### Scheduled backups
 
 ```bash
-# crontab: daily backup at 03:00, retain 7 days
-0 3 * * * sqlite3 /var/lib/keplor/keplor.db ".backup /backups/keplor-$(date +\%Y\%m\%d).db" && find /backups -name 'keplor-*.db' -mtime +7 -delete
+# crontab: daily tarball at 03:00, retain 7 days
+0 3 * * * tar -C /var/lib -czf /backups/keplor-$(date +\%Y\%m\%d).tar.gz keplor && find /backups -name 'keplor-*.tar.gz' -mtime +7 -delete
 ```
 
 ## Garbage Collection
 
-Automatic GC runs hourly when `storage.gc_interval_secs > 0` (default: 3600). It runs one pass per configured retention tier, deleting events older than each tier's retention window.
+Automatic GC runs hourly when `storage.gc_interval_secs > 0` (default: 3600). It runs one pass per configured retention tier, dropping segments whose events are entirely older than the tier's retention window.
 
 Manual GC:
 
 ```bash
-keplor gc --older-than-days 30 --db keplor.db
+keplor gc --older-than-days 30 --data-dir /var/lib/keplor
 ```
 
 ## Upgrading
 
-1. Back up the database (see above)
+1. Back up the data directory (see above)
 2. Build or pull the new binary/image
-3. Run migrations: `keplor migrate --db keplor.db`
+3. Verify the data directory: `keplor migrate --data-dir /var/lib/keplor` (idempotent — opens the store, refuses to mount a directory written under a mismatched `SCHEMA_ID`)
 4. Restart the server
 
-Migrations are idempotent — running them multiple times is safe. The server also applies migrations automatically on startup.
+The server also opens the store on startup, which performs the same
+schema-id check.
+
+### Importing an old SQLite-backed store
+
+If you're upgrading from a release older than the KeplorDB cutover (the
+SQLite era), you need a binary built with `--features migrate-from-sqlite`
+to run the one-shot import:
+
+```bash
+# Build with the migration feature on (NOT for production runtime use):
+cargo build --release -p keplor-cli --features migrate-from-sqlite
+
+# Migrate the old keplor.db into a fresh KeplorDB data dir.
+# Resumable: a checkpoint is written after each batch.
+./target/release/keplor migrate-from-sqlite \
+  --source /var/lib/keplor.db \
+  --dest /var/lib/keplor_data \
+  --batch-size 10000
+
+# Point the server's storage.data_dir at the new directory and restart.
+# You can keep the source SQLite file around as a rollback for as long as
+# disk space allows; the migration is non-destructive.
+```
+
+Then deploy the **default** (non-feature) build for ongoing runtime —
+shedding the `rusqlite` dep keeps the binary under 10 MB.
 
 ## Troubleshooting
 
@@ -222,6 +265,7 @@ Migrations are idempotent — running them multiple times is safe. The server al
 |---------|-------|-----|
 | `503 Service Unavailable` on ingest | Batch writer queue full | Reduce ingestion rate or increase `pipeline.batch_size` |
 | `408 Request Timeout` | Request exceeded `server.request_timeout_secs` | Increase timeout or reduce batch size |
-| Database file growing unbounded | `retention_days = 0` (GC disabled) | Set `retention_days` to a positive value |
-| WAL file very large | Checkpoint interval too long or heavy write load | Decrease `wal_checkpoint_secs` |
+| Data directory growing unbounded | `retention_days = 0` (GC disabled) | Set `retention_days` to a positive value |
+| Many tiny segment files | Default 50 ms BatchWriter cadence | Tune `pipeline.flush_interval_ms` upward; segment GC reclaims them on the retention schedule |
+| `migrate-from-sqlite` subcommand "not found" | Default binary doesn't include it | Rebuild with `--features migrate-from-sqlite` |
 | High memory usage | Large batch writer queue | Reduce `channel_capacity` in batch config |

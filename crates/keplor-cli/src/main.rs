@@ -106,6 +106,10 @@ enum Cli {
     /// archive manifests into the JSONL sidecar. Resumable: a
     /// checkpoint file is written after each batch, so an interrupted
     /// run picks up where it left off.
+    ///
+    /// Compiled only with `--features migrate-from-sqlite` (which pulls
+    /// in `rusqlite`); the default release binary omits this command.
+    #[cfg(feature = "migrate-from-sqlite")]
     MigrateFromSqlite {
         /// Source SQLite database.
         #[arg(long, default_value = "keplor.db")]
@@ -134,6 +138,7 @@ fn main() -> Result<()> {
         #[cfg(feature = "s3")]
         Cli::Archive { config, older_than_days } => archive(config, older_than_days),
         Cli::ArchiveStatus { data_dir } => archive_status(data_dir),
+        #[cfg(feature = "migrate-from-sqlite")]
         Cli::MigrateFromSqlite { source, dest, batch_size } => {
             migrate_from_sqlite(source, dest, batch_size)
         },
@@ -459,6 +464,7 @@ fn init_tracing(json: bool) {
     }
 }
 
+#[cfg(feature = "migrate-from-sqlite")]
 fn migrate_from_sqlite(source: PathBuf, dest: PathBuf, batch_size: u32) -> Result<()> {
     use keplor_store::kdb_store::{KdbConfig, KdbStore};
     use keplor_store::SqliteStore;
@@ -491,6 +497,7 @@ fn migrate_from_sqlite(source: PathBuf, dest: PathBuf, batch_size: u32) -> Resul
 }
 
 /// Stats returned by [`run_migration`].
+#[cfg(feature = "migrate-from-sqlite")]
 #[derive(Debug, Default)]
 struct MigrateStats {
     events_written: u64,
@@ -501,6 +508,7 @@ struct MigrateStats {
 
 /// Core migration loop — no tracing init, no global state. Tests call
 /// this directly.
+#[cfg(feature = "migrate-from-sqlite")]
 fn run_migration(
     src: &keplor_store::SqliteStore,
     dst: &keplor_store::kdb_store::KdbStore,
@@ -583,6 +591,7 @@ fn run_migration(
     Ok(stats)
 }
 
+#[cfg(feature = "migrate-from-sqlite")]
 fn read_checkpoint(path: &std::path::Path) -> Result<Option<i64>> {
     if !path.exists() {
         return Ok(None);
@@ -596,6 +605,7 @@ fn read_checkpoint(path: &std::path::Path) -> Result<Option<i64>> {
     Ok(Some(ts))
 }
 
+#[cfg(feature = "migrate-from-sqlite")]
 fn write_checkpoint(path: &std::path::Path, ts_ns: i64) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).ok();
@@ -608,7 +618,7 @@ fn write_checkpoint(path: &std::path::Path, ts_ns: i64) -> Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "migrate-from-sqlite"))]
 mod migration_tests {
     use super::*;
     use keplor_core::{

@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::error::StoreError;
-use crate::store::ArchiveManifest;
+use crate::types::ArchiveManifest;
 
 /// On-disk line record. Same fields as [`ArchiveManifest`] — the
 /// indirection lets us add forwards-compatible fields later without

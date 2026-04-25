@@ -17,9 +17,13 @@ path = "src/main.rs"
 workspace = true
 
 [features]
-default  = []
-mimalloc = ["dep:mimalloc"]
-s3       = ["keplor-server/s3"]
+default              = []
+mimalloc             = ["dep:mimalloc"]
+s3                   = ["keplor-server/s3"]
+# Build the `keplor migrate-from-sqlite` subcommand and link the
+# bundled `rusqlite` dep. Off by default — only operators upgrading
+# from a pre-Phase-A SQLite store need this.
+migrate-from-sqlite  = ["keplor-store/migrate-from-sqlite"]
 
 [dependencies]
 keplor-core    = { path = "../keplor-core" }

@@ -7,7 +7,7 @@ Keplor is an LLM logs ingestion and cost-accounting server. External systems POS
 ```
 keplor-core       Zero-dep types: Event, Provider, Usage, Cost, error enums.
 keplor-pricing    LiteLLM pricing catalog, cost computation (nanodollars).
-keplor-store      SQLite storage, batch writer, GC, rollups, S3/R2 archival.
+keplor-store      KeplorDB-backed event store, batch writer, GC, rollups, S3/R2 archival.
 keplor-server     HTTP server, ingestion pipeline, auth, rate limiting, CORS.
 keplor-cli        The `keplor` binary (run, migrate, query, stats, gc, rollup, archive).
 xtask             Build automation (refresh-catalog, mem-audit).
@@ -42,32 +42,74 @@ Client (app/gateway/SDK)
 │  BatchWriter (background task):                  │
 │    - Accumulates events in memory (up to 256)    │
 │    - Flushes every 50ms or when batch is full    │
-│    - Bulk INSERT in single SQLite transaction     │
+│    - append_batch + wal_checkpoint per flush     │
+│      (KeplorDB queries only see rotated segs)    │
 │                                                  │
 │  Archiver (optional, every 1h):                  │
-│    - Serializes old events to JSONL + zstd        │
-│    - Uploads to S3/R2, deletes from SQLite        │
+│    - Serializes old events to JSONL + zstd       │
+│    - Uploads to S3/R2, then GCs the segments     │
 └──────────────────────────────────────────────────┘
 ```
 
-## Database schema (SQLite)
+## Storage (KeplorDB)
 
-| Table | Purpose |
-|-------|---------|
-| `schema_version` | Migration versioning |
-| `llm_events` | Fact table — one row per ingested event (44 columns) |
-| `daily_rollups` | Pre-aggregated daily cost/usage summaries |
-| `archive_manifests` | Tracks archived JSONL files in S3/R2 (optional) |
+Events are stored in **KeplorDB**, a custom append-only columnar log
+engine (sibling repo, `crates/keplordb`). The on-disk layout per data
+directory:
 
-9 indices cover timestamp, user/key/model/provider/source/tier lookups.
+```
+keplor_data/
+  free/   pro/   team/   <tier>/...      # one Engine per retention tier
+    wal-0000 ... wal-N                   # active write-ahead segments (sharded)
+    seg-XXXX.kdb                         # rotated immutable segments
+  manifests.jsonl                        # archive manifest sidecar
+```
+
+Each tier is an `Engine<14, 13, 8>` (14 dims, 13 counters, 8 labels,
+`SCHEMA_ID = 1`). The schema is defined in `keplor-store/src/mapping.rs`:
+
+| | Used as |
+|--|--|
+| **Dims (D=14)** | `user_id`, `api_key_id`, `org_id`, `project_id`, `route_id`, `provider`, `model`, `model_family`, `endpoint`, `method`, `source`, `tier`, `user_tag`, `session_tag` |
+| **Counters (C=13)** | input/output/cache-read/cache-creation/reasoning/audio-in/audio-out/image/tool-use tokens, `cost_nanodollars`, `latency_total_ms`, `latency_ttft_ms`, `is_error` |
+| **Labels (L=8)** | `endpoint`, `method`, `request_id`, `trace_id_hex`, `client_ip`, `user_agent`, `error_blob`, `metadata_json` |
+
+Per-tier routing (`KdbStore::engines: ArcSwap<HashMap<SmolStr, Arc<Engine>>>`)
+exists because KeplorDB's GC is segment-granular but keplor's retention
+is per-tier — keeping each tier in its own Engine lets segment GC and
+retention policies stay aligned. The `eager_tiers` config (default
+`["free", "pro", "team"]`) pre-creates engines at startup; unknown tiers
+are created lazily on first write.
+
+Archive manifests live in a JSONL sidecar (`manifests.jsonl`) plus an
+in-memory `BTreeMap<(user_id, day), Vec<ArchiveManifest>>` for fast
+lookup; KeplorDB itself doesn't carry secondary tables.
+
+**Read visibility**: `KdbStore::query` only sees rotated segments —
+events still in the active WAL are invisible. The BatchWriter calls
+`wal_checkpoint()` after every flush so HTTP follow-up reads are
+consistent with the write that just succeeded.
 
 ## Key design decisions
 
-**SQLite + WAL mode**: Zero-dep default. Read/write connection split (1 writer, 4 readers) prevents writer starvation. WAL checkpoints run every 300s + on shutdown.
+**KeplorDB columnar log**: Append-only log with sharded WALs, periodic
+rotation to immutable `.kdb` segments, and segment-level GC. Per-tier
+Engine isolation; no rusqlite, no SQL planner, no per-row B-tree pages.
+At idle, each `BatchWriter` flush produces one segment per tier
+(~1200/min total at the default 50 ms cadence), reclaimed by retention GC.
 
-**Batch writer**: Events queue in an mpsc channel (capacity 32768, configurable). Background task flushes in bulk transactions. Single-event endpoint (`POST /v1/events`) awaits flush confirmation. Batch endpoint (`POST /v1/events/batch`) is fire-and-forget by default; set `X-Keplor-Durable: true` for confirmed writes.
+**Batch writer**: Events queue in an mpsc channel (capacity 32768, configurable). Background task flushes in bulk via `Engine::append_batch` followed by `wal_checkpoint`. Single-event endpoint (`POST /v1/events`) awaits flush confirmation. Batch endpoint (`POST /v1/events/batch`) is fire-and-forget by default; set `X-Keplor-Durable: true` for confirmed writes.
 
-**Event archival**: Old events are archived to S3/R2 as zstd-compressed JSONL files, partitioned by (user_id, day). Daily rollups are preserved in SQLite. Archive manifests track what was uploaded. Runs every hour by default (configurable via `archive_interval_secs`) with per-chunk error isolation.
+**Event archival**: Old events are archived to S3/R2 as zstd-compressed JSONL files, partitioned by (user_id, day). Daily rollup queries replay against the JSONL sidecar for archived ranges. Manifests track what was uploaded. Runs every hour by default (configurable via `archive_interval_secs`) with per-chunk error isolation.
+
+**Legacy SQLite migration**: The previous SQLite backend is retained as
+a read-only migration source under the `migrate-from-sqlite` Cargo
+feature on `keplor-store` and `keplor-cli`. Default release builds
+**omit `rusqlite` entirely** (~2 MB binary saving). The
+`keplor migrate-from-sqlite` subcommand opens both stores, walks the
+SQLite DB in chunks, converts each event via the mapping module, and
+writes to the per-tier KeplorDB engines with a resumable on-disk
+checkpoint.
 
 **Cost in nanodollars (int64)**: Avoids floating-point rounding. 1 nanodollar = 10^-9 USD. Max representable: ~$9.2 billion.
 
