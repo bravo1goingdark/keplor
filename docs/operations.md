@@ -266,6 +266,117 @@ shedding the `rusqlite` dep keeps the binary under 10 MB.
 | `503 Service Unavailable` on ingest | Batch writer queue full | Reduce ingestion rate or increase `pipeline.batch_size` |
 | `408 Request Timeout` | Request exceeded `server.request_timeout_secs` | Increase timeout or reduce batch size |
 | Data directory growing unbounded | `retention_days = 0` (GC disabled) | Set `retention_days` to a positive value |
-| Many tiny segment files | Default 50 ms BatchWriter cadence | Tune `pipeline.flush_interval_ms` upward; segment GC reclaims them on the retention schedule |
+| Many tiny segment files | Hard-coded 50 ms BatchWriter cadence | Expected — segment GC reclaims them on the retention schedule. See "Segment count blowing up" in the runbook below if it doesn't keep up. |
 | `migrate-from-sqlite` subcommand "not found" | Default binary doesn't include it | Rebuild with `--features migrate-from-sqlite` |
 | High memory usage | Large batch writer queue | Reduce `channel_capacity` in batch config |
+
+## Incident runbook
+
+Sketches for the incidents most likely to page someone. Keplor is
+backed by a pre-1.0 KeplorDB engine — assume things will surprise you
+and bias toward stopping the writer over speculative recovery.
+
+### The store fails to open at startup
+
+Symptom: `keplor run` exits immediately with `failed to open data dir`
+or `schema_id mismatch`.
+
+1. **`Permission denied`** — `chown -R keplor:keplor /var/lib/keplor`
+   and re-check the systemd `User=` directive.
+2. **`schema_id mismatch`** — somebody pointed `storage.data_dir` at a
+   directory written by a different release. Either point at the
+   correct dir or migrate. Never delete the directory to "fix" it.
+3. **`UnexpectedEof` on a WAL shard** — KeplorDB recovery tolerates a
+   truncated trailing record, so this is rare; if it persists, the
+   shard file was corrupted. Move the offending `wal-N` file aside,
+   restart, and accept the loss of events that hadn't yet rotated to
+   a segment. File a keplordb issue with the moved file attached.
+
+### Ingestion is returning 503 / 507 in volume
+
+- **`503 queue full`** — the BatchWriter mpsc channel is saturated.
+  First check `/health` for `queue_utilization_pct`; if pinned at 100,
+  either ingestion exceeds write throughput (bigger problem) or the
+  flush task is stuck. Scrape `/metrics` and look for
+  `keplor_batch_flush_errors_total` increasing — that points at the
+  store path. If errors are zero, raise `pipeline.channel_capacity`
+  and `pipeline.batch_size` and watch again.
+- **`507 Insufficient Storage`** — `storage.max_db_size_mb` exceeded.
+  Run `keplor gc --older-than-days <N>` to reclaim, lower retention,
+  or grow the disk. Do **not** raise `max_db_size_mb` past your real
+  disk free space — `df` won't lie.
+
+### Segment count blowing up / disk growing fast
+
+The BatchWriter `wal_checkpoint`s after every flush, so at the
+hard-coded 50 ms cadence each tier produces ~1200 small segments/min
+at idle. This is intentional — segment GC reclaims them on the
+retention schedule. If the segment count is unbounded:
+
+1. `du -sh /var/lib/keplor/<tier>/*` — find the offending tier.
+2. Check `keplor stats --data-dir /var/lib/keplor` for events-per-tier.
+3. Confirm `storage.gc_interval_secs > 0` and `retention_days > 0`
+   for the affected tier.
+4. Run `keplor gc --older-than-days <N> --data-dir /var/lib/keplor`
+   manually to force a sweep; if it returns quickly but segment count
+   doesn't drop, the problem is segments straddling the retention
+   boundary (segment GC is segment-granular, not row-granular). Drop
+   `retention_days` until the boundary moves past the affected
+   segments, sweep, then raise it back.
+
+The 50 ms BatchWriter cadence is currently not exposed in
+`pipeline.*` — if you need to slow it, the change is a one-line
+`BatchConfig::default()` edit followed by a redeploy.
+
+### A tier engine starts OOMing
+
+Per-tier engines hold their own mmap LRU and rollup state. If RSS for
+the keplor process climbs without bound:
+
+1. `keplor archive-status --data-dir /var/lib/keplor` — large unarchived
+   ranges keep the rollup-replay window hot.
+2. Lower `storage.mmap_cache_capacity` (default 256) — trades a little
+   read latency for a tighter cap.
+3. Lower `storage.rollup_replay_days` (default 7) if a single tier
+   carries many days of segments.
+4. If a single tier is responsible, archive that tier aggressively —
+   the per-tier engines mean isolated GC is cheap.
+
+### Archive cycles failing
+
+Per-chunk error isolation means individual S3 failures **never** delete
+events from KeplorDB; they retry next cycle. There is no dedicated
+metric for archive failures yet — each failed chunk emits a
+`tracing::warn!` "archive chunk failed" log line. Page only when:
+
+- the warn-line rate stays elevated across multiple cycles (real S3
+  outage or credential rotation), or
+- `keplor archive-status --data-dir /var/lib/keplor` shows the same
+  un-archived ranges persisting for >24h.
+
+Manual one-shot (requires a binary built with `--features s3`):
+
+```
+keplor archive --config keplor.toml --older-than-days <N>
+```
+
+Run with `KEPLOR_LOG=info` to see the underlying error per chunk.
+
+### Auth failures spike
+
+`keplor_auth_failures_total` rising fast usually means credential
+stuffing or a deployment that forgot to update its API key. Cross-check
+`/var/log/keplor/access` (or your log aggregator) for source IPs;
+single-IP bursts are scanners — block at the proxy, do not raise
+`rate_limit.requests_per_second` to "absorb" them.
+
+### Graceful shutdown taking too long
+
+`server.shutdown_timeout_secs` (default 25s) bounds the BatchWriter
+drain. If shutdowns hit the timeout:
+
+1. Check the queue depth on `/health` before sending SIGTERM next time.
+2. If the queue is consistently >10K at shutdown, either pre-drain
+   (stop the load balancer first, wait 5s, then SIGTERM the process)
+   or raise `shutdown_timeout_secs` until the deploy reliably finishes
+   under the limit.

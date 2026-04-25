@@ -12,13 +12,24 @@
 # max_connections = 10000           # concurrent connection limit (raise to 65000 for 50K+ users)
 
 # ── Storage ──────────────────────────────────────────────────────────────
+# Storage is a KeplorDB data directory — one append-only Engine per
+# retention tier under {data_dir}/{tier}/. Old `db_path =` configs are
+# still accepted as an alias for `data_dir =` so deployed TOMLs keep
+# loading; the value points at a directory now, not a SQLite file.
 [storage]
-db_path = "/var/lib/keplor/keplor.db"   # SQLite database path
-# retention_days = 90              # auto-GC events older than this (0 = disabled)
-# wal_checkpoint_secs = 300        # WAL checkpoint interval (0 = disabled)
-# max_db_size_mb = 0               # max database size in MB (0 = unlimited)
-                                    # returns HTTP 507 when exceeded
-# read_pool_size = 4               # number of SQLite read connections (1-64, use 16 for high concurrency)
+data_dir = "/var/lib/keplor"          # KeplorDB data directory
+# retention_days = 90                  # auto-GC events older than this (0 = disabled)
+# gc_interval_secs = 3600              # GC sweep cadence (0 = disabled)
+# wal_checkpoint_secs = 300            # rotate active WAL into a sealed segment (0 = disabled)
+# max_db_size_mb = 0                   # cap data dir size in MB; ingestion returns
+                                        # HTTP 507 when exceeded (0 = unlimited)
+# wal_max_events = 500000              # events per WAL shard before forced rotation
+# wal_sync_interval = 64               # fsync every N batched writes
+# wal_sync_bytes = 262144              # fsync after N buffered bytes
+# wal_shard_count = 4                  # per-tier WAL shards (raise on >8 cores)
+# mmap_cache_capacity = 256            # mmap'd-segment LRU size
+# rollup_replay_days = 7               # days of segments replayed into the
+                                        # in-memory rollup store on open
 
 # ── Authentication ───────────────────────────────────────────────────────
 # When empty, all endpoints are open (no auth required).
@@ -97,7 +108,8 @@ days = 90
 
 # ── Event archival (optional, requires --features s3) ────────────────────
 # Archive old events to S3/R2 as compressed JSONL files.
-# Archived events are deleted from SQLite to keep it lean.
+# Archived events are tombstoned in KeplorDB to keep the local data dir
+# lean — segment GC reclaims the underlying space on the next sweep.
 # Daily rollups are preserved and queryable regardless of archival.
 # [archive]
 # bucket = "keplor-archive"
@@ -109,7 +121,7 @@ days = 90
 # path_style = false
 # archive_after_days = 30           # archive events older than 30 days
 # archive_after_hours = 0           # sub-day: archive events older than N hours (overrides days)
-# archive_threshold_mb = 500        # or when SQLite exceeds 500 MB
+# archive_threshold_mb = 500        # or when the data dir exceeds 500 MB
 # archive_batch_size = 10000        # events per JSONL file
 # archive_interval_secs = 3600      # how often the archive loop runs (default: 1 hour)
 
