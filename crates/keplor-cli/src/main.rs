@@ -234,7 +234,10 @@ fn run_server(config_path: PathBuf, json_logs: bool) -> Result<()> {
             &config.retention.default_tier,
         );
         let server = keplor_server::PipelineServer::new(pipeline, keys, &config, metrics_handle)
-            .context("failed to build server")?;
+            .context("failed to build server")?
+            // Attach the source config path so the SIGHUP handler in
+            // server::run can re-parse it for hot key-set reload.
+            .with_config_path(config_path.clone());
 
         tracing::info!("keplor starting");
         server.run().await.context("server error")

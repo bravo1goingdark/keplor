@@ -1,0 +1,44 @@
+[Unit]
+Description=Keplor — daily snapshot of /var/lib/keplor to /var/backups/keplor
+Documentation=https://github.com/bravo1goingdark/keplor
+# Don't run if keplor itself failed to start; nothing to back up.
+After=keplor.service
+
+[Service]
+Type=oneshot
+User=root
+# Filesystem snapshot via tar. The active WAL shards are crash-safe
+# (see docs/operations.md "Durability guarantees"), so we can snapshot
+# while keplor runs — no need to stop the service.
+#
+# Atomicity is achieved by: 1) writing to a .tmp file, 2) fsyncing on
+# close (--use-compress-program ensures stream completion), 3) atomic
+# rename. A SIGTERM mid-backup leaves the .tmp behind, which the next
+# run cleans up.
+ExecStartPre=/bin/mkdir -p /var/backups/keplor
+ExecStartPre=/bin/sh -c 'rm -f /var/backups/keplor/*.tmp'
+ExecStart=/bin/sh -c '\
+  set -e ; \
+  STAMP=$(date -u +%%Y%%m%%dT%%H%%M%%SZ) ; \
+  DEST=/var/backups/keplor/keplor-${STAMP}.tar.zst ; \
+  tar --use-compress-program="zstd -3 -T0" \
+      -C /var/lib -cf "${DEST}.tmp" keplor && \
+  sync && \
+  mv "${DEST}.tmp" "${DEST}"'
+# Retain 7 days of dailies; older are deleted.
+ExecStartPost=/usr/bin/find /var/backups/keplor -name 'keplor-*.tar.zst' -mtime +7 -delete
+
+# Hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+PrivateTmp=yes
+ReadWritePaths=/var/backups/keplor
+ReadOnlyPaths=/var/lib/keplor
+
+# Don't oversubscribe the box during the backup window
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+
+[Install]
+WantedBy=multi-user.target

@@ -121,17 +121,28 @@ fn parse_key_entry(raw: &str) -> (SmolStr, String) {
     (SmolStr::new(&id), raw.to_owned())
 }
 
+/// Hot-reloadable wrapper around the API key set.
+///
+/// The middleware holds an `Arc<HotKeys>` and on every request loads
+/// the current `ApiKeySet` via `ArcSwap`. SIGHUP-triggered reloads
+/// build a new set and call `store(...)` — readers see the swap on
+/// their next request, no in-flight requests dropped.
+pub type HotKeys = arc_swap::ArcSwap<ApiKeySet>;
+
 /// Axum middleware that validates the `Authorization: Bearer <key>` header.
 ///
 /// On success, inserts an [`AuthenticatedKey`] (with tier) into request
 /// extensions so downstream handlers know which key was used.  On
 /// failure, emits a metrics counter and returns 401.
+///
+/// Takes `Arc<HotKeys>` so the set can be hot-swapped via SIGHUP.
 pub async fn require_api_key(
-    keys: Arc<ApiKeySet>,
+    keys: Arc<HotKeys>,
     mut req: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    if keys.is_open() {
+    let keys_snapshot = keys.load();
+    if keys_snapshot.is_open() {
         return Ok(next.run(req).await);
     }
 
@@ -146,7 +157,7 @@ pub async fn require_api_key(
         return Err(StatusCode::UNAUTHORIZED);
     }
 
-    match keys.matched_key(token.as_bytes()) {
+    match keys_snapshot.matched_key(token.as_bytes()) {
         Some((key_id, tier)) => {
             metrics::counter!("keplor_auth_successes_total").increment(1);
             req.extensions_mut().insert(AuthenticatedKey { key_id, tier });

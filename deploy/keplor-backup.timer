@@ -1,0 +1,15 @@
+[Unit]
+Description=Keplor daily backup timer
+Documentation=https://github.com/bravo1goingdark/keplor
+Requires=keplor-backup.service
+
+[Timer]
+# Daily at 02:30 UTC + a 30-minute random jitter so a fleet of nodes
+# doesn't all backup at once. Persistent=true catches up if the box
+# was off at the trigger time.
+OnCalendar=*-*-* 02:30:00 UTC
+RandomizedDelaySec=1800
+Persistent=true
+
+[Install]
+WantedBy=timers.target

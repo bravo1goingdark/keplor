@@ -7,6 +7,7 @@ pub mod auth;
 pub mod config;
 pub mod error;
 pub mod idempotency;
+pub mod metrics;
 pub mod normalize;
 pub mod pipeline;
 pub mod rate_limit;

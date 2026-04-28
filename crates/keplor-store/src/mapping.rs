@@ -599,6 +599,76 @@ fn decode_error(s: &str) -> Result<ProviderError, MappingError> {
 mod tests {
     use super::*;
 
+    /// Schema fingerprint guard — fails the build when any positional
+    /// constant in this module is changed without bumping `SCHEMA_ID`.
+    ///
+    /// Why this matters: dim/counter/label indices and `D`/`C`/`L` are
+    /// part of the **on-disk segment format**. Reading an old segment
+    /// after a silent reorder yields wrong rows for every query — and
+    /// because schema_id matches, KeplorDB happily opens it. The CI
+    /// guard makes that mistake impossible to merge unintentionally.
+    ///
+    /// **If this test fails:** decide whether your change is a real
+    /// schema migration. If yes, bump `SCHEMA_ID` and add a migration
+    /// path (re-ingest from WAL or export-import). If no (you only
+    /// added a comment / changed a docstring), update the expected
+    /// fingerprint below.
+    #[test]
+    fn schema_fingerprint_unchanged() {
+        // (D, C, L) — segment format width
+        assert_eq!((D, C, L), (14, 13, 8), "schema width changed");
+        // SCHEMA_ID — segment header byte
+        assert_eq!(SCHEMA_ID, 1, "SCHEMA_ID changed");
+        // Dim positions
+        assert_eq!(DIM_USER_ID, 0);
+        assert_eq!(DIM_API_KEY_ID, 1);
+        assert_eq!(DIM_MODEL, 2);
+        assert_eq!(DIM_PROVIDER, 3);
+        assert_eq!(DIM_SOURCE, 4);
+        assert_eq!(DIM_ORG_ID, 5);
+        assert_eq!(DIM_PROJECT_ID, 6);
+        assert_eq!(DIM_ROUTE_ID, 7);
+        assert_eq!(DIM_MODEL_FAMILY, 8);
+        assert_eq!(DIM_ENDPOINT, 9);
+        assert_eq!(DIM_TIER, 10);
+        assert_eq!(DIM_ERROR_TYPE, 11);
+        assert_eq!(DIM_USER_TAG, 12);
+        assert_eq!(DIM_SESSION_TAG, 13);
+        // Counter positions
+        assert_eq!(COUNTER_INPUT_TOKENS, 0);
+        assert_eq!(COUNTER_OUTPUT_TOKENS, 1);
+        assert_eq!(COUNTER_CACHE_READ, 2);
+        assert_eq!(COUNTER_CACHE_CREATION, 3);
+        assert_eq!(COUNTER_REASONING, 4);
+        assert_eq!(COUNTER_AUDIO_IN, 5);
+        assert_eq!(COUNTER_AUDIO_OUT, 6);
+        assert_eq!(COUNTER_IMAGE, 7);
+        assert_eq!(COUNTER_VIDEO_SECONDS, 8);
+        assert_eq!(COUNTER_TOOL_USE, 9);
+        assert_eq!(COUNTER_SEARCH_QUERIES, 10);
+        assert_eq!(COUNTER_CLOSE_MS, 11);
+        assert_eq!(COUNTER_IS_ERROR, 12);
+        // Label positions
+        assert_eq!(LABEL_ERROR_JSON, 0);
+        assert_eq!(LABEL_REQUEST_ID, 1);
+        assert_eq!(LABEL_TRACE_ID, 2);
+        assert_eq!(LABEL_CLIENT_IP, 3);
+        assert_eq!(LABEL_USER_AGENT, 4);
+        assert_eq!(LABEL_METADATA_JSON, 5);
+        assert_eq!(LABEL_METHOD, 6);
+        assert_eq!(LABEL_PROVIDER_VARIANT, 7);
+        // Flag bit positions
+        assert_eq!(FLAG_STREAMING, 1 << 0);
+        assert_eq!(FLAG_TOOL_CALLS, 1 << 1);
+        assert_eq!(FLAG_REASONING, 1 << 2);
+        assert_eq!(FLAG_STREAM_INCOMPLETE, 1 << 3);
+        assert_eq!(FLAG_CACHED_USED, 1 << 4);
+        assert_eq!(FLAG_BUDGET_BLOCKED, 1 << 5);
+        assert_eq!(FLAG_HAS_TTFT, 1 << 8);
+        assert_eq!(FLAG_HAS_HTTP_STATUS, 1 << 9);
+        assert_eq!(FLAG_HAS_ERROR, 1 << 10);
+    }
+
     fn sample_event() -> LlmEvent {
         LlmEvent {
             id: EventId::new(),

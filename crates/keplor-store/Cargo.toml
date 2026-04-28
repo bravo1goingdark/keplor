@@ -14,7 +14,7 @@ workspace = true
 
 [features]
 default              = ["batch"]
-batch                = ["dep:tokio", "dep:metrics"]
+batch                = ["dep:tokio"]
 s3                   = ["dep:object_store", "dep:zstd"]
 # Compile in the legacy SQLite store as a read-only migration source.
 # Adds the `rusqlite` (bundled) dep — costs ~2-3 MB on the static binary.
@@ -34,7 +34,7 @@ ulid        = { workspace = true }
 http        = "1"
 tracing     = { workspace = true }
 tokio       = { workspace = true, optional = true, features = ["sync", "time", "rt", "macros"] }
-metrics     = { workspace = true, optional = true }
+metrics     = { workspace = true }
 object_store = { version = "0.13", default-features = false, features = ["aws"], optional = true }
 zstd         = { workspace = true, optional = true }
 

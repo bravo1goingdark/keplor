@@ -24,8 +24,11 @@ data_dir = "/var/lib/keplor"          # KeplorDB data directory
 # max_db_size_mb = 0                   # cap data dir size in MB; ingestion returns
                                         # HTTP 507 when exceeded (0 = unlimited)
 # wal_max_events = 500000              # events per WAL shard before forced rotation
-# wal_sync_interval = 64               # fsync every N batched writes
-# wal_sync_bytes = 262144              # fsync after N buffered bytes
+# wal_sync_interval = 64               # fsync threshold for non-BatchWriter direct writes.
+                                        # NOTE: BatchWriter (the default ingest path) now ALWAYS
+                                        # fsyncs at the end of each 50 ms flush, so this knob only
+                                        # affects callers that bypass BatchWriter. Leave at 64.
+# wal_sync_bytes = 262144              # fsync after N buffered bytes (same caveat as above)
 # wal_shard_count = 4                  # per-tier WAL shards (raise on >8 cores)
 # mmap_cache_capacity = 256            # mmap'd-segment LRU size
 # rollup_replay_days = 7               # days of segments replayed into the

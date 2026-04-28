@@ -116,6 +116,26 @@ KEPLOR_SERVER_LISTEN_ADDR=0.0.0.0:9090
 KEPLOR_AUTH_API_KEYS='["prod:sk-abc123"]'
 ```
 
+## Durability guarantees
+
+The default ingest path (`POST /v1/events`, `POST /v1/events/batch`, both
+synchronous *and* fire-and-forget) routes through `BatchWriter`, which
+**fsyncs every flush cycle** — by default every 50 ms or 256 events,
+whichever comes first. After the response to a `POST /v1/events` returns
+(or after the flush following a fire-and-forget batch), the events are
+durably on disk; a `kill -9` or power loss will not lose them.
+
+The crash-loss window for a fire-and-forget batch (`POST /v1/events/batch`
+without `X-Keplor-Durable: true`) is **at most one flush cycle** of the
+events queued before the crash — typically <50 ms. For zero-window
+durability, set `X-Keplor-Durable: true` on the batch request: the call
+will wait for the next flush before returning.
+
+The `wal_sync_interval` and `wal_sync_bytes` storage knobs only affect
+direct (non-BatchWriter) writes, which the server itself never issues.
+Do not lower them in production thinking it will improve durability of
+the ingest path — it won't.
+
 ## Monitoring
 
 ### Health check
@@ -171,7 +191,27 @@ zfs snapshot tank/keplor@daily-$(date +%Y%m%d)
 zfs send tank/keplor@daily-$(date +%Y%m%d) | ssh backup-host "zfs recv ..."
 ```
 
-**Option 2: Stop and copy**
+**Option 2: Online tar via systemd timer (provided)**
+
+The repo ships `deploy/keplor-backup.service` + `deploy/keplor-backup.timer`.
+Install both alongside `keplor.service` and enable the timer:
+
+```bash
+sudo cp deploy/keplor-backup.service deploy/keplor-backup.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now keplor-backup.timer
+
+# Verify next run
+systemctl list-timers keplor-backup.timer
+```
+
+The timer fires daily at 02:30 UTC (with a 30 min random jitter), tar+zstd
+compresses `/var/lib/keplor` to `/var/backups/keplor/`, retains 7 days, and
+runs at low I/O priority so it doesn't disturb live ingest. The active WAL
+shards are crash-safe (every BatchWriter flush fsyncs), so this snapshot
+taken with keplor running is a valid restore source. RPO: 1 day.
+
+**Option 3: Stop and copy**
 
 ```bash
 # Graceful shutdown drains the BatchWriter and runs a final wal_checkpoint.

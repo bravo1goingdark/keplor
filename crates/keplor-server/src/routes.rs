@@ -217,12 +217,21 @@ pub async fn query_events(
 
     // Use the narrow query path — reads only the 19 columns the API
     // needs instead of all 43 columns.
+    //
+    // `spawn_blocking` defers to a blocking-thread pool that has no
+    // active tracing span, so `Span::current()` inside the closure
+    // would otherwise be empty and `#[tracing::instrument]` on the
+    // store method would create a *root* span detached from
+    // `request_id`. Capture the current span and re-enter it in the
+    // closure to keep the trace contiguous.
     let store = state.pipeline.store_arc();
-    let events =
-        tokio::task::spawn_blocking(move || store.query_summary(&filter, limit + 1, cursor))
-            .await
-            .map_err(|e| crate::error::ServerError::Internal(e.to_string()))?
-            .map_err(crate::error::ServerError::from)?;
+    let span = tracing::Span::current();
+    let events = tokio::task::spawn_blocking(move || {
+        span.in_scope(|| store.query_summary(&filter, limit + 1, cursor))
+    })
+    .await
+    .map_err(|e| crate::error::ServerError::Internal(e.to_string()))?
+    .map_err(crate::error::ServerError::from)?;
 
     let has_more = events.len() > limit as usize;
     let page: Vec<_> = events.into_iter().take(limit as usize).collect();
@@ -263,8 +272,9 @@ pub async fn query_events(
     let from_ts = params.from;
     let to_ts = params.to;
     let archive_store = state.pipeline.store_arc();
+    let archive_span = tracing::Span::current();
     let has_archived_data = tokio::task::spawn_blocking(move || {
-        archive_store.has_archived_data(from_ts, to_ts).unwrap_or(false)
+        archive_span.in_scope(|| archive_store.has_archived_data(from_ts, to_ts).unwrap_or(false))
     })
     .await
     .unwrap_or(false);
@@ -314,8 +324,15 @@ pub async fn query_quota(
     }
 
     let store = state.pipeline.store_arc();
+    let span = tracing::Span::current();
     let summary = tokio::task::spawn_blocking(move || {
-        store.quota_summary(params.user_id.as_deref(), params.api_key_id.as_deref(), params.from)
+        span.in_scope(|| {
+            store.quota_summary(
+                params.user_id.as_deref(),
+                params.api_key_id.as_deref(),
+                params.from,
+            )
+        })
     })
     .await
     .map_err(|e| crate::error::ServerError::Internal(e.to_string()))?
@@ -393,15 +410,18 @@ pub async fn query_rollups(
     let offset = params.offset.unwrap_or(0);
 
     let store = state.pipeline.store_arc();
+    let span = tracing::Span::current();
     let rows = tokio::task::spawn_blocking(move || {
-        store.query_rollups(
-            params.user_id.as_deref(),
-            params.api_key_id.as_deref(),
-            from_day,
-            to_day,
-            limit + 1,
-            offset,
-        )
+        span.in_scope(|| {
+            store.query_rollups(
+                params.user_id.as_deref(),
+                params.api_key_id.as_deref(),
+                from_day,
+                to_day,
+                limit + 1,
+                offset,
+            )
+        })
     })
     .await
     .map_err(|e| crate::error::ServerError::Internal(e.to_string()))?
@@ -496,17 +516,20 @@ pub async fn query_stats(
     let offset = params.offset.unwrap_or(0);
 
     let store = state.pipeline.store_arc();
+    let span = tracing::Span::current();
     let rows = tokio::task::spawn_blocking(move || {
-        store.aggregate_stats(
-            params.user_id.as_deref(),
-            params.api_key_id.as_deref(),
-            from_day,
-            to_day,
-            params.provider.as_deref(),
-            group_by_model,
-            limit + 1,
-            offset,
-        )
+        span.in_scope(|| {
+            store.aggregate_stats(
+                params.user_id.as_deref(),
+                params.api_key_id.as_deref(),
+                from_day,
+                to_day,
+                params.provider.as_deref(),
+                group_by_model,
+                limit + 1,
+                offset,
+            )
+        })
     })
     .await
     .map_err(|e| crate::error::ServerError::Internal(e.to_string()))?
@@ -549,10 +572,13 @@ pub async fn delete_event(
         id.parse().map_err(|_| crate::error::ServerError::Validation("invalid event id".into()))?;
 
     let store = state.pipeline.store_arc();
-    let deleted = tokio::task::spawn_blocking(move || store.delete_event(&event_id))
-        .await
-        .map_err(|e| crate::error::ServerError::Internal(e.to_string()))?
-        .map_err(crate::error::ServerError::from)?;
+    let span = tracing::Span::current();
+    let deleted = tokio::task::spawn_blocking(move || {
+        span.in_scope(|| store.delete_event(&event_id))
+    })
+    .await
+    .map_err(|e| crate::error::ServerError::Internal(e.to_string()))?
+    .map_err(crate::error::ServerError::from)?;
 
     if deleted {
         Ok(StatusCode::NO_CONTENT)
@@ -562,10 +588,17 @@ pub async fn delete_event(
 }
 
 /// Query parameters for `DELETE /v1/events`.
+///
+/// Exactly ONE of `older_than_days` or `user_id` must be provided.
+/// Both forms tombstone the matching events; storage reclamation
+/// happens on the next GC sweep.
 #[derive(Debug, Deserialize)]
 pub struct DeleteEventsQuery {
-    /// Delete events older than this many days.
-    pub older_than_days: u32,
+    /// Delete events older than this many days. Mutually exclusive with `user_id`.
+    pub older_than_days: Option<u32>,
+    /// Delete every event for this `user_id`. GDPR right-to-erasure entry point.
+    /// Mutually exclusive with `older_than_days`.
+    pub user_id: Option<String>,
 }
 
 /// Response for bulk deletion.
@@ -578,31 +611,140 @@ pub struct DeleteEventsResponse {
 }
 
 /// `DELETE /v1/events?older_than_days=N` — bulk delete old events.
+/// `DELETE /v1/events?user_id=alice` — delete every event for one user (GDPR).
 pub async fn delete_events_bulk(
     State(state): State<AppState>,
+    // Optional extractor: when the server runs without API keys
+    // configured (`auth.api_keys = []`), `require_api_key` short-circuits
+    // without inserting the extension. Treat None as anonymous and tag
+    // the audit log accordingly so dev/local-mode use isn't broken.
+    auth: Option<axum::extract::Extension<crate::auth::AuthenticatedKey>>,
     Query(params): Query<DeleteEventsQuery>,
 ) -> Result<Json<DeleteEventsResponse>, crate::error::ServerError> {
-    if params.older_than_days == 0 {
-        return Err(crate::error::ServerError::Validation("older_than_days must be > 0".into()));
+    let actor_key_id = auth
+        .as_ref()
+        .map(|e| e.0.key_id.to_string())
+        .unwrap_or_else(|| "anon".to_string());
+    match (params.older_than_days, params.user_id.as_ref()) {
+        (Some(_), Some(_)) => {
+            return Err(crate::error::ServerError::Validation(
+                "older_than_days and user_id are mutually exclusive".into(),
+            ));
+        },
+        (None, None) => {
+            return Err(crate::error::ServerError::Validation(
+                "one of older_than_days or user_id is required".into(),
+            ));
+        },
+        _ => {},
     }
 
-    let cutoff_ns = {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos() as i64;
-        now - (params.older_than_days as i64) * 86_400 * 1_000_000_000
-    };
+    if let Some(days) = params.older_than_days {
+        if days == 0 {
+            return Err(crate::error::ServerError::Validation(
+                "older_than_days must be > 0".into(),
+            ));
+        }
+        let cutoff_ns = {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as i64;
+            now - (days as i64) * 86_400 * 1_000_000_000
+        };
+        let store = state.pipeline.store_arc();
+        let span = tracing::Span::current();
+        let stats =
+            tokio::task::spawn_blocking(move || span.in_scope(|| store.gc_expired(cutoff_ns)))
+                .await
+                .map_err(|e| crate::error::ServerError::Internal(e.to_string()))?
+                .map_err(crate::error::ServerError::from)?;
+
+        // Audit log: who triggered the bulk delete and what window.
+        tracing::warn!(
+            target: "audit",
+            actor_key_id = %actor_key_id,
+            mode = "older_than_days",
+            older_than_days = days,
+            events_deleted = stats.events_deleted,
+            "bulk delete: time-window"
+        );
+
+        return Ok(Json(DeleteEventsResponse {
+            events_deleted: stats.events_deleted,
+            blobs_deleted: stats.blobs_deleted,
+        }));
+    }
+
+    // user_id path — GDPR right-to-erasure.
+    let user_id = params.user_id.expect("validated above");
+    if user_id.trim().is_empty() {
+        return Err(crate::error::ServerError::Validation("user_id must not be empty".into()));
+    }
 
     let store = state.pipeline.store_arc();
-    let stats = tokio::task::spawn_blocking(move || store.gc_expired(cutoff_ns))
+    let user = SmolStr::new(&user_id);
+    let span = tracing::Span::current();
+
+    // Loop in bounded batches: query → collect IDs → delete → repeat.
+    // We intentionally don't load the entire user history into memory
+    // for high-volume deletions.
+    const BATCH: u32 = 1000;
+    let mut total_deleted: usize = 0;
+    let actor_key = actor_key_id.clone();
+    loop {
+        let store_q = Arc::clone(&store);
+        let user_q = user.clone();
+        let span_q = span.clone();
+        let ids = tokio::task::spawn_blocking(move || {
+            span_q.in_scope(|| {
+                let filter = keplor_store::EventFilter {
+                    user_id: Some(user_q),
+                    ..Default::default()
+                };
+                store_q.query(&filter, BATCH, None)
+            })
+        })
+        .await
+        .map_err(|e| crate::error::ServerError::Internal(e.to_string()))?
+        .map_err(crate::error::ServerError::from)?
+        .into_iter()
+        .map(|ev| ev.id)
+        .collect::<Vec<_>>();
+        if ids.is_empty() {
+            break;
+        }
+        let store_d = Arc::clone(&store);
+        let span_d = span.clone();
+        let n = ids.len();
+        let deleted = tokio::task::spawn_blocking(move || {
+            span_d.in_scope(|| store_d.delete_events_by_ids(&ids))
+        })
         .await
         .map_err(|e| crate::error::ServerError::Internal(e.to_string()))?
         .map_err(crate::error::ServerError::from)?;
+        total_deleted += deleted;
+        // The query returns same events until a delete sweep visibility
+        // catches up. If the batch returned the same events twice,
+        // we'd loop forever. delete returns the count actually
+        // tombstoned; if zero (everything was already gone), stop.
+        if deleted == 0 || n < BATCH as usize {
+            break;
+        }
+    }
+
+    tracing::warn!(
+        target: "audit",
+        actor_key_id = %actor_key,
+        mode = "user_id",
+        user_id = %user_id,
+        events_deleted = total_deleted,
+        "bulk delete: GDPR by user_id"
+    );
 
     Ok(Json(DeleteEventsResponse {
-        events_deleted: stats.events_deleted,
-        blobs_deleted: stats.blobs_deleted,
+        events_deleted: total_deleted,
+        blobs_deleted: 0,
     }))
 }
 
@@ -629,8 +771,9 @@ pub async fn export_events(
 
     let store = state.pipeline.store_arc();
     let mut lines = Vec::new();
+    let span = tracing::Span::current();
     tokio::task::spawn_blocking(move || {
-        store
+        span.in_scope(|| store
             .export_events(&filter, &mut |event| {
                 let resp = EventResponse {
                     id: event.id.to_string(),
@@ -663,7 +806,7 @@ pub async fn export_events(
                     lines.push(json);
                 }
             })
-            .map(|()| lines)
+            .map(|()| lines))
     })
     .await
     .map_err(|e| crate::error::ServerError::Internal(e.to_string()))?

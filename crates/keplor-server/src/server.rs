@@ -17,7 +17,7 @@ use tower::ServiceBuilder;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::trace::TraceLayer;
 
-use crate::auth::{self, ApiKeySet};
+use crate::auth::{self, ApiKeySet, HotKeys};
 use crate::config::ServerConfig;
 use crate::pipeline::Pipeline;
 use crate::rate_limit::{self, RateLimitConfig, RateLimiter};
@@ -39,6 +39,12 @@ pub struct PipelineServer {
     #[cfg(feature = "s3")]
     archive_config: Option<crate::config::ArchiveConfig>,
     tls_config: Option<Arc<rustls::ServerConfig>>,
+    /// Hot-swappable API key set. SIGHUP rebuilds and `store()`s a new
+    /// `ApiKeySet` here without restart.
+    hot_keys: Arc<HotKeys>,
+    /// Path to the source TOML so SIGHUP can re-parse it. None when the
+    /// server was built from in-memory config (tests).
+    config_path: Option<std::path::PathBuf>,
 }
 
 impl PipelineServer {
@@ -61,7 +67,9 @@ impl PipelineServer {
         let rollup_store = state.pipeline.store_arc();
         rollup::spawn_rollup_task(rollup_store, Duration::from_secs(60));
 
-        let keys = Arc::new(keys);
+        // Wrap the key set in an ArcSwap so SIGHUP can hot-swap it.
+        // The middleware loads the current snapshot on every request.
+        let keys: Arc<HotKeys> = Arc::new(arc_swap::ArcSwap::from_pointee(keys));
         let body_limit = config.pipeline.max_body_bytes;
 
         // Build optional rate limiter.
@@ -102,9 +110,12 @@ impl PipelineServer {
         // Timeout + concurrency limit applied only to authed routes.
         // Health and metrics are excluded so observability is never
         // starved when the connection pool is saturated.
+        // Clone the keys handle for the middleware closure; the original
+        // is retained on the PipelineServer for SIGHUP-driven reloads.
+        let keys_for_mw = Arc::clone(&keys);
         let authed = authed
             .layer(middleware::from_fn(move |req, next| {
-                let keys = Arc::clone(&keys);
+                let keys = Arc::clone(&keys_for_mw);
                 auth::require_api_key(keys, req, next)
             }))
             .layer(
@@ -122,11 +133,29 @@ impl PipelineServer {
             .route("/metrics", get(routes::metrics_handler))
             .with_state(state);
 
+        // Declare `request_id` as a span field so the
+        // `propagate_request_id` middleware's `Span::current().record(...)`
+        // call actually attaches the value (the default span built by
+        // TraceLayer doesn't declare it, and `record` silently drops
+        // updates to undeclared fields). All downstream
+        // `#[tracing::instrument]` spans inherit through the active span
+        // stack.
+        let trace_layer = TraceLayer::new_for_http().make_span_with(
+            |request: &axum::http::Request<_>| {
+                tracing::info_span!(
+                    "http_request",
+                    method = %request.method(),
+                    uri = %request.uri(),
+                    request_id = tracing::field::Empty,
+                )
+            },
+        );
+
         let router = Router::new()
             .merge(authed)
             .merge(public)
             .layer(middleware::from_fn(request_id::propagate_request_id))
-            .layer(TraceLayer::new_for_http())
+            .layer(trace_layer)
             .layer(build_cors_layer(&config.cors));
 
         let tls_config = match config.tls.as_ref() {
@@ -181,7 +210,18 @@ impl PipelineServer {
             #[cfg(feature = "s3")]
             archive_config: config.archive.clone(),
             tls_config,
+            hot_keys: keys,
+            // SIGHUP reload only works when we know which file to re-parse.
+            // The CLI sets this; in-memory config (tests) leaves it None.
+            config_path: None,
         })
+    }
+
+    /// Attach the source config path so SIGHUP knows which file to re-parse.
+    /// Called by the CLI right after `new()`. Idempotent.
+    pub fn with_config_path(mut self, path: std::path::PathBuf) -> Self {
+        self.config_path = Some(path);
+        self
     }
 
     /// Start the server and block until shutdown.
@@ -288,6 +328,15 @@ impl PipelineServer {
         if wal_checkpoint_secs > 0 {
             let ckpt_store = Arc::clone(&store);
             tokio::spawn(wal_checkpoint_loop(ckpt_store, wal_checkpoint_secs));
+        }
+
+        // SIGHUP handler: re-parse the config and hot-swap the API key
+        // set without dropping in-flight requests. Only installed when a
+        // config_path was attached via `with_config_path` — in-memory
+        // configs (tests) skip this.
+        if let Some(cfg_path) = self.config_path.clone() {
+            let hot_keys = Arc::clone(&self.hot_keys);
+            tokio::spawn(sighup_reload_loop(hot_keys, cfg_path));
         }
 
         if let Some(tls_config) = &self.tls_config {
@@ -532,6 +581,43 @@ async fn wal_checkpoint_loop(store: Arc<keplor_store::Store>, interval_secs: u64
         let ckpt_store = Arc::clone(&store);
         if let Err(e) = tokio::task::spawn_blocking(move || ckpt_store.wal_checkpoint()).await {
             tracing::warn!(error = %e, "wal checkpoint failed");
+        }
+    }
+}
+
+/// SIGHUP-driven hot-reload of the API key set.
+///
+/// On every SIGHUP: re-parse the TOML at `config_path`, build a fresh
+/// `ApiKeySet` from `[auth]`, and atomically swap it into `hot_keys`.
+/// In-flight requests holding an `ArcSwap::load()` snapshot finish
+/// against the OLD set; new requests (after the store) use the NEW set.
+/// No requests are dropped. Logs success or the parse error.
+async fn sighup_reload_loop(hot_keys: Arc<HotKeys>, config_path: std::path::PathBuf) {
+    let mut sighup = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(error = %e, "failed to install SIGHUP handler — config reloads disabled");
+            return;
+        },
+    };
+    tracing::info!(config = %config_path.display(), "SIGHUP reload handler installed");
+    while sighup.recv().await.is_some() {
+        match crate::config::ServerConfig::load(&config_path) {
+            Ok(cfg) => {
+                let new_keys = ApiKeySet::from_config(
+                    cfg.auth.api_keys.clone(),
+                    cfg.auth.api_key_entries.clone(),
+                    &cfg.retention.default_tier,
+                );
+                hot_keys.store(Arc::new(new_keys));
+                tracing::info!("SIGHUP: api key set reloaded successfully");
+                metrics::counter!("keplor_sighup_reloads_total", "outcome" => "success")
+                    .increment(1);
+            },
+            Err(e) => {
+                tracing::error!(error = %e, "SIGHUP: config parse failed — keys unchanged");
+                metrics::counter!("keplor_sighup_reloads_total", "outcome" => "fail").increment(1);
+            },
         }
     }
 }

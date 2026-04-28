@@ -42,3 +42,4 @@ fuzz/artifacts/
 
 # Claude Code local state
 .claude/settings.local.json
+.recon/

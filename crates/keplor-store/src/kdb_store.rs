@@ -293,6 +293,7 @@ impl KdbStore {
 
     /// Query summaries — same semantics as `query` but returns the
     /// narrower `EventSummary` shape used by the HTTP API.
+    #[tracing::instrument(name = "store.query_summary", skip(self), fields(filter = ?filter))]
     pub fn query_summary(
         &self,
         filter: &EventFilter,
@@ -304,6 +305,7 @@ impl KdbStore {
     }
 
     /// Real-time cost + event count aggregation.
+    #[tracing::instrument(name = "store.query_quota", skip(self))]
     pub fn quota_summary(
         &self,
         user_id: Option<&str>,
@@ -328,6 +330,7 @@ impl KdbStore {
     }
 
     /// Pre-aggregated daily rollups.
+    #[tracing::instrument(name = "store.query_rollups", skip(self))]
     pub fn query_rollups(
         &self,
         user_id: Option<&str>,
@@ -384,6 +387,7 @@ impl KdbStore {
 
     /// Aggregate stats — optionally grouped by model — derived from
     /// rollups.
+    #[tracing::instrument(name = "store.query_stats", skip(self))]
     pub fn aggregate_stats(
         &self,
         user_id: Option<&str>,
@@ -472,9 +476,27 @@ impl KdbStore {
     /// "segments removed" which is what operators actually tune
     /// retention against.
     pub fn gc_expired(&self, older_than_ns: i64) -> Result<GcStats, StoreError> {
+        // GC across every engine; the legacy fallback path uses the
+        // tier name from the engine's mount label so per-tier metrics
+        // remain meaningful even on the global codepath.
         let mut total = 0usize;
-        for eng in self.all_engines() {
+        let snapshot = self.engines.load();
+        for (tier_name, eng) in snapshot.iter() {
             let s = eng.gc(older_than_ns).map_err(kdb_err)?;
+            if s.segments_deleted > 0 {
+                metrics::counter!(
+                    "keplor_gc_segments_deleted_total",
+                    "tier" => tier_name.to_string(),
+                )
+                .increment(s.segments_deleted as u64);
+            }
+            if s.bytes_freed > 0 {
+                metrics::counter!(
+                    "keplor_gc_bytes_freed_total",
+                    "tier" => tier_name.to_string(),
+                )
+                .increment(s.bytes_freed);
+            }
             total += s.segments_deleted as usize;
         }
         Ok(GcStats { events_deleted: total, blobs_deleted: 0 })
@@ -484,6 +506,20 @@ impl KdbStore {
     pub fn gc_tier(&self, tier: &str, older_than_ns: i64) -> Result<GcStats, StoreError> {
         let eng = self.engine_for(tier)?;
         let s = eng.gc(older_than_ns).map_err(kdb_err)?;
+        if s.segments_deleted > 0 {
+            metrics::counter!(
+                "keplor_gc_segments_deleted_total",
+                "tier" => tier.to_owned(),
+            )
+            .increment(s.segments_deleted as u64);
+        }
+        if s.bytes_freed > 0 {
+            metrics::counter!(
+                "keplor_gc_bytes_freed_total",
+                "tier" => tier.to_owned(),
+            )
+            .increment(s.bytes_freed);
+        }
         Ok(GcStats { events_deleted: s.segments_deleted as usize, blobs_deleted: 0 })
     }
 

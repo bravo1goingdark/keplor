@@ -17,6 +17,10 @@ keplor-core    = { path = "../keplor-core" }
 keplor-pricing = { path = "../keplor-pricing" }
 keplor-store   = { path = "../keplor-store" }
 
+# Hot-reloadable API key set (SIGHUP) — keplor-store already pulls
+# arc-swap transitively, but we depend on it directly so the type
+# `arc_swap::ArcSwap` is in scope here.
+arc-swap   = "1.7"
 tokio      = { workspace = true, features = ["rt-multi-thread", "net", "signal", "sync", "macros", "time"] }
 axum       = { workspace = true, features = ["json"] }
 tower      = { workspace = true, features = ["util", "timeout", "limit"] }

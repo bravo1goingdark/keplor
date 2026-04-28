@@ -172,6 +172,9 @@ async fn flush_loop(
     let mut interval = tokio::time::interval(config.flush_interval);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+    let capacity = config.channel_capacity as f64;
+    metrics::gauge!("keplor_batch_queue_capacity").set(capacity);
+
     loop {
         tokio::select! {
             biased;
@@ -185,6 +188,11 @@ async fn flush_loop(
                                 Err(_) => break,
                             }
                         }
+                        // Sample post-dequeue: pairs with the enqueue
+                        // sample in the pipeline so the gauge reflects
+                        // both producers and the consumer.
+                        let depth = rx.max_capacity() - rx.capacity();
+                        metrics::gauge!("keplor_batch_queue_depth").set(depth as f64);
                         if buffer.len() >= config.batch_size {
                             flush(&store, &mut buffer).await;
                         }
@@ -195,6 +203,7 @@ async fn flush_loop(
                             tracing::info!(events = buffer.len(), "draining batch writer on shutdown");
                             flush(&store, &mut buffer).await;
                         }
+                        metrics::gauge!("keplor_batch_queue_depth").set(0.0);
                         tracing::info!("batch writer shut down cleanly");
                         return;
                     },
@@ -204,6 +213,10 @@ async fn flush_loop(
                 if !buffer.is_empty() {
                     flush(&store, &mut buffer).await;
                 }
+                // Tick samples too — keeps the gauge fresh during quiet
+                // periods so dashboards don't see stale data.
+                let depth = rx.max_capacity() - rx.capacity();
+                metrics::gauge!("keplor_batch_queue_depth").set(depth as f64);
             },
         }
     }
@@ -235,7 +248,13 @@ async fn flush(store: &Arc<KdbStore>, buffer: &mut Vec<WriteRequest>) {
 
     let store = Arc::clone(store);
     let result = tokio::task::spawn_blocking(move || {
-        store.append_batch(&batch)?;
+        // append_batch_durable performs a single fsync per affected tier
+        // at the end of the batch, eliminating the wal_sync_interval
+        // data-loss window. Cost: ~10–50 µs extra per flush on NVMe.
+        // At the default 50 ms cadence that's ~20 fsyncs/sec/tier — well
+        // under what disks can sustain — and gives billing-grade durability
+        // to *every* ingest path, not just X-Keplor-Durable batches.
+        store.append_batch_durable(&batch)?;
         store.wal_checkpoint()?;
         Ok::<_, StoreError>(batch.iter().map(|e| e.id).collect::<Vec<_>>())
     })

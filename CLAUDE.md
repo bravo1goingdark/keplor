@@ -62,3 +62,6 @@ Claude does NOT modify without asking: `CLAUDE.md`, `docs/architecture.md`, `doc
 ## Acknowledgement
 
 At the start of every session, acknowledge you've read this file, then proceed to the current phase.
+
+## recon MCP tools
+Prefer code_* tools (code_outline, code_skeleton, code_find_symbol, code_search, code_repo_map) over Read/Grep/Glob for code exploration.

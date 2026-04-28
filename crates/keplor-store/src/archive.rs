@@ -89,6 +89,7 @@ impl Archiver {
     /// skipped and its events remain in SQLite.  The next archive cycle
     /// will retry them.  Events are **never** deleted unless the upload
     /// is confirmed.
+    #[tracing::instrument(name = "archive.run_once", skip(self))]
     pub fn archive_old_events(
         &self,
         older_than_ns: i64,
@@ -117,6 +118,9 @@ impl Archiver {
                     Ok((compressed_bytes, ids)) => {
                         // Upload confirmed — safe to delete from SQLite.
                         if let Err(e) = self.store.delete_events_by_ids(&ids) {
+                            // Upload counted as success above; the
+                            // post-upload cleanup is a separate failure
+                            // mode tracked through tracing only.
                             tracing::error!(
                                 user = user_key,
                                 day,
@@ -128,6 +132,13 @@ impl Archiver {
                             );
                             continue;
                         }
+                        metrics::counter!(
+                            "keplor_archive_chunks_total",
+                            "status" => "success",
+                        )
+                        .increment(1);
+                        metrics::counter!("keplor_archive_bytes_uploaded_total")
+                            .increment(compressed_bytes as u64);
                         total_archived += ids.len();
                         total_files += 1;
                         total_bytes += compressed_bytes;
@@ -135,6 +146,11 @@ impl Archiver {
                     Err(e) => {
                         // S3 upload failed — skip this chunk.  Events
                         // remain in SQLite and will be retried next cycle.
+                        metrics::counter!(
+                            "keplor_archive_chunks_total",
+                            "status" => "fail",
+                        )
+                        .increment(1);
                         tracing::warn!(
                             user = user_key,
                             day,

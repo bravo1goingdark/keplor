@@ -11,9 +11,42 @@ use smol_str::SmolStr;
 
 use crate::error::ServerError;
 use crate::idempotency::IdempotencyCache;
+use crate::metrics::{
+    self as obs, BATCH_QUEUE_CAPACITY, BATCH_QUEUE_DEPTH, INGEST_LATENCY_SECONDS, LABEL_ERROR_TYPE,
+    LABEL_MODEL, LABEL_PROVIDER, LABEL_STAGE, LABEL_TIER,
+};
 use crate::normalize;
 use crate::schema::{IngestEvent, IngestResponse, TimestampInput};
 use crate::validate;
+
+/// Bump the existing error counter and tag it with both `stage` and the
+/// low-cardinality `error_type` derived from the [`ServerError`] variant.
+///
+/// Wraps the historical `keplor_events_errors_total{stage}` so existing
+/// dashboards keep working — we only *append* the new label.
+#[inline]
+fn record_error(stage: &'static str, err: &ServerError) {
+    let error_type = obs::error_type_label(err);
+    metrics::counter!(
+        "keplor_events_errors_total",
+        LABEL_STAGE => stage,
+        LABEL_ERROR_TYPE => error_type,
+    )
+    .increment(1);
+}
+
+/// Variant of [`record_error`] for stages that emit a fixed
+/// `error_type` without a `ServerError` instance in scope (e.g. queue
+/// full where the `ServerError::from` translation hasn't happened yet).
+#[inline]
+fn record_error_kind(stage: &'static str, error_type: &'static str) {
+    metrics::counter!(
+        "keplor_events_errors_total",
+        LABEL_STAGE => stage,
+        LABEL_ERROR_TYPE => error_type,
+    )
+    .increment(1);
+}
 
 /// Default cost options — reused across all events to avoid per-call construction.
 static DEFAULT_COST_OPTS: CostOpts = CostOpts {
@@ -60,13 +93,13 @@ impl Pipeline {
         }
         match self.store.db_size_bytes() {
             Ok(size) if size >= self.max_db_bytes => {
-                metrics::counter!("keplor_events_errors_total", "stage" => "storage_full")
-                    .increment(1);
-                Err(ServerError::StorageFull(format!(
+                let err = ServerError::StorageFull(format!(
                     "database size {:.1} MB exceeds limit of {:.1} MB",
                     size as f64 / (1024.0 * 1024.0),
                     self.max_db_bytes as f64 / (1024.0 * 1024.0),
-                )))
+                ));
+                record_error("storage_full", &err);
+                Err(err)
             },
             _ => Ok(()),
         }
@@ -82,6 +115,11 @@ impl Pipeline {
     ///
     /// Times out after 10 seconds to prevent indefinite hangs if the
     /// batch writer stalls.
+    #[tracing::instrument(
+        name = "pipeline.ingest",
+        skip(self, event, authenticated_key_id, idempotency_key),
+        fields(tier = tier, provider = tracing::field::Empty, model = tracing::field::Empty),
+    )]
     pub async fn ingest(
         &self,
         event: IngestEvent,
@@ -102,18 +140,36 @@ impl Pipeline {
         let (llm_event, provider, model, cost) =
             self.process_event(event, authenticated_key_id, tier)?;
 
+        // Backfill span fields now that we know provider/model.
+        let span = tracing::Span::current();
+        span.record("provider", provider.id_key());
+        span.record("model", model.as_str());
+
+        // Snapshot queue depth on every enqueue so the gauge reflects
+        // back-pressure even when no flush has occurred recently.
+        self.update_queue_metrics();
+
         let id =
             tokio::time::timeout(std::time::Duration::from_secs(10), self.writer.write(llm_event))
                 .await
                 .map_err(|_| ServerError::Internal("write timed out after 10s".into()))?
                 .map_err(|e| {
-                    metrics::counter!("keplor_events_errors_total", "stage" => "store")
-                        .increment(1);
-                    ServerError::from(e)
+                    let err = ServerError::from(e);
+                    record_error("store", &err);
+                    err
                 })?;
 
         let elapsed = start.elapsed();
+        // Legacy histogram retained for dashboard continuity.
         metrics::histogram!("keplor_ingest_duration_seconds").record(elapsed.as_secs_f64());
+        // New per-tier latency histogram with provider/model labels.
+        metrics::histogram!(
+            INGEST_LATENCY_SECONDS,
+            LABEL_TIER => tier.to_owned(),
+            LABEL_PROVIDER => provider.id_key().to_owned(),
+            LABEL_MODEL => model.to_string(),
+        )
+        .record(elapsed.as_secs_f64());
         self.emit_metrics(&provider, &model);
 
         let resp = IngestResponse {
@@ -131,10 +187,25 @@ impl Pipeline {
         Ok(resp)
     }
 
+    /// Refresh the bounded-channel depth + capacity gauges. The gauges
+    /// are sampled on enqueue (here) and on dequeue (inside the
+    /// `BatchWriter` flush loop), giving a near-real-time view of
+    /// back-pressure between flush cycles.
+    #[inline]
+    fn update_queue_metrics(&self) {
+        metrics::gauge!(BATCH_QUEUE_DEPTH).set(self.writer.queue_depth() as f64);
+        metrics::gauge!(BATCH_QUEUE_CAPACITY).set(self.writer.max_capacity() as f64);
+    }
+
     /// Process a batch of events with durable writes — all events are sent
     /// to the channel first, then all flush confirmations are awaited
     /// concurrently. This avoids the serial-await bottleneck where each
     /// event in a durable batch waited for its own 50ms flush cycle.
+    #[tracing::instrument(
+        name = "pipeline.ingest_batch_durable",
+        skip(self, events, authenticated_key_id),
+        fields(tier = tier, count = events.len()),
+    )]
     pub async fn ingest_batch_durable(
         &self,
         events: Vec<IngestEvent>,
@@ -161,12 +232,15 @@ impl Pipeline {
                     ok_indices.push(i);
                 },
                 Err(e) => {
-                    metrics::counter!("keplor_events_errors_total", "stage" => "validation")
-                        .increment(1);
+                    record_error("validation", &e);
                     results[i] = Some(Err(e));
                 },
             }
         }
+
+        let batch_start = std::time::Instant::now();
+        // Snapshot queue depth before the burst hits the channel.
+        self.update_queue_metrics();
 
         // Send all valid events and await flush concurrently.
         let write_results = tokio::time::timeout(
@@ -183,11 +257,22 @@ impl Pipeline {
                 .collect()
         });
 
+        // One latency sample per accepted event in the batch — keeps
+        // the histogram comparable to the single-ingest path.
+        let elapsed = batch_start.elapsed().as_secs_f64();
+
         for (j, write_result) in write_results.into_iter().enumerate() {
             let idx = ok_indices[j];
             let (ref provider, ref model, cost) = responses[j];
             match write_result {
                 Ok(id) => {
+                    metrics::histogram!(
+                        INGEST_LATENCY_SECONDS,
+                        LABEL_TIER => tier.to_owned(),
+                        LABEL_PROVIDER => provider.id_key().to_owned(),
+                        LABEL_MODEL => model.to_string(),
+                    )
+                    .record(elapsed);
                     self.emit_metrics(provider, model);
                     results[idx] = Some(Ok(IngestResponse {
                         id: id.to_string(),
@@ -197,9 +282,9 @@ impl Pipeline {
                     }));
                 },
                 Err(e) => {
-                    metrics::counter!("keplor_events_errors_total", "stage" => "store")
-                        .increment(1);
-                    results[idx] = Some(Err(ServerError::from(e)));
+                    let err = ServerError::from(e);
+                    record_error("store", &err);
+                    results[idx] = Some(Err(err));
                 },
             }
         }
@@ -228,8 +313,12 @@ impl Pipeline {
             self.process_event(event, authenticated_key_id, tier)?;
 
         let id = llm_event.id;
+        self.update_queue_metrics();
         self.writer.write_fire_and_forget(llm_event).map_err(|e| {
-            metrics::counter!("keplor_events_errors_total", "stage" => "queue_full").increment(1);
+            // ChannelFull is the back-pressure signal: surface it as
+            // its own error_type so dashboards can distinguish it from
+            // generic store failures.
+            record_error_kind("queue_full", "channel_full");
             ServerError::from(e)
         })?;
 
@@ -246,6 +335,11 @@ impl Pipeline {
     /// Core processing: validate → normalize → cost → build event.
     ///
     /// Returns `(LlmEvent, provider, model, cost)`.
+    #[tracing::instrument(
+        name = "pipeline.process_event",
+        skip(self, event, authenticated_key_id),
+        fields(provider = tracing::field::Empty, model = tracing::field::Empty),
+    )]
     fn process_event(
         &self,
         mut event: IngestEvent,
@@ -257,12 +351,16 @@ impl Pipeline {
         if let Some(key_id) = authenticated_key_id {
             event.api_key_id = Some(key_id.to_owned());
         }
-        validate::validate(&event).inspect_err(|_| {
-            metrics::counter!("keplor_events_errors_total", "stage" => "validation").increment(1);
+        validate::validate(&event).inspect_err(|e| {
+            record_error("validation", e);
         })?;
 
         let provider = normalize::normalize_provider(&event.provider);
         let model = normalize::normalize_model(&event.model);
+
+        let span = tracing::Span::current();
+        span.record("provider", provider.id_key());
+        span.record("model", model.as_str());
 
         let usage = usage_from_ingest(&event.usage);
         let cost =
