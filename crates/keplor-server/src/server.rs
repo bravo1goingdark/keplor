@@ -140,16 +140,15 @@ impl PipelineServer {
         // updates to undeclared fields). All downstream
         // `#[tracing::instrument]` spans inherit through the active span
         // stack.
-        let trace_layer = TraceLayer::new_for_http().make_span_with(
-            |request: &axum::http::Request<_>| {
+        let trace_layer =
+            TraceLayer::new_for_http().make_span_with(|request: &axum::http::Request<_>| {
                 tracing::info_span!(
                     "http_request",
                     method = %request.method(),
                     uri = %request.uri(),
                     request_id = tracing::field::Empty,
                 )
-            },
-        );
+            });
 
         let router = Router::new()
             .merge(authed)

@@ -573,12 +573,11 @@ pub async fn delete_event(
 
     let store = state.pipeline.store_arc();
     let span = tracing::Span::current();
-    let deleted = tokio::task::spawn_blocking(move || {
-        span.in_scope(|| store.delete_event(&event_id))
-    })
-    .await
-    .map_err(|e| crate::error::ServerError::Internal(e.to_string()))?
-    .map_err(crate::error::ServerError::from)?;
+    let deleted =
+        tokio::task::spawn_blocking(move || span.in_scope(|| store.delete_event(&event_id)))
+            .await
+            .map_err(|e| crate::error::ServerError::Internal(e.to_string()))?
+            .map_err(crate::error::ServerError::from)?;
 
     if deleted {
         Ok(StatusCode::NO_CONTENT)
@@ -621,10 +620,8 @@ pub async fn delete_events_bulk(
     auth: Option<axum::extract::Extension<crate::auth::AuthenticatedKey>>,
     Query(params): Query<DeleteEventsQuery>,
 ) -> Result<Json<DeleteEventsResponse>, crate::error::ServerError> {
-    let actor_key_id = auth
-        .as_ref()
-        .map(|e| e.0.key_id.to_string())
-        .unwrap_or_else(|| "anon".to_string());
+    let actor_key_id =
+        auth.as_ref().map(|e| e.0.key_id.to_string()).unwrap_or_else(|| "anon".to_string());
     match (params.older_than_days, params.user_id.as_ref()) {
         (Some(_), Some(_)) => {
             return Err(crate::error::ServerError::Validation(
@@ -676,8 +673,16 @@ pub async fn delete_events_bulk(
         }));
     }
 
-    // user_id path — GDPR right-to-erasure.
-    let user_id = params.user_id.expect("validated above");
+    // user_id path — GDPR right-to-erasure.  The match above already
+    // returns on both (None, None) and (Some, Some); reaching here
+    // implies user_id is Some, but route the impossible None through a
+    // typed error so clippy::expect_used stays happy and a future
+    // refactor can't accidentally break the invariant silently.
+    let Some(user_id) = params.user_id else {
+        return Err(crate::error::ServerError::Internal(
+            "user_id missing after validation — should be unreachable".into(),
+        ));
+    };
     if user_id.trim().is_empty() {
         return Err(crate::error::ServerError::Validation("user_id must not be empty".into()));
     }
@@ -698,10 +703,8 @@ pub async fn delete_events_bulk(
         let span_q = span.clone();
         let ids = tokio::task::spawn_blocking(move || {
             span_q.in_scope(|| {
-                let filter = keplor_store::EventFilter {
-                    user_id: Some(user_q),
-                    ..Default::default()
-                };
+                let filter =
+                    keplor_store::EventFilter { user_id: Some(user_q), ..Default::default() };
                 store_q.query(&filter, BATCH, None)
             })
         })
@@ -742,10 +745,7 @@ pub async fn delete_events_bulk(
         "bulk delete: GDPR by user_id"
     );
 
-    Ok(Json(DeleteEventsResponse {
-        events_deleted: total_deleted,
-        blobs_deleted: 0,
-    }))
+    Ok(Json(DeleteEventsResponse { events_deleted: total_deleted, blobs_deleted: 0 }))
 }
 
 // ── Export API ──────────────────────────────────────────────────────────
@@ -773,40 +773,42 @@ pub async fn export_events(
     let mut lines = Vec::new();
     let span = tracing::Span::current();
     tokio::task::spawn_blocking(move || {
-        span.in_scope(|| store
-            .export_events(&filter, &mut |event| {
-                let resp = EventResponse {
-                    id: event.id.to_string(),
-                    timestamp: event.ts_ns,
-                    model: event.model,
-                    provider: event.provider,
-                    usage: UsageResponse {
-                        input_tokens: event.input_tokens,
-                        output_tokens: event.output_tokens,
-                        cache_read_input_tokens: event.cache_read_input_tokens,
-                        cache_creation_input_tokens: event.cache_creation_input_tokens,
-                        reasoning_tokens: event.reasoning_tokens,
-                    },
-                    cost_nanodollars: event.cost_nanodollars,
-                    latency_total_ms: event.total_ms,
-                    latency_ttft_ms: event.ttft_ms,
-                    http_status: event.http_status,
-                    source: event.source,
-                    user_id: event.user_id,
-                    api_key_id: event.api_key_id,
-                    endpoint: event.endpoint,
-                    streaming: event.streaming,
-                    error: event.error_type,
-                    metadata: event
-                        .metadata_json
-                        .as_deref()
-                        .and_then(|s| serde_json::from_str(s).ok()),
-                };
-                if let Ok(json) = serde_json::to_string(&resp) {
-                    lines.push(json);
-                }
-            })
-            .map(|()| lines))
+        span.in_scope(|| {
+            store
+                .export_events(&filter, &mut |event| {
+                    let resp = EventResponse {
+                        id: event.id.to_string(),
+                        timestamp: event.ts_ns,
+                        model: event.model,
+                        provider: event.provider,
+                        usage: UsageResponse {
+                            input_tokens: event.input_tokens,
+                            output_tokens: event.output_tokens,
+                            cache_read_input_tokens: event.cache_read_input_tokens,
+                            cache_creation_input_tokens: event.cache_creation_input_tokens,
+                            reasoning_tokens: event.reasoning_tokens,
+                        },
+                        cost_nanodollars: event.cost_nanodollars,
+                        latency_total_ms: event.total_ms,
+                        latency_ttft_ms: event.ttft_ms,
+                        http_status: event.http_status,
+                        source: event.source,
+                        user_id: event.user_id,
+                        api_key_id: event.api_key_id,
+                        endpoint: event.endpoint,
+                        streaming: event.streaming,
+                        error: event.error_type,
+                        metadata: event
+                            .metadata_json
+                            .as_deref()
+                            .and_then(|s| serde_json::from_str(s).ok()),
+                    };
+                    if let Ok(json) = serde_json::to_string(&resp) {
+                        lines.push(json);
+                    }
+                })
+                .map(|()| lines)
+        })
     })
     .await
     .map_err(|e| crate::error::ServerError::Internal(e.to_string()))?
