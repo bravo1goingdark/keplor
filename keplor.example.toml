@@ -111,6 +111,10 @@ days = 90
                                     # fleet has stopped sending those fields.
 # write_timeout_secs = 10          # max wait per ingest write before returning 500.
                                     # bounds worst-case latency under back-pressure (range 1-300).
+# flush_interval_ms = 50           # BatchWriter flush cadence. lower = fresher reads but more
+                                    # segment files (1200/min/tier at idle with the default).
+                                    # raise to 250-500 for sustained-write workloads where
+                                    # operators tolerate ~half-second read staleness. range 1-10000.
 
 # ── Idempotency ──────────────────────────────────────────────────────────
 [idempotency]

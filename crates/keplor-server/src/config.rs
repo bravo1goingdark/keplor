@@ -305,6 +305,11 @@ pub struct PipelineConfig {
     /// Bounds the worst-case request latency under back-pressure.
     /// Default: 10 seconds. Range: 1–300.
     pub write_timeout_secs: u64,
+    /// BatchWriter flush cadence in milliseconds. Lower = fresher
+    /// reads (smaller WAL→segment lag) at the cost of more segment
+    /// files; higher = better disk utilisation under sustained
+    /// write load. Default: 50 ms. Range: 1–10000.
+    pub flush_interval_ms: u64,
 }
 
 impl Default for PipelineConfig {
@@ -315,6 +320,7 @@ impl Default for PipelineConfig {
             channel_capacity: 32_768,
             strict_schema: false,
             write_timeout_secs: 10,
+            flush_interval_ms: 50,
         }
     }
 }
@@ -445,6 +451,12 @@ impl ServerConfig {
             return Err(format!(
                 "pipeline.write_timeout_secs = {} must be in [1, 300]",
                 self.pipeline.write_timeout_secs
+            ));
+        }
+        if self.pipeline.flush_interval_ms == 0 || self.pipeline.flush_interval_ms > 10_000 {
+            return Err(format!(
+                "pipeline.flush_interval_ms = {} must be in [1, 10000]",
+                self.pipeline.flush_interval_ms
             ));
         }
         if self.storage.rollup_loop_secs < 5 || self.storage.rollup_loop_secs > 3600 {

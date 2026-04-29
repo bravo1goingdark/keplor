@@ -312,7 +312,7 @@ shedding the `rusqlite` dep keeps the binary under 10 MB.
 | `503 Service Unavailable` on ingest | Batch writer queue full | Reduce ingestion rate or increase `pipeline.batch_size` |
 | `408 Request Timeout` | Request exceeded `server.request_timeout_secs` | Increase timeout or reduce batch size |
 | Data directory growing unbounded | `retention_days = 0` (GC disabled) | Set `retention_days` to a positive value |
-| Many tiny segment files | Hard-coded 50 ms BatchWriter cadence | Expected — segment GC reclaims them on the retention schedule. See "Segment count blowing up" in the runbook below if it doesn't keep up. |
+| Many tiny segment files | Default `pipeline.flush_interval_ms = 50` produces ~1200 segments/min/tier at idle | Raise `pipeline.flush_interval_ms` (e.g. 250) to trade read freshness for fewer segments. See "Segment count blowing up" in the runbook below if GC can't keep up. |
 | `migrate-from-sqlite` subcommand "not found" | Default binary doesn't include it | Rebuild with `--features migrate-from-sqlite` |
 | High memory usage | Large batch writer queue | Reduce `channel_capacity` in batch config |
 

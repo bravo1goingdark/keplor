@@ -196,7 +196,7 @@ fn run_server(config_path: PathBuf, json_logs: bool) -> Result<()> {
         let batch_config = keplor_store::BatchConfig {
             batch_size: config.pipeline.batch_size,
             channel_capacity: config.pipeline.channel_capacity,
-            ..keplor_store::BatchConfig::default()
+            flush_interval: std::time::Duration::from_millis(config.pipeline.flush_interval_ms),
         };
         let writer = Arc::new(keplor_store::BatchWriter::new(Arc::clone(&store), batch_config));
 
