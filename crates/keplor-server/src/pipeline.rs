@@ -14,7 +14,7 @@ use crate::error::ServerError;
 use crate::idempotency::IdempotencyCache;
 use crate::metrics::{
     self as obs, BATCH_QUEUE_CAPACITY, BATCH_QUEUE_DEPTH, INGEST_LATENCY_SECONDS, LABEL_ERROR_TYPE,
-    LABEL_MODEL, LABEL_PROVIDER, LABEL_STAGE, LABEL_TIER,
+    LABEL_PROVIDER, LABEL_STAGE, LABEL_TIER,
 };
 use crate::normalize;
 use crate::schema::{IngestEvent, IngestResponse, TimestampInput};
@@ -216,12 +216,14 @@ impl Pipeline {
         let elapsed = start.elapsed();
         // Legacy histogram retained for dashboard continuity.
         metrics::histogram!("keplor_ingest_duration_seconds").record(elapsed.as_secs_f64());
-        // New per-tier latency histogram with provider/model labels.
+        // Per-tier latency histogram. Tier is bounded (3-5 values) and
+        // provider is &'static str — no per-event allocation. Model
+        // breakdown is on the events_ingested_total counter, where
+        // high-cardinality labels are cheap.
         metrics::histogram!(
             INGEST_LATENCY_SECONDS,
             LABEL_TIER => tier.to_owned(),
-            LABEL_PROVIDER => provider.id_key().to_owned(),
-            LABEL_MODEL => model.to_string(),
+            LABEL_PROVIDER => provider.id_key(),
         )
         .record(elapsed.as_secs_f64());
         self.emit_metrics(&provider, &model);
@@ -320,8 +322,7 @@ impl Pipeline {
                     metrics::histogram!(
                         INGEST_LATENCY_SECONDS,
                         LABEL_TIER => tier.to_owned(),
-                        LABEL_PROVIDER => provider.id_key().to_owned(),
-                        LABEL_MODEL => model.to_string(),
+                        LABEL_PROVIDER => provider.id_key(),
                     )
                     .record(elapsed);
                     self.emit_metrics(provider, model);

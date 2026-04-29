@@ -30,6 +30,10 @@ pub struct LoadtestArgs {
     pub baseline: Option<PathBuf>,
     /// API key (sent as `Authorization: Bearer <key>`). Optional.
     pub api_key: Option<String>,
+    /// When `false`, append `?durable=false` to the URL — the server
+    /// treats the request as fire-and-forget and returns 202 without
+    /// awaiting the BatchWriter flush. Default `true`.
+    pub durable: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -96,7 +100,11 @@ async fn run_async(args: &LoadtestArgs) -> Result<LoadtestResult> {
     let errors = Arc::new(AtomicU64::new(0));
     let queue_max = Arc::new(AtomicU64::new(0));
 
-    let url = format!("{}/v1/events", args.target.trim_end_matches('/'));
+    let url = if args.durable {
+        format!("{}/v1/events", args.target.trim_end_matches('/'))
+    } else {
+        format!("{}/v1/events?durable=false", args.target.trim_end_matches('/'))
+    };
     let auth = args.api_key.as_ref().map(|k| format!("Bearer {k}"));
 
     let payload = serde_json::json!({
@@ -141,7 +149,7 @@ async fn run_async(args: &LoadtestArgs) -> Result<LoadtestResult> {
                 }
                 let started = Instant::now();
                 match req.send().await {
-                    Ok(resp) if resp.status().is_success() => {
+                    Ok(resp) if matches!(resp.status().as_u16(), 200..=299) => {
                         let elapsed_us = started.elapsed().as_micros() as u64;
                         let mut h = hist.lock().await;
                         let _ = h.record(elapsed_us);
@@ -247,6 +255,7 @@ pub fn parse_args(args: Vec<String>) -> Result<LoadtestArgs> {
     let mut target: String = "http://127.0.0.1:8080".to_owned();
     let mut baseline: Option<PathBuf> = None;
     let mut api_key: Option<String> = None;
+    let mut durable: bool = true;
 
     let mut iter = args.into_iter();
     while let Some(a) = iter.next() {
@@ -283,6 +292,14 @@ pub fn parse_args(args: Vec<String>) -> Result<LoadtestArgs> {
             "--api-key" => {
                 api_key = Some(val.ok_or_else(|| anyhow!("--api-key requires a value"))?);
             },
+            "--no-durable" => {
+                durable = false;
+                // Push back the consumed value if any (--no-durable
+                // takes none, but split_once may have grabbed one).
+                if let Some(v) = val {
+                    bail!("--no-durable takes no value (got `{v}`)");
+                }
+            },
             other => bail!("unknown loadtest arg: {other}"),
         }
     }
@@ -294,6 +311,7 @@ pub fn parse_args(args: Vec<String>) -> Result<LoadtestArgs> {
         target,
         baseline,
         api_key,
+        durable,
     })
 }
 

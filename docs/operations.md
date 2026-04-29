@@ -276,6 +276,32 @@ keplor gc --older-than-days 30 --data-dir /var/lib/keplor
 reports a percentile breakdown. Use it to establish a baseline before
 shipping a perf-sensitive change.
 
+### Two ingest modes
+
+`POST /v1/events` accepts a `?durable` query parameter:
+
+- **Durable (default)** — `?durable=true` or omitted. Server awaits
+  the BatchWriter flush before returning `201 Created`. Per-event
+  latency bounded by `pipeline.flush_interval_ms` worst-case. Use
+  this when caller needs proof of disk durability per event.
+- **Fire-and-forget** — `?durable=false`. Server enqueues the event
+  and returns `202 Accepted` immediately. Per-event latency drops by
+  ~10× because there's no flush wait. Events may be lost if the
+  process crashes before the next batch flush (~5–50 ms).
+
+Pass `--no-durable` to the loadtest harness to drive the
+fire-and-forget path:
+
+```bash
+# durable, hits BatchWriter flush_interval as the latency floor
+cargo xtask loadtest --rate 30000 --duration 30s --concurrency 1024 \
+  --target http://127.0.0.1:8080
+
+# fire-and-forget, sub-10ms p99 at the same rate
+cargo xtask loadtest --rate 30000 --duration 30s --concurrency 256 \
+  --target http://127.0.0.1:8080 --no-durable
+```
+
 ```bash
 # 5000 req/s for 30s against a localhost server; report p50/p95/p99.
 cargo xtask loadtest \

@@ -32,11 +32,37 @@ pub struct AppState {
     pub archiver: Arc<arc_swap::ArcSwap<Option<Arc<keplor_store::Archiver>>>>,
 }
 
+/// Query parameters accepted by `POST /v1/events`.
+#[derive(Debug, Deserialize, Default)]
+pub struct IngestQuery {
+    /// `false` skips the await-flush oneshot — the request returns
+    /// `202 Accepted` as soon as the event is enqueued. Default
+    /// `true` (durable; returns `201 Created` after flush). Use
+    /// `?durable=false` for hot-path traffic that doesn't need
+    /// per-event flush confirmation; events may be lost if the
+    /// process crashes before the next batch flush (~50 ms).
+    #[serde(default = "default_true")]
+    pub durable: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
 /// `POST /v1/events` — ingest a single event.
+///
+/// Two modes:
+/// - **Durable (default)**: awaits the BatchWriter flush; returns
+///   `201 Created` once the event has hit segment files. Bounded by
+///   `pipeline.flush_interval_ms` worst-case latency.
+/// - **Fire-and-forget** (`?durable=false`): enqueues + returns
+///   `202 Accepted` immediately. ~1000× lower per-request latency,
+///   no acknowledgement of disk durability.
 pub async fn ingest_single(
     State(state): State<AppState>,
     auth: Option<Extension<AuthenticatedKey>>,
     headers: axum::http::HeaderMap,
+    Query(query): Query<IngestQuery>,
     Json(event): Json<IngestEvent>,
 ) -> Result<(StatusCode, Json<IngestResponse>), impl IntoResponse> {
     let (key_id, tier) = auth
@@ -44,11 +70,22 @@ pub async fn ingest_single(
         .unwrap_or((None, state.default_tier.to_string()));
     let idempotency_key =
         headers.get("idempotency-key").and_then(|v| v.to_str().ok()).map(String::from);
-    state
-        .pipeline
-        .ingest(event, key_id.as_deref(), idempotency_key.as_deref(), &tier)
-        .await
-        .map(|resp| (StatusCode::CREATED, Json(resp)))
+
+    if query.durable {
+        state
+            .pipeline
+            .ingest(event, key_id.as_deref(), idempotency_key.as_deref(), &tier)
+            .await
+            .map(|resp| (StatusCode::CREATED, Json(resp)))
+    } else {
+        // Fire-and-forget: enqueue without awaiting the flush oneshot.
+        // The pipeline still does validate → normalize → cost → build
+        // LlmEvent synchronously, then non-blocking enqueue.
+        state
+            .pipeline
+            .ingest_fire_and_forget(event, key_id.as_deref(), &tier)
+            .map(|resp| (StatusCode::ACCEPTED, Json(resp)))
+    }
 }
 
 /// Maximum events per batch request.
