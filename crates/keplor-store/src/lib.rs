@@ -35,7 +35,7 @@ pub use archive::{ArchiveResult, ArchiveS3Config, Archiver};
 pub use batch::{BatchConfig, BatchWriter};
 pub use error::StoreError;
 pub use filter::{Cursor, EventFilter};
-pub use kdb_store::{KdbConfig, KdbStore};
+pub use kdb_store::{KdbConfig, KdbStore, TierEngineStats};
 pub use stored_event::StoredEvent;
 pub use types::{AggregateRow, ArchiveManifest, EventSummary, GcStats, QuotaSummary, RollupRow};
 

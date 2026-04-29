@@ -162,6 +162,10 @@ Scrape `GET /metrics` for:
 | `keplor_batch_events_flushed_total` | counter | Events flushed to DB |
 | `keplor_batch_flush_errors_total` | counter | Failed batch flushes |
 | `keplor_dropped_field_total{field}` | counter | Ingest events that carried a deprecated, dropped field. `field=request_body` or `response_body`. |
+| `keplor_storage_bytes{tier}` | gauge | Bytes on disk across this tier's segments. Sampled every 10 s. |
+| `keplor_segments_total{tier}` | gauge | Closed segment-file count for this tier. |
+| `keplor_wal_events{tier}` | gauge | Events buffered in the active WAL, not yet rotated. |
+| `keplor_storage_events{tier}` | gauge | Total events across segments + WAL for this tier. |
 
 ### Alerting recommendations
 

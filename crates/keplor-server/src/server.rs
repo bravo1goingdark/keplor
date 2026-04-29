@@ -332,6 +332,14 @@ impl PipelineServer {
             tokio::spawn(wal_checkpoint_loop(ckpt_store, wal_checkpoint_secs));
         }
 
+        // Spawn the per-tier engine-stats sampler. Updates four
+        // gauges per tier on each tick; bounded label cardinality
+        // keeps Prometheus storage cheap.
+        {
+            let stats_store = Arc::clone(&store);
+            tokio::spawn(engine_stats_loop(stats_store, Duration::from_secs(10)));
+        }
+
         // SIGHUP handler: re-parse the config and hot-swap the API key
         // set without dropping in-flight requests. Only installed when a
         // config_path was attached via `with_config_path` — in-memory
@@ -576,6 +584,32 @@ async fn archive_loop(
     }
 }
 
+/// Sample per-tier KeplorDB engine stats and publish them as Prometheus
+/// gauges. Runs on a fixed cadence (default 10 s) so `/metrics` doesn't
+/// pay the engine-walk cost per scrape. Each tick clones the engines
+/// snapshot, queries cheap accessors (`segment_count`, `wal_count`,
+/// `total_events`, `total_bytes`), and updates the four gauges.
+async fn engine_stats_loop(store: Arc<keplor_store::Store>, interval: Duration) {
+    let mut ticker = tokio::time::interval(interval);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // First .tick() returns immediately so the gauges land in
+    // /metrics on the first scrape after server start, not one
+    // interval in.
+    loop {
+        ticker.tick().await;
+        for s in store.engine_stats() {
+            metrics::gauge!("keplor_segments_total", "tier" => s.tier.to_string())
+                .set(s.segment_count as f64);
+            metrics::gauge!("keplor_wal_events", "tier" => s.tier.to_string())
+                .set(s.wal_events as f64);
+            metrics::gauge!("keplor_storage_events", "tier" => s.tier.to_string())
+                .set(s.total_events as f64);
+            metrics::gauge!("keplor_storage_bytes", "tier" => s.tier.to_string())
+                .set(s.total_bytes as f64);
+        }
+    }
+}
+
 async fn wal_checkpoint_loop(store: Arc<keplor_store::Store>, interval_secs: u64) {
     let interval = Duration::from_secs(interval_secs);
     loop {
@@ -676,17 +710,26 @@ impl axum::serve::Listener for TlsListener {
 
 /// Install the Prometheus metrics recorder globally and return the handle.
 ///
-/// Safe to call multiple times (e.g. in tests) — subsequent calls return
-/// a standalone handle.
+/// Install (or reuse) the global Prometheus recorder.
+///
+/// Safe to call multiple times (test binaries call once per spawned
+/// server). The first call installs the global metrics recorder; every
+/// subsequent call returns the same `PrometheusHandle`, so all callers
+/// see the same counters / gauges through `/metrics`.
 pub fn install_metrics_recorder() -> PrometheusHandle {
-    let builder = metrics_exporter_prometheus::PrometheusBuilder::new();
-    match builder.install_recorder() {
-        Ok(handle) => handle,
-        Err(_) => {
-            // Recorder already installed (common in tests). Build a
-            // standalone recorder and return its handle.
-            let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
-            recorder.handle()
-        },
-    }
+    use std::sync::OnceLock;
+    static GLOBAL_HANDLE: OnceLock<PrometheusHandle> = OnceLock::new();
+    GLOBAL_HANDLE
+        .get_or_init(|| {
+            // reason: install_recorder() can only fail when another
+            // recorder has already been installed by a *different*
+            // crate, which would mean the host has a conflicting
+            // metrics setup. Letting it crash at startup is exactly
+            // what we want — silently dropping metrics would be worse.
+            #[allow(clippy::expect_used)]
+            metrics_exporter_prometheus::PrometheusBuilder::new()
+                .install_recorder()
+                .expect("global metrics recorder already installed by another crate")
+        })
+        .clone()
 }

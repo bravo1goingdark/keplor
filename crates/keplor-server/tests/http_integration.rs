@@ -248,6 +248,44 @@ async fn metrics_endpoint_works() {
     assert!(content_type.contains("text/plain"));
 }
 
+#[tokio::test]
+async fn engine_stats_gauges_appear_in_metrics() {
+    let base = spawn_server(vec![]).await;
+    let client = reqwest::Client::new();
+
+    // Drive at least one write so `total_events` is non-zero for the
+    // default tier — gauge presence with value zero is still a pass,
+    // but a non-zero observation gives the test bite.
+    let _ = client
+        .post(format!("{base}/v1/events"))
+        .json(&serde_json::json!({
+            "model": "gpt-4o",
+            "provider": "openai",
+            "usage": {"input_tokens": 5, "output_tokens": 5},
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    // The engine_stats_loop samples immediately on startup and every
+    // 10 s thereafter — gauges are in /metrics on the very next scrape,
+    // but server-bring-up plus first sample can take a beat under
+    // parallel test load.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        let body = reqwest::get(format!("{base}/metrics")).await.unwrap().text().await.unwrap();
+        if body.contains("keplor_storage_bytes") && body.contains("keplor_segments_total") {
+            // Sanity-check a couple of gauge names with the tier label.
+            assert!(body.contains("tier=\""), "tier label missing: {body:?}");
+            return;
+        }
+        if std::time::Instant::now() > deadline {
+            panic!("engine-stats gauges never appeared in /metrics:\n{body}");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+}
+
 // ── Failure-mode tests ──────────────���─────────────────────────────────
 
 /// Helper that boots a server with a custom pipeline/config for failure-mode tests.

@@ -84,6 +84,23 @@ impl KdbConfig {
     }
 }
 
+/// Per-tier KeplorDB engine stats, sampled by the server's metrics
+/// loop. `segment_count`, `wal_events`, `total_events`, and
+/// `total_bytes` come straight off the underlying [`Engine`].
+#[derive(Debug, Clone)]
+pub struct TierEngineStats {
+    /// Retention tier name (e.g. `"free"`, `"pro"`).
+    pub tier: SmolStr,
+    /// Number of closed segment files for this tier.
+    pub segment_count: usize,
+    /// Events buffered in the active WAL, not yet rotated.
+    pub wal_events: u32,
+    /// Total events across segments + WAL.
+    pub total_events: u64,
+    /// Bytes on disk across this tier's segments.
+    pub total_bytes: u64,
+}
+
 /// The KeplorDB-backed event store.
 pub struct KdbStore {
     engines: ArcSwap<HashMap<SmolStr, Arc<Engine<D, C, L>>>>,
@@ -195,6 +212,23 @@ impl KdbStore {
 
     fn all_engines(&self) -> Vec<Arc<Engine<D, C, L>>> {
         self.engines.load().values().cloned().collect()
+    }
+
+    /// Snapshot of per-tier KeplorDB engine stats for `/metrics`
+    /// reporting. The vec is freshly cloned on each call; gauges
+    /// should be sampled on a background interval, not per scrape.
+    pub fn engine_stats(&self) -> Vec<TierEngineStats> {
+        self.engines
+            .load()
+            .iter()
+            .map(|(tier, eng)| TierEngineStats {
+                tier: tier.clone(),
+                segment_count: eng.segment_count(),
+                wal_events: eng.wal_count(),
+                total_events: eng.total_events(),
+                total_bytes: eng.total_bytes(),
+            })
+            .collect()
     }
 
     // ── Ingest ─────────────────────────────────────────────────────
