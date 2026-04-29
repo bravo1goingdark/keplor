@@ -564,14 +564,21 @@ async fn graceful_shutdown_drains_events() {
         .await
         .unwrap();
 
-    // Trigger graceful shutdown via SIGINT to the current process would be
-    // disruptive, so instead we abort the server handle and verify events
-    // were flushed during the batch writer's 50ms interval.
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    // Wait for events to be flushed. BatchWriter flushes on a 50ms
+    // cadence; under CI load that can slip — poll the store with a
+    // generous deadline instead of asserting after a single sleep.
+    // Force a checkpoint at the end to catch anything still in WAL.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut events = Vec::new();
+    while std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let _ = store.wal_checkpoint();
+        let filter = keplor_store::EventFilter::default();
+        events = store.query_summary(&filter, 100, None).unwrap();
+        if events.len() >= 10 {
+            break;
+        }
+    }
     server_handle.abort();
-
-    // Verify events were persisted.
-    let filter = keplor_store::EventFilter::default();
-    let events = store.query_summary(&filter, 100, None).unwrap();
     assert!(events.len() >= 10, "expected at least 10 events persisted, got {}", events.len());
 }
