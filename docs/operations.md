@@ -276,6 +276,57 @@ keplor gc --older-than-days 30 --data-dir /var/lib/keplor
 reports a percentile breakdown. Use it to establish a baseline before
 shipping a perf-sensitive change.
 
+### Build-time perf knobs
+
+For maximum throughput on a known target host:
+
+```bash
+RUSTFLAGS="-C target-cpu=native" \
+  cargo build --release -p keplor-cli \
+    --features keplor-cli/mimalloc \
+    --features keplor-server/simd-json
+```
+
+What each flag buys:
+
+| Flag | What it does | Approximate gain |
+|--|--|--|
+| `RUSTFLAGS=-C target-cpu=native` | Autovectorize for the host's instruction set (AVX2/AVX-512) | 5–10% across the board |
+| `--features keplor-cli/mimalloc` | Replace the system allocator with mimalloc | 30–50% under high alloc churn |
+| `--features keplor-server/simd-json` | Use `simd-json` for `POST /v1/events` body parse instead of `serde_json` | 1.5–3× faster on 1–5 KB JSON |
+
+For statically-linked deploys also pin `--target x86_64-unknown-linux-musl`. All three flags compose — the production-grade build uses all of them plus the default `lto = "fat"` / `codegen-units = 1` from `[profile.release]`.
+
+#### Profile-Guided Optimization (PGO)
+
+Two-stage build: collect a profile under representative load, then
+recompile with the profile baked in. Typically buys an additional
+10–25% throughput on top of the flags above. Workflow:
+
+```bash
+# 1. Instrumented build.
+mkdir -p /tmp/keplor-pgo
+RUSTFLAGS="-Cprofile-generate=/tmp/keplor-pgo -C target-cpu=native" \
+  cargo build --release -p keplor-cli --features keplor-cli/mimalloc
+
+# 2. Run a representative load (~30s of real-shape traffic).
+./target/release/keplor run --config keplor.toml &
+SERVER=$!
+cargo xtask loadtest --rate 20000 --duration 30s --concurrency 256 \
+  --target http://127.0.0.1:8080 --no-durable
+kill $SERVER
+
+# 3. Merge profiles (llvm-profdata ships with rustup component llvm-tools).
+rustup component add llvm-tools-preview
+LLVM_PROFDATA=$(find ~/.rustup -name 'llvm-profdata' | head -1)
+$LLVM_PROFDATA merge -o /tmp/keplor-pgo.profdata /tmp/keplor-pgo
+
+# 4. Optimised build.
+RUSTFLAGS="-Cprofile-use=/tmp/keplor-pgo.profdata -C target-cpu=native" \
+  cargo build --release -p keplor-cli --features keplor-cli/mimalloc \
+    --features keplor-server/simd-json
+```
+
 ### Two ingest modes
 
 `POST /v1/events` accepts a `?durable` query parameter:

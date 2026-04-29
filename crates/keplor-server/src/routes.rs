@@ -6,6 +6,8 @@ use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::{Extension, Json};
+
+use crate::fast_json::FastJson;
 use metrics_exporter_prometheus::PrometheusHandle;
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
@@ -63,7 +65,7 @@ pub async fn ingest_single(
     auth: Option<Extension<AuthenticatedKey>>,
     headers: axum::http::HeaderMap,
     Query(query): Query<IngestQuery>,
-    Json(event): Json<IngestEvent>,
+    FastJson(event): FastJson<IngestEvent>,
 ) -> Result<(StatusCode, Json<IngestResponse>), impl IntoResponse> {
     let (key_id, tier) = auth
         .map(|Extension(k)| (Some(k.key_id), k.tier.to_string()))
@@ -105,7 +107,7 @@ pub async fn ingest_batch(
     State(state): State<AppState>,
     auth: Option<Extension<AuthenticatedKey>>,
     headers: axum::http::HeaderMap,
-    Json(batch): Json<BatchRequest>,
+    FastJson(batch): FastJson<BatchRequest>,
 ) -> Result<(StatusCode, Json<BatchResponse>), crate::error::ServerError> {
     if batch.events.len() > MAX_BATCH_SIZE {
         return Err(crate::error::ServerError::Validation(format!(

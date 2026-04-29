@@ -6,6 +6,7 @@
 pub mod auth;
 pub mod config;
 pub mod error;
+pub mod fast_json;
 pub mod idempotency;
 pub mod metrics;
 pub mod normalize;

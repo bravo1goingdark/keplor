@@ -166,6 +166,10 @@ pub struct BatchRequest {
 }
 
 /// Response returned from single-event ingestion.
+///
+/// `model` and `provider` are `SmolStr` so they inline up to 23 bytes
+/// — heap-free for every realistic provider/model name. `id` stays
+/// `String` because a 26-byte ULID exceeds the inline budget.
 #[derive(Debug, Clone, Serialize)]
 pub struct IngestResponse {
     /// Event id (ULID string).
@@ -173,9 +177,9 @@ pub struct IngestResponse {
     /// Computed cost in nanodollars.
     pub cost_nanodollars: i64,
     /// Normalised model name.
-    pub model: String,
+    pub model: smol_str::SmolStr,
     /// Normalised provider key.
-    pub provider: String,
+    pub provider: smol_str::SmolStr,
 }
 
 /// Response returned from batch ingestion.

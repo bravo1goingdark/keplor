@@ -46,13 +46,24 @@ rustls-pki-types  = { workspace = true }
 time            = { version = "0.3", features = ["parsing"] }
 
 [features]
-default  = []
-mimalloc = ["dep:mimalloc"]
-s3       = ["keplor-store/s3"]
+default   = []
+mimalloc  = ["dep:mimalloc"]
+s3        = ["keplor-store/s3"]
+# Use simd-json for the POST /v1/events body parse. Adds ~1 MB to
+# the binary; gives 1.5–3× faster JSON parse on AVX2/AVX-512 hosts
+# for 1–5 KB payloads. Only the ingest body is parsed via simd-json;
+# every other JSON path stays on serde_json.
+simd-json = ["dep:simd-json"]
 
 [dependencies.mimalloc]
 version  = "0.1"
 optional = true
+
+[dependencies.simd-json]
+version  = "0.16"
+optional = true
+default-features = false
+features = ["serde_impl"]
 
 [dev-dependencies]
 tokio      = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }

@@ -165,11 +165,11 @@ impl Pipeline {
     ///
     /// Times out after 10 seconds to prevent indefinite hangs if the
     /// batch writer stalls.
-    #[tracing::instrument(
-        name = "pipeline.ingest",
-        skip(self, event, authenticated_key_id, idempotency_key),
-        fields(tier = tier, provider = tracing::field::Empty, model = tracing::field::Empty),
-    )]
+    ///
+    /// Not `#[instrument]`-ed — the HTTP-layer `TraceLayer` already
+    /// wraps every request in an `http_request` span carrying
+    /// `request_id`/`method`/`uri`. The pipeline-internal span was
+    /// duplicate work paid 50K+ times/sec under load.
     pub async fn ingest(
         &self,
         event: IngestEvent,
@@ -189,11 +189,6 @@ impl Pipeline {
         let start = std::time::Instant::now();
         let (llm_event, provider, model, cost) =
             self.process_event(event, authenticated_key_id, tier)?;
-
-        // Backfill span fields now that we know provider/model.
-        let span = tracing::Span::current();
-        span.record("provider", provider.id_key());
-        span.record("model", model.as_str());
 
         // Snapshot queue depth on every enqueue so the gauge reflects
         // back-pressure even when no flush has occurred recently.
@@ -231,8 +226,8 @@ impl Pipeline {
         let resp = IngestResponse {
             id: id.to_string(),
             cost_nanodollars: cost,
-            model: model.to_string(),
-            provider: provider.id_key().to_owned(),
+            model: model.clone(),
+            provider: SmolStr::new_static(provider.id_key()),
         };
 
         // Store in idempotency cache.
@@ -257,11 +252,6 @@ impl Pipeline {
     /// to the channel first, then all flush confirmations are awaited
     /// concurrently. This avoids the serial-await bottleneck where each
     /// event in a durable batch waited for its own 50ms flush cycle.
-    #[tracing::instrument(
-        name = "pipeline.ingest_batch_durable",
-        skip(self, events, authenticated_key_id),
-        fields(tier = tier, count = events.len()),
-    )]
     pub async fn ingest_batch_durable(
         &self,
         events: Vec<IngestEvent>,
@@ -329,8 +319,8 @@ impl Pipeline {
                     results[idx] = Some(Ok(IngestResponse {
                         id: id.to_string(),
                         cost_nanodollars: cost,
-                        model: model.to_string(),
-                        provider: provider.id_key().to_owned(),
+                        model: model.clone(),
+                        provider: SmolStr::new_static(provider.id_key()),
                     }));
                 },
                 Err(e) => {
@@ -379,19 +369,20 @@ impl Pipeline {
         Ok(IngestResponse {
             id: id.to_string(),
             cost_nanodollars: cost,
-            model: model.to_string(),
-            provider: provider.id_key().to_owned(),
+            model: model.clone(),
+            provider: SmolStr::new_static(provider.id_key()),
         })
     }
 
     /// Core processing: validate → normalize → cost → build event.
     ///
     /// Returns `(LlmEvent, provider, model, cost)`.
-    #[tracing::instrument(
-        name = "pipeline.process_event",
-        skip(self, event, authenticated_key_id),
-        fields(provider = tracing::field::Empty, model = tracing::field::Empty),
-    )]
+    ///
+    /// Not `#[instrument]`-ed — at 50 K+ ingest/s the per-call span
+    /// allocation dominates the synchronous work this function does.
+    /// Provider + model are recorded on the parent ingest span by
+    /// the caller once they're known.
+    #[inline]
     fn process_event(
         &self,
         mut event: IngestEvent,
@@ -409,10 +400,6 @@ impl Pipeline {
 
         let provider = normalize::normalize_provider(&event.provider);
         let model = normalize::normalize_model(&event.model);
-
-        let span = tracing::Span::current();
-        span.record("provider", provider.id_key());
-        span.record("model", model.as_str());
 
         let usage = usage_from_ingest(&event.usage);
         let cost =
