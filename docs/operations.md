@@ -161,12 +161,14 @@ Scrape `GET /metrics` for:
 | `keplor_batch_flushes_total` | counter | Batch flush operations |
 | `keplor_batch_events_flushed_total` | counter | Events flushed to DB |
 | `keplor_batch_flush_errors_total` | counter | Failed batch flushes |
+| `keplor_dropped_field_total{field}` | counter | Ingest events that carried a deprecated, dropped field. `field=request_body` or `response_body`. |
 
 ### Alerting recommendations
 
 - `keplor_batch_flush_errors_total` increasing: database write failures (check disk space)
 - `queue_utilization_pct > 80` in health check: back-pressure, ingestion exceeding write throughput
 - `keplor_auth_failures_total` spike: possible credential stuffing
+- `keplor_dropped_field_total` non-zero: clients are still sending unsupported body fields. Track until it hits zero, then flip `pipeline.strict_schema = true` to convert future violations into HTTP 400.
 
 ## Backup and Restore
 

@@ -211,7 +211,8 @@ fn run_server(config_path: PathBuf, json_logs: bool) -> Result<()> {
 
         // Build pipeline.
         let mut pipeline = keplor_server::Pipeline::new(store, writer, catalog)
-            .with_max_db_size_mb(config.storage.max_db_size_mb);
+            .with_max_db_size_mb(config.storage.max_db_size_mb)
+            .with_strict_schema(config.pipeline.strict_schema);
 
         // Attach idempotency cache if enabled.
         if config.idempotency.enabled {

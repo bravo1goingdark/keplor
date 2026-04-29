@@ -281,6 +281,12 @@ pub struct PipelineConfig {
     /// Higher values absorb traffic bursts at the cost of more memory
     /// and more events at risk if the process crashes before flushing.
     pub channel_capacity: usize,
+    /// Reject ingest requests carrying `request_body` / `response_body`
+    /// fields with HTTP 400. Default: `false` — those fields are
+    /// dropped silently and a counter is incremented, preserving
+    /// compatibility with clients that haven't yet migrated. Flip on
+    /// once your fleet has stopped sending them.
+    pub strict_schema: bool,
 }
 
 impl Default for PipelineConfig {
@@ -289,6 +295,7 @@ impl Default for PipelineConfig {
             batch_size: 64,
             max_body_bytes: 10 * 1024 * 1024, // 10 MB
             channel_capacity: 32_768,
+            strict_schema: false,
         }
     }
 }
