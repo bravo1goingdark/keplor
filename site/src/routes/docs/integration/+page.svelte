@@ -127,7 +127,7 @@
     "total_ms": 800,
     "time_to_close_ms": 20
   },
-  "timestamp": "2024-11-15T10:30:00Z",
+  "timestamp": "2026-04-15T10:30:00Z",
   "method": "POST",
   "endpoint": "/v1/messages",
   "http_status": 200,
@@ -149,8 +149,6 @@
   "request_id": "req_abc123",
   "client_ip": "10.0.1.42",
   "user_agent": "my-app/1.0",
-  "request_body": {"messages": [{"role": "user", "content": "Hello"}]},
-  "response_body": {"content": [{"type": "text", "text": "Hi there!"}]},
   "metadata": {"session_id": "sess_xyz", "user_tag": "premium"}
 }`;
 </script>
@@ -298,11 +296,10 @@ tier = "pro"</code></pre>
     <tr><td><code>request_id</code></td><td>string</td><td>Provider request ID</td></tr>
     <tr><td><code>client_ip</code></td><td>string</td><td>Client source IP</td></tr>
     <tr><td><code>user_agent</code></td><td>string</td><td>Client user-agent</td></tr>
-    <tr><td><code>request_body</code></td><td>any JSON</td><td>Full request body (stored compressed)</td></tr>
-    <tr><td><code>response_body</code></td><td>any JSON</td><td>Full response body (stored compressed)</td></tr>
-    <tr><td><code>metadata</code></td><td>any JSON</td><td>Arbitrary metadata (queryable via <code>user_tag</code>/<code>session_tag</code>)</td></tr>
+    <tr><td><code>metadata</code></td><td>any JSON</td><td>Arbitrary metadata (queryable via <code>user_tag</code>/<code>session_tag</code>; capped at 64 KB)</td></tr>
   </tbody>
 </table>
+<p class="text-sm text-text-muted"><strong>Schema is strict.</strong> <code>IngestEvent</code> rejects unknown fields with HTTP 422 &mdash; no silent drops. If you&rsquo;re migrating from a system that captured request/response bodies, store those in your own object store keyed by the returned event <code>id</code>; Keplor only handles the metadata.</p>
 
 <h3>Full event example</h3>
 <Pre code={fullEventExample} />
@@ -352,12 +349,16 @@ tier = "pro"</code></pre>
 <p>When you omit <code>cost_nanodollars</code>, Keplor computes it from the model pricing catalog and your <code>usage</code> token counts. This handles prompt caching discounts, reasoning token pricing, and audio/image tokens automatically.</p>
 <p>To override: set <code>cost_nanodollars</code> to your own value. Unknown models get cost <code>0</code>.</p>
 
-<h2 id="batch">Batch ingestion</h2>
-<p>For high-throughput scenarios, use <code>/v1/events/batch</code> with up to <strong>10,000 events</strong> per request:</p>
+<h2 id="batch">Batch + fire-and-forget</h2>
+<p>For high-throughput scenarios there are two options:</p>
+<ul>
+  <li><strong>Single-event fire-and-forget</strong>: <code>POST /v1/events?durable=false</code>. Server enqueues the event and returns <code>202 Accepted</code> immediately. Sub-2 ms p50 in production builds; events may be lost if the process crashes before the next batch flush.</li>
+  <li><strong>Batch endpoint</strong>: <code>POST /v1/events/batch</code> with up to <strong>10,000 events</strong> per request:</li>
+</ul>
 <Pre code={batchExample} />
 <p>Response (<code>201</code> all accepted, <code>207</code> partial):</p>
 <Pre code={batchResponse} />
-<p>Batch writes are fire-and-forget: events are validated synchronously but flushed to disk asynchronously (~50ms). Events may be lost on server crash before flush.</p>
+<p>Batch writes are fire-and-forget by default: events are validated synchronously but flushed to disk asynchronously (~50 ms). Set the <code>X-Keplor-Durable: true</code> header to await each write&rsquo;s flush confirmation.</p>
 
 <h2 id="querying">Querying your data</h2>
 <p>Check cost for a user:</p>
@@ -404,13 +405,13 @@ tier = "pro"</code></pre>
 <h2 id="operations">Production operations</h2>
 
 <h3>Configuration</h3>
-<Pre code={'[server]\nlisten_addr = "0.0.0.0:8080"\nshutdown_timeout_secs = 25       # drain batch writer + WAL checkpoint\nrequest_timeout_secs = 30        # per-request timeout (408 on exceed)\nmax_connections = 10000          # concurrent connection limit (65000 for 50K+ users)\n\n[storage]\ndb_path = "keplor.db"\nretention_days = 90              # legacy global GC (prefer [retention] tiers)\nwal_checkpoint_secs = 300        # WAL truncation interval\ngc_interval_secs = 3600          # GC run frequency (0 = disabled)\nread_pool_size = 4               # SQLite read connections (use 16 for high concurrency)\n\n[auth]\napi_keys = ["prod-svc:sk-abc"]   # simple format (empty = open mode)\n\n# Extended format with tier:\n# [[auth.api_key_entries]]\n# id = "pro-user"\n# secret = "sk-pro-key"\n# tier = "pro"\n\n[retention]\ndefault_tier = "free"\n\n[[retention.tiers]]\nname = "free"\ndays = 7\n\n[[retention.tiers]]\nname = "pro"\ndays = 90\n\n[pipeline]\nbatch_size = 64                  # use 256 for high throughput\nmax_body_bytes = 10485760        # 10 MB\nchannel_capacity = 32768         # batch writer queue depth\n\n[idempotency]\nenabled = true                   # dedup retries via Idempotency-Key header\nttl_secs = 300                   # 5 minute cache TTL\nmax_entries = 100000\n\n[rate_limit]\nenabled = false                  # per-key rate limiting (429 on exceed)\nrequests_per_second = 100.0\nburst = 200\n\n# [tls]                          # optional HTTPS\n# cert_path = "/etc/keplor/cert.pem"\n# key_path = "/etc/keplor/key.pem"'} />
+<Pre code={'[server]\nlisten_addr = "0.0.0.0:8080"\nshutdown_timeout_secs = 25       # drain batch writer + WAL checkpoint\nrequest_timeout_secs = 30        # per-request timeout (408 on exceed)\nmax_connections = 10000          # concurrent connection limit (65000 for 50K+ users)\n\n[storage]\ndata_dir = "/var/lib/keplor"     # KeplorDB data directory\nretention_days = 90              # legacy global GC (prefer [retention] tiers)\ngc_interval_secs = 3600          # GC run frequency (0 = disabled)\nwal_checkpoint_secs = 300        # rotate active WAL into a sealed segment\nmax_db_size_mb = 0               # cap data dir size (0 = unlimited; 507 on exceed)\nflush_interval_ms = 50           # BatchWriter cadence\nrollup_loop_secs = 60            # rollup-refresh cadence\n\n[auth]\napi_keys = ["prod-svc:sk-abc"]   # simple format (empty = open mode)\n\n# Extended format with tier:\n# [[auth.api_key_entries]]\n# id = "pro-user"\n# secret = "sk-pro-key"\n# tier = "pro"\n\n[retention]\ndefault_tier = "free"\n\n[[retention.tiers]]\nname = "free"\ndays = 7\n\n[[retention.tiers]]\nname = "pro"\ndays = 90\n\n[pipeline]\nbatch_size = 64                  # use 256 for high throughput\nmax_body_bytes = 10485760        # 10 MB\nchannel_capacity = 32768         # batch writer queue depth\nflush_interval_ms = 50           # 1-10000; raise for sustained-write workloads\nwrite_timeout_secs = 10          # 1-300; bounds worst-case durable latency\n\n[idempotency]\nenabled = true                   # dedup retries via Idempotency-Key header\nttl_secs = 300                   # 5 minute cache TTL\nmax_entries = 100000\n\n[rate_limit]\nenabled = false                  # per-key rate limiting (429 on exceed)\nrequests_per_second = 100.0\nburst = 200\n\n[pricing]\nrefresh_interval_secs = 86400    # auto-refresh LiteLLM catalog daily (0 = disabled)\n\n# [tls]                          # optional HTTPS\n# cert_path = "/etc/keplor/cert.pem"\n# key_path = "/etc/keplor/key.pem"'} />
 <p>Override any field with <code>KEPLOR_&lt;SECTION&gt;_&lt;FIELD&gt;</code> environment variables. See <a href="{base}/docs/configuration">Configuration</a> for the full reference.</p>
 
 <h3>Event archival (S3 / R2 / MinIO)</h3>
-<p>For long-term retention beyond what SQLite should hold, archive old events to any S3-compatible object store. Build with the <code>s3</code> feature and add an <code>[archive]</code> section.</p>
+<p>For long-term retention beyond what the local data dir should hold, archive old events to any S3-compatible object store. Build with the <code>s3</code> feature and add an <code>[archive]</code> section.</p>
 
-<p><strong>What moves:</strong> Entire events &mdash; serialized to JSONL, compressed with zstd, uploaded as files partitioned by user and day. Daily rollups stay in SQLite for fast aggregation.</p>
+<p><strong>What moves:</strong> Entire events &mdash; serialized to JSONL, compressed with zstd, uploaded as files partitioned by user and day. Daily rollups stay in the local store for fast aggregation. Archived events can be merged back into <code>GET /v1/events</code> on demand via <code>?include_archived=true</code>.</p>
 
 <h4>Cloudflare R2</h4>
 <p>R2 has 10 GB free storage and zero egress fees.</p>
@@ -422,11 +423,11 @@ tier = "pro"</code></pre>
 <h4>MinIO (self-hosted)</h4>
 <Pre code={'[archive]\nbucket = "keplor-archive"\nendpoint = "http://localhost:9000"\nregion = "us-east-1"\naccess_key_id = "minioadmin"\nsecret_access_key = "minioadmin"\npath_style = true    # required for MinIO\narchive_after_days = 30'} />
 
-<p>Archival runs every <code>archive_interval_secs</code> (default 1 hour). Events are grouped by <code>(user_id, day)</code>, compressed, and uploaded. Archived events are deleted from SQLite; VACUUM reclaims disk space. S3 connectivity is verified at startup.</p>
+<p>Archival runs every <code>archive_interval_secs</code> (default 1 hour). Events are grouped by <code>(user_id, day)</code>, compressed with zstd, and uploaded. Archived events are tombstoned in KeplorDB; segment GC reclaims their disk space on the next sweep. S3 connectivity is verified at startup with a HEAD probe.</p>
 
 <p><strong>Important:</strong> Set <code>archive_after_days</code> lower than your shortest retention tier, or GC will delete events before archival. See <a href="{base}/docs/blob-storage">Event Archival</a> for the full lifecycle.</p>
 
-<p>Build command: <code>cargo build --release --features mimalloc,s3</code></p>
+<p>Build command: <code>cargo build --release --features keplor-cli/mimalloc,keplor-cli/s3</code></p>
 
 <h3>JSON structured logging</h3>
 <Pre code="$ keplor run --json-logs" />
@@ -444,14 +445,25 @@ tier = "pro"</code></pre>
 <table>
   <thead><tr><th>Metric</th><th>Type</th><th>Description</th></tr></thead>
   <tbody>
-    <tr><td><code>keplor_events_ingested_total</code></td><td>counter</td><td>Events ingested by provider</td></tr>
-    <tr><td><code>keplor_events_errors_total</code></td><td>counter</td><td>Errors by stage (validation, store, queue_full)</td></tr>
-    <tr><td><code>keplor_ingest_duration_seconds</code></td><td>histogram</td><td>End-to-end ingest latency (p50/p95/p99)</td></tr>
+    <tr><td><code>{`keplor_events_ingested_total{provider, model, tier}`}</code></td><td>counter</td><td>Events ingested</td></tr>
+    <tr><td><code>{`keplor_events_errors_total{stage, error_type}`}</code></td><td>counter</td><td>Errors by stage (validation, store, queue_full) and type</td></tr>
+    <tr><td><code>{`keplor_ingest_latency_seconds{tier, provider}`}</code></td><td>histogram</td><td>Per-tier ingest latency (p50/p95/p99)</td></tr>
+    <tr><td><code>keplor_ingest_duration_seconds</code></td><td>histogram</td><td>Legacy unlabelled latency histogram retained for dashboard continuity</td></tr>
     <tr><td><code>keplor_batch_flushes_total</code></td><td>counter</td><td>Batch flush operations</td></tr>
-    <tr><td><code>keplor_batch_events_flushed_total</code></td><td>counter</td><td>Events written to SQLite</td></tr>
+    <tr><td><code>keplor_batch_events_flushed_total</code></td><td>counter</td><td>Events flushed to KeplorDB</td></tr>
     <tr><td><code>keplor_batch_flush_errors_total</code></td><td>counter</td><td>Batch flush failures</td></tr>
+    <tr><td><code>keplor_batch_queue_depth</code></td><td>gauge</td><td>Bounded mpsc channel depth (back-pressure indicator)</td></tr>
+    <tr><td><code>{`keplor_storage_bytes{tier}`}</code></td><td>gauge</td><td>Bytes on disk per tier (sampled every 10 s)</td></tr>
+    <tr><td><code>{`keplor_segments_total{tier}`}</code></td><td>gauge</td><td>Closed segment-file count per tier</td></tr>
+    <tr><td><code>{`keplor_wal_events{tier}`}</code></td><td>gauge</td><td>Events buffered in the active WAL, not yet rotated</td></tr>
+    <tr><td><code>{`keplor_storage_events{tier}`}</code></td><td>gauge</td><td>Total events across segments + WAL per tier</td></tr>
+    <tr><td><code>{`keplor_gc_segments_deleted_total{tier}`}</code></td><td>counter</td><td>Segments dropped by GC per tier</td></tr>
+    <tr><td><code>{`keplor_gc_bytes_freed_total{tier}`}</code></td><td>counter</td><td>Bytes reclaimed by GC per tier</td></tr>
+    <tr><td><code>{`keplor_archive_chunks_total{status}`}</code></td><td>counter</td><td>Archive cycles by chunk outcome (success / fail)</td></tr>
+    <tr><td><code>{`keplor_pricing_catalog_refresh_total{result}`}</code></td><td>counter</td><td>Pricing catalog refresh cycles (ok / error)</td></tr>
+    <tr><td><code>keplor_pricing_catalog_age_seconds</code></td><td>gauge</td><td>Seconds since last successful catalog refresh. Alert when &gt; 2× <code>refresh_interval_secs</code>.</td></tr>
     <tr><td><code>keplor_auth_successes_total</code></td><td>counter</td><td>Successful auth attempts</td></tr>
-    <tr><td><code>keplor_auth_failures_total</code></td><td>counter</td><td>Auth failures (missing or invalid)</td></tr>
+    <tr><td><code>{`keplor_auth_failures_total{reason}`}</code></td><td>counter</td><td>Auth failures (missing or invalid)</td></tr>
   </tbody>
 </table>
 

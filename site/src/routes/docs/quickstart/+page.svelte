@@ -3,7 +3,7 @@
   import Pre from '$lib/components/Pre.svelte';
 
   const healthResp = `$ curl http://localhost:8080/health
-{"status":"ok","version":"0.1.0","db":"connected"}`;
+{"status":"ok","version":"0.1.0","db":"connected","queue_depth":0,"queue_capacity":32768,"queue_utilization_pct":0}`;
 
   const ingestReq = `$ curl -X POST http://localhost:8080/v1/events \\
   -H "Content-Type: application/json" \\
@@ -30,11 +30,12 @@ ID                           PROVIDER       MODEL                   TOKENS      
 
 1 event(s)`;
 
-  const statsCmd = `$ keplor stats
+  const statsCmd = `$ keplor stats --data-dir ./keplor_data
 === Keplor Storage Statistics ===
-Database:             keplor.db
+Data dir:             ./keplor_data
 Total events:         1
-Database size:        0.1 MB`;
+Total bytes on disk:  47.3 KB
+Tiers:                free, pro, team`;
 </script>
 
 <svelte:head>
@@ -48,20 +49,22 @@ Database size:        0.1 MB`;
 <p>Build from source:</p>
 <Pre code="$ git clone https://github.com/bravo1goingdark/keplor.git
 $ cd keplor
-$ cargo build --release
+$ cargo build --release --features keplor-cli/mimalloc
 $ cp target/release/keplor /usr/local/bin/" />
+<p class="text-sm text-text-muted">Add <code>--features keplor-server/simd-json</code> for the AVX-accelerated JSON parser, or <code>RUSTFLAGS="-C target-cpu=native"</code> to autovectorize for the host CPU. See <a href="{base}/docs/configuration#perf-build">build-time perf knobs</a>.</p>
 
 <h2 id="start">2. Start the server</h2>
 <Pre code="$ keplor run" />
-<p>Binds to <code>0.0.0.0:8080</code> with a local <code>keplor.db</code> SQLite database. No config needed.</p>
+<p>Binds to <code>0.0.0.0:8080</code> and creates <code>./keplor_data/</code> &mdash; the KeplorDB data directory with one segment tree per retention tier. No config needed.</p>
 <p>Verify:</p>
 <Pre code={healthResp} />
 
 <h2 id="first-event">3. Send your first event</h2>
 <Pre code={ingestReq} />
-<p>Response:</p>
+<p>Response (<code>201 Created</code>):</p>
 <Pre code={ingestResp} />
 <p>Cost is auto-computed. <code>6250000</code> nanodollars = <strong>$0.00625</strong>.</p>
+<p class="text-sm text-text-muted">For hot-path traffic that doesn&rsquo;t need per-event flush confirmation, append <code>?durable=false</code> &mdash; the request returns <code>202 Accepted</code> immediately, p50 drops from ~5 ms to ~1.5 ms.</p>
 
 <h2 id="query">4. Query it back</h2>
 <Pre code={'$ curl "http://localhost:8080/v1/events?user_id=alice&limit=5"'} />

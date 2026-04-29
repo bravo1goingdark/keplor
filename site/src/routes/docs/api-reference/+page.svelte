@@ -8,6 +8,14 @@
   "provider": "openai"
 }`;
 
+  const fireForgetResponse = `// 202 Accepted
+{
+  "id": "01J5XQKR4M2E3N8V7P6Y1WDCBA",
+  "cost_nanodollars": 6250000,
+  "model": "gpt-4o",
+  "provider": "openai"
+}`;
+
   const batchRequest = `{"events": [{"model": "gpt-4o", "provider": "openai", ...}, ...]}`;
 
   const batchResponse = `{
@@ -74,7 +82,7 @@
 
   const deleteResponse = `{
   "events_deleted": 1234,
-  "blobs_deleted": 56
+  "segments_dropped": 3
 }`;
 
   const healthResponse = `{
@@ -89,7 +97,16 @@
   const errorResponse = `{"error": "validation: model must not be empty"}`;
 
   const metricsExample = `# TYPE keplor_events_ingested_total counter
-keplor_events_ingested_total{provider="openai"} 42`;
+keplor_events_ingested_total{provider="openai",model="gpt-4o",tier="pro"} 42
+
+# TYPE keplor_segments_total gauge
+keplor_segments_total{tier="free"} 9084
+
+# TYPE keplor_storage_bytes gauge
+keplor_storage_bytes{tier="free"} 41508725
+
+# TYPE keplor_pricing_catalog_age_seconds gauge
+keplor_pricing_catalog_age_seconds 14392`;
 </script>
 
 <svelte:head>
@@ -105,9 +122,18 @@ keplor_events_ingested_total{provider="openai"} 42`;
 <p>When no keys are configured (default), authentication is disabled. <code>/health</code> and <code>/metrics</code> are always public.</p>
 
 <h2 id="ingest"><span class="method method-post">POST</span> /v1/events</h2>
-<p>Ingest a single event. Waits for durable storage. Times out after 10 seconds. Supports <code>Idempotency-Key</code> header to prevent duplicate creation on retries.</p>
+<p>Ingest a single event. Two modes: durable (default, awaits flush) and fire-and-forget (returns immediately). Supports <code>Idempotency-Key</code> header to prevent duplicate creation on retries.</p>
+
+<h3>Query parameters</h3>
+<table>
+  <thead><tr><th>Param</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td><code>durable</code></td><td>bool</td><td><code>true</code></td><td>When <code>false</code> the server enqueues the event and returns <code>202 Accepted</code> immediately (no await-flush). p50 drops ~10×; events may be lost if the process crashes before the next batch flush.</td></tr>
+  </tbody>
+</table>
 
 <h3>Request body</h3>
+<p>Schema is strict (<code>deny_unknown_fields</code>) &mdash; sending an unknown key returns <code>422 Unprocessable Entity</code>.</p>
 <table>
   <thead><tr><th>Field</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
   <tbody>
@@ -127,14 +153,16 @@ keplor_events_ingested_total{provider="openai"} 42`;
     <tr><td><code>http_status</code></td><td>u16</td><td>no</td><td>Upstream status code</td></tr>
     <tr><td><code>flags.streaming</code></td><td>bool</td><td>no</td><td>Streamed response</td></tr>
     <tr><td><code>flags.tool_calls</code></td><td>bool</td><td>no</td><td>Tool calls present</td></tr>
-    <tr><td><code>request_body</code></td><td>object</td><td>no</td><td>Full request JSON (compressed)</td></tr>
-    <tr><td><code>response_body</code></td><td>object</td><td>no</td><td>Full response JSON (compressed)</td></tr>
     <tr><td><code>error.kind</code></td><td>string</td><td>no</td><td><code>rate_limited</code>, <code>auth_failed</code>, etc.</td></tr>
+    <tr><td><code>metadata</code></td><td>object</td><td>no</td><td>Arbitrary JSON (queryable via <code>user_tag</code> / <code>session_tag</code>; capped at 64 KB).</td></tr>
   </tbody>
 </table>
 
-<h3>Response <code>201 Created</code></h3>
+<h3>Response <code>201 Created</code> (durable)</h3>
 <Pre code={ingestResponse} />
+
+<h3>Response <code>202 Accepted</code> (fire-and-forget, <code>?durable=false</code>)</h3>
+<Pre code={fireForgetResponse} />
 
 <h2 id="batch"><span class="method method-post">POST</span> /v1/events/batch</h2>
 <p>Ingest up to <strong>10,000 events</strong>. Fire-and-forget by default. Set <code>X-Keplor-Durable: true</code> header to await flush confirmation for each event.</p>
@@ -160,6 +188,7 @@ keplor_events_ingested_total{provider="openai"} 42`;
     <tr><td><code>to</code></td><td>i64</td><td>Before this epoch ns</td></tr>
     <tr><td><code>limit</code></td><td>u32</td><td>Max results (default 50, max 1000)</td></tr>
     <tr><td><code>cursor</code></td><td>i64</td><td>Pagination cursor</td></tr>
+    <tr><td><code>include_archived</code></td><td>bool</td><td>When <code>true</code> the server fetches every archive manifest overlapping <code>[from, to]</code> for the requested user, decompresses + parses the JSONL chunks, and merges with live events sorted by <code>(ts_ns desc, id desc)</code>. Currently uncached &mdash; each request pays the per-manifest S3 round-trip. Suitable for backfill / audit, not hot dashboards.</td></tr>
   </tbody>
 </table>
 
@@ -265,10 +294,11 @@ keplor_events_ingested_total{provider="openai"} 42`;
     <tr><td><code>401</code></td><td>Missing or invalid API key</td><td>No</td></tr>
     <tr><td><code>404</code></td><td>Event not found (DELETE)</td><td>No</td></tr>
     <tr><td><code>408</code></td><td>Request exceeded <code>request_timeout_secs</code></td><td>Yes</td></tr>
-    <tr><td><code>422</code></td><td>Unknown provider</td><td>No</td></tr>
+    <tr><td><code>415</code></td><td><code>Content-Type</code> not <code>application/json</code></td><td>No (fix client)</td></tr>
+    <tr><td><code>422</code></td><td>Unprocessable: malformed JSON, unknown field (schema is strict <code>deny_unknown_fields</code>), or unknown provider</td><td>No</td></tr>
     <tr><td><code>429</code></td><td>Per-key rate limit exceeded</td><td>Yes (after <code>Retry-After</code>)</td></tr>
     <tr><td><code>500</code></td><td>Storage failure, write timeout</td><td>Yes (with backoff)</td></tr>
     <tr><td><code>503</code></td><td>Batch writer overloaded (back-pressure)</td><td>Yes (with backoff)</td></tr>
-    <tr><td><code>507</code></td><td>Database size limit exceeded</td><td>Yes (run GC or increase limit)</td></tr>
+    <tr><td><code>507</code></td><td>Data dir size limit exceeded</td><td>Yes (run GC or increase limit)</td></tr>
   </tbody>
 </table>

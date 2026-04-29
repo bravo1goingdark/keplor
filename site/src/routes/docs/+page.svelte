@@ -28,10 +28,11 @@
 <table>
   <thead><tr><th>Crate</th><th>Purpose</th></tr></thead>
   <tbody>
-    <tr><td><code>keplor-core</code></td><td>Event, Provider, Usage, Cost types</td></tr>
-    <tr><td><code>keplor-server</code></td><td>HTTP server, ingestion pipeline</td></tr>
-    <tr><td><code>keplor-store</code></td><td>SQLite, dedup, zstd compression</td></tr>
-    <tr><td><code>keplor-pricing</code></td><td>LiteLLM pricing catalog</td></tr>
-    <tr><td><code>keplor-cli</code></td><td>The <code>keplor</code> binary</td></tr>
+    <tr><td><code>keplor-core</code></td><td>Event, Provider, Usage, Cost types &mdash; zero-dep, no I/O</td></tr>
+    <tr><td><code>keplor-server</code></td><td>HTTP server, ingestion pipeline, auth, rate limit, archive merge</td></tr>
+    <tr><td><code>keplor-store</code></td><td>KeplorDB-backed event store, batch writer, GC, rollups, S3/R2 archival</td></tr>
+    <tr><td><code>keplor-pricing</code></td><td>LiteLLM pricing catalog with daily refresh</td></tr>
+    <tr><td><code>keplor-cli</code></td><td>The <code>keplor</code> binary (run, query, stats, gc, archive)</td></tr>
   </tbody>
 </table>
+<p class="text-[14px] text-ink-muted mt-4">Storage is a KeplorDB columnar log with per-tier engines under <code>{`{data_dir}/{tier}/`}</code>. Each tier has its own append-only segments + sharded WAL; cross-tier reads fan out and merge by timestamp.</p>

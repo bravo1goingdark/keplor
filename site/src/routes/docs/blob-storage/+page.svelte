@@ -11,36 +11,36 @@
 <p class="text-lg text-text-muted mb-8">Archive old events to S3, R2, or MinIO as compressed JSONL.</p>
 
 <h2 id="how-it-works">How it works</h2>
-<p>As events age past a configurable threshold, Keplor archives them to an S3-compatible object store and deletes them from SQLite to keep the database lean.</p>
+<p>As events age past a configurable threshold, Keplor archives them to an S3-compatible object store and tombstones them in KeplorDB. Segment GC reclaims the disk space on the next retention sweep, keeping the data dir lean.</p>
 <table>
   <thead><tr><th>Data</th><th>After archival</th></tr></thead>
   <tbody>
-    <tr><td>Recent events (within <code>archive_after_days</code>)</td><td>Stay in SQLite &mdash; fully queryable</td></tr>
-    <tr><td>Old events (past threshold)</td><td>Compressed JSONL in S3/R2 &mdash; deleted from SQLite</td></tr>
-    <tr><td>Daily rollups</td><td>Always in SQLite &mdash; aggregation queries unaffected</td></tr>
-    <tr><td>Archive manifests</td><td>Tracked in SQLite for audit and status</td></tr>
+    <tr><td>Recent events (within <code>archive_after_days</code>)</td><td>Stay in KeplorDB &mdash; fully queryable</td></tr>
+    <tr><td>Old events (past threshold)</td><td>Compressed JSONL in S3/R2 &mdash; tombstoned locally; reclaimed by segment GC</td></tr>
+    <tr><td>Daily rollups</td><td>Always preserved &mdash; aggregation queries unaffected</td></tr>
+    <tr><td>Archive manifests</td><td>Tracked in <code>{`{data_dir}/archive_manifests.jsonl`}</code> for audit</td></tr>
   </tbody>
 </table>
-<p>All query, stats, rollup, and quota endpoints continue working on data that remains in SQLite. The <code>has_archived_data</code> flag in query responses indicates when archived data exists for the queried time range.</p>
+<p>All query, stats, rollup, and quota endpoints continue working on data that remains in the local store. The <code>has_archived_data</code> flag in query responses indicates when archived data exists for the queried time range. Pass <code>?include_archived=true</code> on <code>GET /v1/events</code> to merge archived events into the response (one S3 round-trip per overlapping manifest; uncached).</p>
 
 <h3>Build with S3 support</h3>
-<Pre code="$ cargo build --release --features mimalloc,s3" />
+<Pre code="$ cargo build --release --features keplor-cli/s3,keplor-cli/mimalloc" />
 <p>Or with Docker:</p>
-<Pre code={'# Dockerfile already includes mimalloc.\n# To add S3, edit the build line:\nRUN cargo build --release --locked --target x86_64-unknown-linux-musl \\\n    -p keplor-cli --features mimalloc,s3'} />
+<Pre code={'# Dockerfile already includes mimalloc.\n# To add S3, edit the build line:\nRUN cargo build --release --locked --target x86_64-unknown-linux-musl \\\n    -p keplor-cli --features keplor-cli/mimalloc --features keplor-cli/s3'} />
 
 <h2 id="archive-lifecycle">Archive lifecycle</h2>
-<p>Every <code>archive_interval_secs</code> (default 1 hour), Keplor checks whether archival should run based on age and/or database size triggers. When triggered:</p>
+<p>Every <code>archive_interval_secs</code> (default 1 hour), Keplor checks whether archival should run based on age and/or data-dir size triggers. When triggered:</p>
 <ol>
-  <li><strong>Force rollup</strong> for affected days (preserves daily aggregations after deletion)</li>
+  <li><strong>Force rollup</strong> for affected days (preserves daily aggregations after tombstoning)</li>
   <li><strong>Query events</strong> older than <code>archive_after_days</code>, ordered by <code>(user_id, timestamp)</code></li>
   <li><strong>Group by user + day</strong>, serialize to JSONL, compress with zstd, upload to S3/R2</li>
-  <li><strong>Record manifest</strong> in SQLite for audit and tracking</li>
-  <li><strong>Delete archived events</strong> from SQLite, then VACUUM to reclaim disk space</li>
+  <li><strong>Record manifest</strong> in the JSONL sidecar (<code>archive_manifests.jsonl</code>) and the in-memory index</li>
+  <li><strong>Tombstone archived events</strong> in KeplorDB; segment GC reclaims their disk space on the next sweep</li>
 </ol>
 
 <Pre code={'S3/R2 key format:\n{prefix}/user_id={alice}/day=2026-04-15/{archive_id}.jsonl.zstd'} />
 
-<p>Each chunk (user + day) is archived independently. If one upload fails, the remaining chunks continue. Failed events stay in SQLite and are retried on the next cycle.</p>
+<p>Each chunk (user + day) is archived independently. If one upload fails, the remaining chunks continue. Failed events stay in KeplorDB and are retried on the next cycle.</p>
 
 <h2 id="r2">Cloudflare R2</h2>
 <p>R2 is the recommended choice for most deployments: 10 GB free storage, zero egress fees, S3-compatible API.</p>
@@ -72,24 +72,24 @@
     <tr><td><code>path_style</code></td><td>bool</td><td><code>false</code></td><td>Path-style addressing (required for MinIO)</td></tr>
     <tr><td><code>archive_after_days</code></td><td>u64</td><td><code>30</code></td><td>Archive events older than this many days</td></tr>
     <tr><td><code>archive_after_hours</code></td><td>u64</td><td><code>0</code></td><td>Sub-day archival (hours). Overrides <code>archive_after_days</code> when non-zero. Set to <code>1</code> for hourly offload.</td></tr>
-    <tr><td><code>archive_threshold_mb</code></td><td>u64</td><td><code>0</code></td><td>Also archive when SQLite exceeds this size (MB). 0 = age-only.</td></tr>
+    <tr><td><code>archive_threshold_mb</code></td><td>u64</td><td><code>0</code></td><td>Also archive when the data dir exceeds this size (MB). 0 = age-only.</td></tr>
     <tr><td><code>archive_batch_size</code></td><td>usize</td><td><code>10000</code></td><td>Maximum events per JSONL archive file</td></tr>
     <tr><td><code>archive_interval_secs</code></td><td>u64</td><td><code>3600</code></td><td>How often the archive loop runs (seconds). Default: 1 hour.</td></tr>
   </tbody>
 </table>
 
 <h2 id="retention-warning">Archive vs. retention</h2>
-<p>If <code>archive_after_days</code> is greater than the shortest retention tier's <code>days</code> value, GC will delete events before they can be archived. Keplor warns about this at startup. Always set <code>archive_after_days</code> lower than your shortest tier's retention.</p>
+<p>If <code>archive_after_days</code> is greater than the shortest retention tier&rsquo;s <code>days</code> value, GC will delete events before they can be archived. Keplor warns about this at startup. Always set <code>archive_after_days</code> lower than your shortest tier&rsquo;s retention.</p>
 
 <h2 id="gc">GC &amp; cleanup</h2>
-<p>Archival runs <strong>before</strong> GC in the combined loop to prevent data loss. Daily rollups are force-refreshed before deletion, so aggregation queries remain accurate even after events are archived and removed from SQLite.</p>
-<p>S3 connectivity is verified at startup. Bad credentials cause an immediate error log and disable archival, rather than silently failing hours later on the first archive cycle.</p>
+<p>Archival runs <strong>before</strong> GC in the combined loop to prevent data loss. Daily rollups are force-refreshed before tombstoning, so aggregation queries remain accurate even after events are archived. Segment GC reclaims the on-disk space the next time it runs (segment-granular).</p>
+<p>S3 connectivity is verified at startup with a HEAD probe. Bad credentials or unreachable endpoints fail immediately rather than silently misbehaving hours later on the first archive cycle.</p>
 
 <h2 id="cli">CLI commands</h2>
 <p>Archive manually (outside the automatic cycle):</p>
 <Pre code="$ keplor archive --config keplor.toml --older-than-days 14" />
 <p>Check archive status:</p>
-<Pre code="$ keplor archive_status --config keplor.toml" />
+<Pre code="$ keplor archive-status --data-dir /var/lib/keplor" />
 
 <h2 id="next">Next steps</h2>
 <p>

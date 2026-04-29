@@ -64,25 +64,25 @@ resp = requests.post(
 
 <svelte:head>
   <title>Keplor — LLM Observability & Cost Accounting</title>
-  <meta name="description" content="Ingest every LLM event. Auto-compute cost across 2,263 models. Multi-tenant with tiered retention. Single binary, zero dependencies." />
+  <meta name="description" content="Ingest every LLM event. Auto-compute cost across 3,625 models. Multi-tenant with tiered retention. Single binary, zero dependencies." />
   <meta name="keywords" content="LLM observability, LLM cost tracking, LLM log ingestion, OpenAI cost, Anthropic cost, AI cost accounting, LLM monitoring" />
   <link rel="canonical" href="https://keplor.dev" />
 
   <!-- Open Graph -->
   <meta property="og:title" content="Keplor — LLM Observability & Cost Accounting" />
-  <meta property="og:description" content="Ingest every LLM event. Auto-compute cost across 2,263 models. Multi-tenant with tiered retention. Single binary, zero dependencies." />
+  <meta property="og:description" content="Ingest every LLM event. Auto-compute cost across 3,625 models. Multi-tenant with tiered retention. Single binary, zero dependencies." />
   <meta property="og:url" content="https://keplor.dev" />
 
   <!-- Twitter -->
   <meta name="twitter:title" content="Keplor — LLM Observability & Cost Accounting" />
-  <meta name="twitter:description" content="Ingest every LLM event. Auto-compute cost across 2,263 models. Multi-tenant with tiered retention. Single binary, zero dependencies." />
+  <meta name="twitter:description" content="Ingest every LLM event. Auto-compute cost across 3,625 models. Multi-tenant with tiered retention. Single binary, zero dependencies." />
 
   <!-- Structured data -->
   {@html `<script type="application/ld+json">${JSON.stringify({
     "@context": "https://schema.org",
     "@type": "SoftwareApplication",
     "name": "Keplor",
-    "description": "LLM observability and cost accounting server. Captures every request/response, auto-computes cost from a 2,263-model pricing catalog.",
+    "description": "LLM observability and cost accounting server. Ingests every LLM event, auto-computes cost from a 3,625-model pricing catalog.",
     "applicationCategory": "DeveloperApplication",
     "operatingSystem": "Linux, macOS",
     "license": "https://opensource.org/licenses/Apache-2.0",
@@ -107,8 +107,8 @@ resp = requests.post(
       </h1>
 
       <p class="text-[18px] leading-[1.6] text-ink-muted max-w-[54ch] mb-10 animate-in-delay-1">
-        A single binary ingests every prompt and completion, auto-computes cost
-        from a <strong class="text-ink font-medium">2,263-model</strong> pricing catalog, and serves
+        A single binary ingests every LLM event, auto-computes cost
+        from a <strong class="text-ink font-medium">3,625-model</strong> pricing catalog, and serves
         real-time aggregations. Multi-tenant with configurable retention tiers.
         Zero dependencies to start; S3/R2 when you scale.
       </p>
@@ -163,12 +163,12 @@ resp = requests.post(
 
     <div class="grid md:grid-cols-2 gap-x-16 gap-y-14 reveal-stagger">
       {#each [
-        { title: 'Automatic cost accounting', desc: 'Bundled LiteLLM pricing catalog covers 2,263 models across all major providers. Handles cache discounts, reasoning tokens, batch pricing, and audio/image tokens. Cost stored as int64 nanodollars for precision.' },
-        { title: 'Full request & response capture', desc: 'Every prompt and completion stored alongside event metadata. Optionally archive old events to Cloudflare R2, AWS S3, or MinIO as compressed JSONL files to keep SQLite lean.' },
+        { title: 'Automatic cost accounting', desc: 'Bundled LiteLLM pricing catalog covers 3,625 models across all major providers. Handles cache discounts, reasoning tokens, batch pricing, and audio/image tokens. Cost stored as int64 nanodollars for precision. Auto-refreshed daily with version-pinned fallback.' },
+        { title: 'Two ingest modes', desc: 'Default durable POST awaits the disk flush — every accepted event has confirmed durability. Add ?durable=false for fire-and-forget at sub-2 ms p50; lose nothing on the happy path, recover from process crashes via WAL replay.' },
         { title: 'Multi-tenant with tiered retention', desc: 'Assign API keys to named retention tiers: free (7 days), pro (90 days), team (180 days), or any custom tier. GC runs per-tier automatically. Tier names and durations are fully configurable.' },
         { title: 'Real-time aggregation API', desc: 'Quota checks, daily rollups, and period statistics via REST. Filter by user, API key, model, provider, or time range. Cursor-based pagination for large result sets.' },
-        { title: 'Event archival to S3/R2', desc: 'Archive old events as compressed JSONL to Cloudflare R2, AWS S3, or MinIO. Age-based and size-based triggers. Daily rollups preserved in SQLite. Automatic 6-hour archive cycles with per-chunk error isolation.' },
-        { title: 'Zero-dep single binary', desc: 'Static musl binary under 10 MB. SQLite with WAL mode and connection pooling. One-command Docker deploy. No JVM, no runtime, no cloud account required.' },
+        { title: 'Event archival to S3/R2', desc: 'Archive old events as zstd-compressed JSONL to Cloudflare R2, AWS S3, or MinIO. Age-based and size-based triggers. Daily rollups preserved locally; archived events tombstoned and reclaimed by segment GC. Per-chunk error isolation.' },
+        { title: 'Zero-dep single binary', desc: 'Static musl binary under 12 MB. KeplorDB columnar log + per-tier engines. One-command Docker deploy. No JVM, no runtime, no cloud account required.' },
         { title: 'Server-side key attribution', desc: 'Authenticated keys are injected server-side, preventing clients from spoofing cost attribution. Each key carries a tier, so billing and retention are always tied to the actual caller.' },
         { title: '12 providers, one API', desc: 'OpenAI, Anthropic, Gemini, Bedrock, Azure, Mistral, Groq, xAI, DeepSeek, Cohere, Ollama, and any OpenAI-compatible endpoint. Provider-specific token handling built in.' },
       ] as { title, desc }}
@@ -226,10 +226,10 @@ resp = requests.post(
   <div class="max-w-[1280px] mx-auto">
     <div class="grid grid-cols-2 md:grid-cols-4 gap-y-12 reveal-stagger">
       {#each [
-        { n: '<10 MB', label: 'Binary size', sub: 'Single static musl binary' },
-        { n: '261K/s', label: 'Events throughput', sub: 'Per core, fire-and-forget' },
-        { n: '2,263', label: 'Models priced', sub: 'LiteLLM catalog, auto-refreshed' },
-        { n: '<1 ms', label: 'Ingestion overhead', sub: 'p99 ingestion latency' },
+        { n: '~12 MB', label: 'Binary size', sub: 'Static musl, mimalloc + simd-json on' },
+        { n: '40K+ rps', label: 'Sustained throughput', sub: 'Single process, 0 errors, p99 < 20 ms' },
+        { n: '3,625', label: 'Models priced', sub: 'LiteLLM catalog, auto-refreshed daily' },
+        { n: '5 ms', label: 'p99 (fire-and-forget)', sub: '8.5 ms p99 durable, with PGO build' },
       ] as { n, label, sub }}
         <div>
           <div class="font-serif text-[clamp(28px,3.5vw,40px)] tracking-[-0.02em] text-ink">{n}</div>
