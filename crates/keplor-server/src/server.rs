@@ -36,6 +36,9 @@ pub struct PipelineServer {
     gc_interval_secs: u64,
     retention_tiers: Vec<crate::config::RetentionTier>,
     wal_checkpoint_secs: u64,
+    pricing_refresh_interval_secs: u64,
+    pricing_source_url: String,
+    catalog_handle: crate::pipeline::SharedCatalog,
     #[cfg(feature = "s3")]
     archive_config: Option<crate::config::ArchiveConfig>,
     tls_config: Option<Arc<rustls::ServerConfig>>,
@@ -59,6 +62,7 @@ impl PipelineServer {
     ) -> Result<Self, std::io::Error> {
         let writer = pipeline.writer_arc();
         let store = pipeline.store_arc();
+        let catalog_handle = pipeline.catalog_handle();
         let default_tier = SmolStr::new(&config.retention.default_tier);
         let state = AppState { pipeline, metrics_handle: Arc::new(metrics_handle), default_tier };
 
@@ -209,6 +213,9 @@ impl PipelineServer {
             gc_interval_secs: config.storage.gc_interval_secs,
             retention_tiers: config.retention.tiers.clone(),
             wal_checkpoint_secs: config.storage.wal_checkpoint_secs,
+            pricing_refresh_interval_secs: config.pricing.refresh_interval_secs,
+            pricing_source_url: config.pricing.source_url.clone(),
+            catalog_handle,
             #[cfg(feature = "s3")]
             archive_config: config.archive.clone(),
             tls_config,
@@ -338,6 +345,17 @@ impl PipelineServer {
         {
             let stats_store = Arc::clone(&store);
             tokio::spawn(engine_stats_loop(stats_store, Duration::from_secs(10)));
+        }
+
+        // Spawn the pricing-catalog refresh task when enabled. The
+        // task fetches and atomically swaps a fresh catalog at the
+        // configured cadence; on error the existing catalog stays in
+        // place.
+        if self.pricing_refresh_interval_secs > 0 {
+            let catalog_handle = Arc::clone(&self.catalog_handle);
+            let url = self.pricing_source_url.clone();
+            let interval = Duration::from_secs(self.pricing_refresh_interval_secs);
+            tokio::spawn(pricing_refresh_loop(catalog_handle, url, interval));
         }
 
         // SIGHUP handler: re-parse the config and hot-swap the API key
@@ -580,6 +598,80 @@ async fn archive_loop(
             },
             Ok(Err(e)) => tracing::warn!(error = %e, "archive cycle failed"),
             Err(e) => tracing::warn!(error = %e, "archive task panicked"),
+        }
+    }
+}
+
+/// Periodically fetch the LiteLLM pricing catalog and atomically swap
+/// it into the shared [`crate::pipeline::SharedCatalog`]. On fetch
+/// or parse error the existing catalog stays in place — operators
+/// see the failure via the `keplor_pricing_catalog_refresh_total`
+/// counter and the `keplor_pricing_catalog_age_seconds` gauge.
+///
+/// The interval is jittered ±10 % so multi-replica deployments don't
+/// stampede the upstream blob at the same wall-clock minute.
+async fn pricing_refresh_loop(
+    catalog: crate::pipeline::SharedCatalog,
+    source_url: String,
+    interval: Duration,
+) {
+    use std::sync::atomic::{AtomicI64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    static LAST_REFRESH_NS: AtomicI64 = AtomicI64::new(0);
+    let now_ns =
+        SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos() as i64).unwrap_or(0);
+    LAST_REFRESH_NS.store(now_ns, Ordering::Relaxed);
+
+    // Background gauge that ticks once a minute reporting catalog age,
+    // even when no refresh is in flight.
+    {
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos() as i64);
+                if let Ok(now) = now {
+                    let last = LAST_REFRESH_NS.load(Ordering::Relaxed);
+                    let age_secs = now.saturating_sub(last) / 1_000_000_000;
+                    metrics::gauge!("keplor_pricing_catalog_age_seconds").set(age_secs as f64);
+                }
+            }
+        });
+    }
+
+    loop {
+        // Compute jittered sleep: interval ± 10%.
+        let jitter_ns = {
+            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+            // Cheap PRNG: low bits of the nanosecond timestamp.
+            let bits = now.as_nanos() as i64;
+            let pct = (bits.rem_euclid(2001) - 1000) as f64 / 10_000.0; // ±10 %
+            (interval.as_nanos() as f64 * pct) as i64
+        };
+        let sleep_ns =
+            (interval.as_nanos() as i64).saturating_add(jitter_ns).max(60_000_000_000) as u64;
+        tokio::time::sleep(Duration::from_nanos(sleep_ns)).await;
+
+        match keplor_pricing::Catalog::fetch_latest(&source_url).await {
+            Ok(fresh) => {
+                catalog.store(Arc::new(fresh));
+                let now_ns = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_nanos() as i64)
+                    .unwrap_or(0);
+                LAST_REFRESH_NS.store(now_ns, Ordering::Relaxed);
+                metrics::counter!("keplor_pricing_catalog_refresh_total", "result" => "ok")
+                    .increment(1);
+                tracing::info!(
+                    version = keplor_pricing::PRICING_CATALOG_VERSION,
+                    "pricing catalog refreshed"
+                );
+            },
+            Err(e) => {
+                metrics::counter!("keplor_pricing_catalog_refresh_total", "result" => "error")
+                    .increment(1);
+                tracing::warn!(error = %e, "pricing catalog refresh failed; keeping existing catalog");
+            },
         }
     }
 }

@@ -128,6 +128,17 @@ days = 90
 # requests_per_second = 100.0
 # burst = 200
 
+# ── Pricing catalog refresh ──────────────────────────────────────────────
+# Background task that pulls the latest LiteLLM pricing catalog and
+# atomically swaps it in. On fetch error the existing catalog stays.
+# `keplor_pricing_catalog_age_seconds` gauge surfaces silently-stale
+# catalogs to alerting.
+[pricing]
+# refresh_interval_secs = 86400    # 24h. set 0 to disable. range 60-604800.
+                                    # ±10% jitter is applied per cycle to
+                                    # avoid stampedes across replicas.
+# source_url = "https://raw.githubusercontent.com/BerriAI/litellm/main/litellm/model_prices_and_context_window_backup.json"
+
 # ── Event archival (optional, requires --features s3) ────────────────────
 # Archive old events to S3/R2 as compressed JSONL files.
 # Archived events are tombstoned in KeplorDB to keep the local data dir

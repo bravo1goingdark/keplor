@@ -166,6 +166,8 @@ Scrape `GET /metrics` for:
 | `keplor_segments_total{tier}` | gauge | Closed segment-file count for this tier. |
 | `keplor_wal_events{tier}` | gauge | Events buffered in the active WAL, not yet rotated. |
 | `keplor_storage_events{tier}` | gauge | Total events across segments + WAL for this tier. |
+| `keplor_pricing_catalog_refresh_total{result}` | counter | Pricing catalog refresh cycles. `result=ok` or `error`. |
+| `keplor_pricing_catalog_age_seconds` | gauge | Seconds since the in-memory pricing catalog was last refreshed. Alert when this exceeds 2× `pricing.refresh_interval_secs`. |
 
 ### Alerting recommendations
 

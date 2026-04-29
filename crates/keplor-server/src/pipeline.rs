@@ -3,6 +3,7 @@
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use arc_swap::ArcSwap;
 use keplor_core::{EventFlags, EventId, Latencies, LlmEvent, Provider, ProviderError, Usage};
 use keplor_pricing::compute::{compute_cost, CostOpts};
 use keplor_pricing::{Catalog, ModelKey};
@@ -62,12 +63,17 @@ static DEFAULT_COST_OPTS: CostOpts = CostOpts {
 /// `Pipeline` directly via `Pipeline::new`).
 const DEFAULT_WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// Shared, atomically-swappable pricing catalog. Wraps the
+/// catalog in an [`ArcSwap`] so a background refresh task can hot-swap
+/// it without coordinating with in-flight ingest tasks.
+pub type SharedCatalog = Arc<ArcSwap<Catalog>>;
+
 /// Shared state for the pipeline.
 #[derive(Clone)]
 pub struct Pipeline {
     store: Arc<Store>,
     writer: Arc<BatchWriter>,
-    catalog: Arc<Catalog>,
+    catalog: SharedCatalog,
     idempotency: Option<Arc<IdempotencyCache>>,
     /// Maximum DB size in bytes. 0 = unlimited.
     max_db_bytes: u64,
@@ -85,7 +91,22 @@ pub struct Pipeline {
 
 impl Pipeline {
     /// Create a new pipeline with the given store, batch writer, and pricing catalog.
+    /// Wraps the supplied `Arc<Catalog>` in a fresh `ArcSwap` so the
+    /// catalog can be hot-swapped via [`Pipeline::catalog_handle`].
     pub fn new(store: Arc<Store>, writer: Arc<BatchWriter>, catalog: Arc<Catalog>) -> Self {
+        let shared: SharedCatalog = Arc::new(ArcSwap::new(catalog));
+        Self::with_shared_catalog(store, writer, shared)
+    }
+
+    /// Like [`Pipeline::new`], but the caller already holds the
+    /// [`SharedCatalog`] (because they need to hand the same handle to
+    /// a refresh task that swaps the catalog while requests are in
+    /// flight).
+    pub fn with_shared_catalog(
+        store: Arc<Store>,
+        writer: Arc<BatchWriter>,
+        catalog: SharedCatalog,
+    ) -> Self {
         Self {
             store,
             writer,
@@ -95,6 +116,13 @@ impl Pipeline {
             strict_schema: false,
             write_timeout: DEFAULT_WRITE_TIMEOUT,
         }
+    }
+
+    /// Borrow the swappable catalog handle so a background refresh
+    /// task can `store(...)` a fresh catalog without disturbing
+    /// in-flight requests.
+    pub fn catalog_handle(&self) -> SharedCatalog {
+        Arc::clone(&self.catalog)
     }
 
     /// Set maximum database size in megabytes. 0 = unlimited.
@@ -436,7 +464,10 @@ impl Pipeline {
     #[inline]
     fn compute_cost(&self, provider: &Provider, model: &str, usage: &Usage) -> i64 {
         let key = ModelKey::from_normalized(SmolStr::new(model));
-        match self.catalog.lookup(&key) {
+        // Snapshot the catalog once per call; ArcSwap loads are
+        // RCU-style and effectively free on the hot path.
+        let catalog = self.catalog.load();
+        match catalog.lookup(&key) {
             Some(p) => compute_cost(provider, p, usage, &DEFAULT_COST_OPTS).nanodollars(),
             None => {
                 tracing::warn!(model, "no pricing found, cost = 0");

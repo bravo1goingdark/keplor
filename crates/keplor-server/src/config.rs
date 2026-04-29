@@ -27,9 +27,38 @@ pub struct ServerConfig {
     pub tls: Option<TlsConfig>,
     /// Retention tier configuration.
     pub retention: RetentionConfig,
+    /// Pricing catalog refresh settings.
+    pub pricing: PricingConfig,
     /// Optional S3/R2 event archival configuration.
     #[cfg(feature = "s3")]
     pub archive: Option<ArchiveConfig>,
+}
+
+/// Pricing catalog refresh settings.
+///
+/// Controls the background task that periodically pulls the latest
+/// LiteLLM pricing catalog and hot-swaps it into the live `Pipeline`.
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct PricingConfig {
+    /// Refresh interval in seconds. Default `86400` (24 h). Set to
+    /// `0` to disable the refresh task entirely (the bundled catalog
+    /// is used until the next restart). Range: 60–604_800.
+    pub refresh_interval_secs: u64,
+    /// Source URL — defaults to LiteLLM's main-branch raw blob.
+    /// Override only when mirroring through a CDN / private proxy.
+    pub source_url: String,
+}
+
+impl Default for PricingConfig {
+    fn default() -> Self {
+        Self {
+            refresh_interval_secs: 86_400,
+            source_url:
+                "https://raw.githubusercontent.com/BerriAI/litellm/main/litellm/model_prices_and_context_window_backup.json"
+                    .to_owned(),
+        }
+    }
 }
 
 /// TLS configuration for HTTPS listeners.
@@ -470,6 +499,18 @@ impl ServerConfig {
                 "storage.size_check_interval_ms = {} must be <= 60000 (0 = disabled)",
                 self.storage.size_check_interval_ms
             ));
+        }
+        if self.pricing.refresh_interval_secs != 0
+            && (self.pricing.refresh_interval_secs < 60
+                || self.pricing.refresh_interval_secs > 604_800)
+        {
+            return Err(format!(
+                "pricing.refresh_interval_secs = {} must be 0 (disabled) or in [60, 604800]",
+                self.pricing.refresh_interval_secs
+            ));
+        }
+        if self.pricing.source_url.is_empty() {
+            return Err("pricing.source_url must not be empty".into());
         }
         if let Some(tls) = &self.tls {
             if !tls.cert_path.exists() {
