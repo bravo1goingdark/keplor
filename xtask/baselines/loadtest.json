@@ -1,0 +1,14 @@
+{
+  "rate_target": 5000,
+  "rate_achieved": 5123.568806762972,
+  "duration_secs": 30.029068761,
+  "total_requests": 153856,
+  "success_count": 153856,
+  "error_count": 0,
+  "p50_us": 19359,
+  "p95_us": 28335,
+  "p99_us": 30559,
+  "p999_us": 45599,
+  "p99_9_us": 45599,
+  "queue_depth_max": 1
+}
