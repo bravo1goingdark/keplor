@@ -383,6 +383,7 @@ fn archive(config_path: PathBuf, older_than_days_override: Option<u32>) -> Resul
             mmap_cache_capacity: config.storage.mmap_cache_capacity,
             rollup_replay_days: config.storage.rollup_replay_days,
             eager_tiers: keplor_store::KdbConfig::new(config.storage.data_dir.clone()).eager_tiers,
+            size_check_interval_ms: config.storage.size_check_interval_ms,
         })
         .with_context(|| {
             format!("failed to open data dir at {}", config.storage.data_dir.display())

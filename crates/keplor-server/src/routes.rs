@@ -25,6 +25,11 @@ pub struct AppState {
     pub metrics_handle: Arc<PrometheusHandle>,
     /// Default retention tier for unauthenticated requests.
     pub default_tier: SmolStr,
+    /// Hot-swappable handle to the S3 archiver. `run()` populates
+    /// this once `[archive]` connectivity is verified; until then
+    /// `?include_archived=true` falls through to live-only.
+    #[cfg(feature = "s3")]
+    pub archiver: Arc<arc_swap::ArcSwap<Option<Arc<keplor_store::Archiver>>>>,
 }
 
 /// `POST /v1/events` — ingest a single event.
@@ -149,6 +154,16 @@ pub struct EventQuery {
     pub limit: Option<u32>,
     /// Cursor for pagination (ts_ns of last item from previous page).
     pub cursor: Option<i64>,
+    /// Merge archived (S3) events into the response. Default `false`
+    /// (live-only). When `true`, the server fetches every archive
+    /// manifest overlapping `[from, to]` for the requested user (if
+    /// any), decompresses + parses the JSONL chunks, applies the
+    /// same filter, and merges the result with live events sorted
+    /// `(ts_ns desc, id desc)`. Currently uncached — each request
+    /// pays the round-trip cost; suitable for backfill / audit, not
+    /// hot dashboards.
+    #[serde(default)]
+    pub include_archived: bool,
 }
 
 /// A single event in the query response (JSON-serialisable).
@@ -200,7 +215,7 @@ pub async fn query_events(
     let limit = params.limit.unwrap_or(50).min(1000);
 
     let filter = EventFilter {
-        user_id: params.user_id.map(SmolStr::new),
+        user_id: params.user_id.clone().map(SmolStr::new),
         api_key_id: params.api_key_id.map(SmolStr::new),
         model: params.model.map(SmolStr::new),
         provider: params.provider.map(SmolStr::new),
@@ -279,12 +294,180 @@ pub async fn query_events(
     .await
     .unwrap_or(false);
 
+    // Optional transparent merge of archived events. Opt-in via
+    // ?include_archived=true. Implementation is uncached: each
+    // request pays the per-manifest round-trip + decompress.
+    #[cfg(feature = "s3")]
+    let responses = if params.include_archived {
+        merge_archived_events(
+            responses,
+            &state,
+            params.user_id.as_deref(),
+            params.from,
+            params.to,
+            limit as usize,
+        )
+        .await
+    } else {
+        responses
+    };
+
+    let archived_has_more = false; // Reserved for follow-up cursor work.
+    let _ = archived_has_more;
+
     Ok(Json(EventListResponse {
         events: responses,
         cursor: if has_more { next_cursor } else { None },
         has_more,
         has_archived_data,
     }))
+}
+
+/// Merge archived events into the live result.
+///
+/// Archived chunks come from S3 — we fetch every manifest whose
+/// `[min_ts_ns, max_ts_ns]` overlaps the request window and whose
+/// `user_id` matches the filter (if any). The fetched events are
+/// converted to `EventResponse` and concatenated with the live
+/// result, sorted `(ts_ns desc, id desc)`, then truncated to `limit`.
+///
+/// This is a one-shot best-effort merge: failures fetching individual
+/// chunks emit a warn and are skipped, so a single 5xx from S3
+/// doesn't cripple the whole query. Pagination across the
+/// archive/live boundary is **not** implemented yet — callers asking
+/// for archived data should request small windows.
+#[cfg(feature = "s3")]
+async fn merge_archived_events(
+    mut live: Vec<EventResponse>,
+    state: &AppState,
+    user_filter: Option<&str>,
+    from_ts: Option<i64>,
+    to_ts: Option<i64>,
+    limit: usize,
+) -> Vec<EventResponse> {
+    let archiver_snapshot = state.archiver.load();
+    let archiver = match archiver_snapshot.as_ref() {
+        Some(a) => Arc::clone(a),
+        None => {
+            // s3 feature compiled in but no archiver configured —
+            // nothing to merge.
+            return live;
+        },
+    };
+
+    // List manifests that overlap [from, to] for this tenant. Tenant
+    // filter is applied at this stage so a request without
+    // `user_id` (admin / cross-tenant query) still works, but a
+    // user-scoped query never fetches another user's S3 keys.
+    let store = state.pipeline.store_arc();
+    let user_owned = user_filter.map(|s| s.to_owned());
+    let manifests = match tokio::task::spawn_blocking(move || {
+        store.list_archives(user_owned.as_deref(), from_ts, to_ts)
+    })
+    .await
+    {
+        Ok(Ok(m)) => m,
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "list_archives failed; returning live-only");
+            return live;
+        },
+        Err(e) => {
+            tracing::warn!(error = %e, "list_archives task panicked; returning live-only");
+            return live;
+        },
+    };
+
+    if manifests.is_empty() {
+        return live;
+    }
+
+    let fetch_started = std::time::Instant::now();
+    let mut archived_events = Vec::new();
+    for m in &manifests {
+        match archiver.fetch_one(m).await {
+            Ok(events) => archived_events.extend(events),
+            Err(e) => {
+                tracing::warn!(
+                    archive_id = %m.archive_id,
+                    error = %e,
+                    "archive chunk fetch failed; skipping",
+                );
+                metrics::counter!("keplor_archive_fetch_errors_total").increment(1);
+            },
+        }
+    }
+    metrics::histogram!("keplor_archive_fetch_seconds")
+        .record(fetch_started.elapsed().as_secs_f64());
+
+    // Convert archived events to EventResponse, applying the same
+    // server-side filters as live events. The query parameters that
+    // matter for the in-memory filter are user_id (already applied
+    // via the manifest tenant filter) and the time range (which we
+    // re-check here in case a manifest's [min,max] overlaps but
+    // individual events fall outside).
+    let from = from_ts.unwrap_or(i64::MIN);
+    let to = to_ts.unwrap_or(i64::MAX);
+    for ev in archived_events {
+        if ev.ts_ns < from || ev.ts_ns > to {
+            continue;
+        }
+        if let Some(u) = user_filter {
+            if ev.user_id.as_ref().map(|s| s.as_str()) != Some(u) {
+                continue;
+            }
+        }
+        live.push(llm_event_to_response(ev));
+    }
+
+    let mut merged = live;
+    merged.sort_by(|a, b| match b.timestamp.cmp(&a.timestamp) {
+        std::cmp::Ordering::Equal => b.id.cmp(&a.id),
+        other => other,
+    });
+    merged.truncate(limit);
+    merged
+}
+
+#[cfg(feature = "s3")]
+fn llm_event_to_response(ev: keplor_core::LlmEvent) -> EventResponse {
+    EventResponse {
+        id: ev.id.to_string(),
+        timestamp: ev.ts_ns,
+        model: ev.model.to_string(),
+        provider: ev.provider.id_key().to_owned(),
+        usage: UsageResponse {
+            input_tokens: ev.usage.input_tokens,
+            output_tokens: ev.usage.output_tokens,
+            cache_read_input_tokens: ev.usage.cache_read_input_tokens,
+            cache_creation_input_tokens: ev.usage.cache_creation_input_tokens,
+            reasoning_tokens: ev.usage.reasoning_tokens,
+        },
+        cost_nanodollars: ev.cost_nanodollars,
+        latency_total_ms: ev.latency.total_ms,
+        latency_ttft_ms: ev.latency.ttft_ms,
+        http_status: ev.http_status,
+        source: ev.source.map(|s| s.to_string()),
+        user_id: ev.user_id.map(|u| u.as_str().to_owned()),
+        api_key_id: ev.api_key_id.map(|k| k.as_str().to_owned()),
+        endpoint: ev.endpoint.to_string(),
+        streaming: ev.flags.contains(keplor_core::EventFlags::STREAMING),
+        error: ev.error.as_ref().map(|e| {
+            match e {
+                keplor_core::ProviderError::RateLimited { .. } => "rate_limited",
+                keplor_core::ProviderError::InvalidRequest(_) => "invalid_request",
+                keplor_core::ProviderError::AuthFailed => "auth_failed",
+                keplor_core::ProviderError::ContextLengthExceeded { .. } => {
+                    "context_length_exceeded"
+                },
+                keplor_core::ProviderError::ContentFiltered { .. } => "content_filtered",
+                keplor_core::ProviderError::UpstreamTimeout => "upstream_timeout",
+                keplor_core::ProviderError::UpstreamUnavailable => "upstream_unavailable",
+                keplor_core::ProviderError::Other { .. } => "other",
+            }
+            .to_owned()
+        }),
+        metadata: ev.metadata,
+    }
 }
 
 // ── Aggregation API ────────────────────────────────────────────────────

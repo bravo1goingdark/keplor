@@ -121,7 +121,7 @@ checkpoint.
 |--------|------|------|-------------|
 | POST | `/v1/events` | Yes | Ingest single event (durable) |
 | POST | `/v1/events/batch` | Yes | Ingest batch (fire-and-forget or durable via `X-Keplor-Durable`) |
-| GET | `/v1/events` | Yes | Query events with filters + cursor pagination |
+| GET | `/v1/events` | Yes | Query events with filters + cursor pagination. Optional `?include_archived=true` opts into merging archived (S3) events into the response (uncached; one round trip per overlapping manifest). |
 | GET | `/v1/events/export` | Yes | Stream all matching events as JSON Lines |
 | DELETE | `/v1/events/{id}` | Yes | Delete a single event |
 | DELETE | `/v1/events?older_than_days=N` | Yes | Bulk delete old events |

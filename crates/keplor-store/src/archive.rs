@@ -262,42 +262,54 @@ impl Archiver {
         Ok((compressed.len(), ids))
     }
 
-    /// Fetch archived events from S3 for a given user and day range.
-    pub fn fetch_archived_events(
+    /// Fetch archived events from S3 for a list of manifests.
+    ///
+    /// Async because it's called from axum route handlers running on
+    /// the tokio multi-thread runtime — `block_on` inside an async
+    /// context would panic. Returns events in manifest order; the
+    /// caller is responsible for sorting + cursor merging.
+    pub async fn fetch_archived_events(
         &self,
         manifests: &[ArchiveManifest],
     ) -> Result<Vec<LlmEvent>, StoreError> {
         let mut all_events = Vec::new();
-
         for manifest in manifests {
-            let obj_path = ObjPath::from(manifest.s3_key.clone());
-
-            let result = tokio::runtime::Handle::current()
-                .block_on(self.client.get(&obj_path))
-                .map_err(|e| StoreError::ArchiveS3(format!("get {}: {e}", manifest.s3_key)))?;
-
-            let compressed = tokio::runtime::Handle::current()
-                .block_on(result.bytes())
-                .map_err(|e| StoreError::ArchiveS3(format!("read {}: {e}", manifest.s3_key)))?;
-
-            let decompressed = zstd::bulk::decompress(&compressed, 100 * 1024 * 1024)
-                .map_err(|e| StoreError::Internal(format!("zstd decompress: {e}")))?;
-
-            let text = std::str::from_utf8(&decompressed)
-                .map_err(|e| StoreError::Internal(format!("invalid utf8: {e}")))?;
-
-            for line in text.lines() {
-                if line.is_empty() {
-                    continue;
-                }
-                let stored: StoredEvent = serde_json::from_str(line)
-                    .map_err(|e| StoreError::Internal(format!("json parse: {e}")))?;
-                let event: LlmEvent = stored.try_into()?;
-                all_events.push(event);
-            }
+            let chunk = self.fetch_one(manifest).await?;
+            all_events.extend(chunk);
         }
-
         Ok(all_events)
+    }
+
+    /// Fetch + decompress + parse a single manifest's payload. Public
+    /// so the LRU cache in `KdbStore` can refer to it.
+    pub async fn fetch_one(&self, manifest: &ArchiveManifest) -> Result<Vec<LlmEvent>, StoreError> {
+        let obj_path = ObjPath::from(manifest.s3_key.clone());
+        let result = self
+            .client
+            .get(&obj_path)
+            .await
+            .map_err(|e| StoreError::ArchiveS3(format!("get {}: {e}", manifest.s3_key)))?;
+        let compressed = result
+            .bytes()
+            .await
+            .map_err(|e| StoreError::ArchiveS3(format!("read {}: {e}", manifest.s3_key)))?;
+
+        let decompressed = zstd::bulk::decompress(&compressed, 100 * 1024 * 1024)
+            .map_err(|e| StoreError::Internal(format!("zstd decompress: {e}")))?;
+        let text = std::str::from_utf8(&decompressed)
+            .map_err(|e| StoreError::Internal(format!("invalid utf8: {e}")))?;
+
+        let mut events = Vec::with_capacity(manifest.event_count);
+        for line in text.lines() {
+            if line.is_empty() {
+                continue;
+            }
+            let stored: StoredEvent = serde_json::from_str(line)
+                .map_err(|e| StoreError::Internal(format!("json parse: {e}")))?;
+            let event: LlmEvent = stored.try_into()?;
+            events.push(event);
+        }
+        Ok(events)
     }
 }
 

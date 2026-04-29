@@ -249,6 +249,60 @@ async fn metrics_endpoint_works() {
 }
 
 #[tokio::test]
+async fn include_archived_param_default_off_returns_only_live() {
+    // Without ?include_archived=true the response is identical to
+    // today's behavior — has_archived_data flag, no merged events.
+    let base = spawn_server(vec![]).await;
+    let client = reqwest::Client::new();
+
+    let _ = client
+        .post(format!("{base}/v1/events"))
+        .json(&serde_json::json!({
+            "model": "gpt-4o",
+            "provider": "openai",
+            "usage": {"input_tokens": 5, "output_tokens": 5},
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    let resp =
+        reqwest::get(format!("{base}/v1/events?limit=10")).await.unwrap().text().await.unwrap();
+    let json: serde_json::Value = serde_json::from_str(&resp).unwrap();
+    // include_archived defaults to false — the merge path doesn't run,
+    // and the archiver is None in the default-feature build anyway.
+    assert!(json["events"].is_array());
+    // has_archived_data is false because no manifests were inserted.
+    assert_eq!(json["has_archived_data"], serde_json::Value::Bool(false));
+}
+
+#[tokio::test]
+async fn include_archived_with_no_archiver_falls_through_to_live_only() {
+    // With ?include_archived=true but no archiver configured the
+    // server safely returns live-only — no error, no panic.
+    let base = spawn_server(vec![]).await;
+    let client = reqwest::Client::new();
+
+    let _ = client
+        .post(format!("{base}/v1/events"))
+        .json(&serde_json::json!({
+            "model": "gpt-4o",
+            "provider": "openai",
+            "usage": {"input_tokens": 5, "output_tokens": 5},
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    let resp =
+        reqwest::get(format!("{base}/v1/events?limit=10&include_archived=true")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json: serde_json::Value = resp.json().await.unwrap();
+    let events = json["events"].as_array().unwrap();
+    assert!(!events.is_empty(), "live event should be returned");
+}
+
+#[tokio::test]
 async fn engine_stats_gauges_appear_in_metrics() {
     let base = spawn_server(vec![]).await;
     let client = reqwest::Client::new();

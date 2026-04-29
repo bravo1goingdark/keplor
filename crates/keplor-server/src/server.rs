@@ -39,6 +39,10 @@ pub struct PipelineServer {
     pricing_refresh_interval_secs: u64,
     pricing_source_url: String,
     catalog_handle: crate::pipeline::SharedCatalog,
+    /// Handle into AppState.archiver so `run()` can publish the live
+    /// archiver once [archive] connectivity is verified.
+    #[cfg(feature = "s3")]
+    archiver_handle: Arc<arc_swap::ArcSwap<Option<Arc<keplor_store::Archiver>>>>,
     #[cfg(feature = "s3")]
     archive_config: Option<crate::config::ArchiveConfig>,
     tls_config: Option<Arc<rustls::ServerConfig>>,
@@ -64,7 +68,19 @@ impl PipelineServer {
         let store = pipeline.store_arc();
         let catalog_handle = pipeline.catalog_handle();
         let default_tier = SmolStr::new(&config.retention.default_tier);
-        let state = AppState { pipeline, metrics_handle: Arc::new(metrics_handle), default_tier };
+        #[cfg(feature = "s3")]
+        let archiver_handle: Arc<arc_swap::ArcSwap<Option<Arc<keplor_store::Archiver>>>> =
+            Arc::new(arc_swap::ArcSwap::from_pointee(None));
+
+        let state = AppState {
+            pipeline,
+            metrics_handle: Arc::new(metrics_handle),
+            default_tier,
+            // Archiver starts unset; `run()` populates this lock-free
+            // once [archive] connectivity is verified.
+            #[cfg(feature = "s3")]
+            archiver: Arc::clone(&archiver_handle),
+        };
 
         // Spawn background rollup task — cadence governed by
         // storage.rollup_loop_secs (default 60s).
@@ -217,6 +233,8 @@ impl PipelineServer {
             pricing_source_url: config.pricing.source_url.clone(),
             catalog_handle,
             #[cfg(feature = "s3")]
+            archiver_handle,
+            #[cfg(feature = "s3")]
             archive_config: config.archive.clone(),
             tls_config,
             hot_keys: keys,
@@ -299,6 +317,11 @@ impl PipelineServer {
                         let batch_size = archive_cfg.archive_batch_size;
                         let interval_secs = archive_cfg.archive_interval_secs;
                         let archive_store = Arc::clone(&store);
+                        let archiver_arc = Arc::new(archiver);
+                        // Publish the archiver into AppState so the
+                        // `?include_archived=true` path on
+                        // `GET /v1/events` can fetch from it.
+                        self.archiver_handle.store(Arc::new(Some(Arc::clone(&archiver_arc))));
                         tracing::info!(
                             bucket = archive_cfg.bucket,
                             archive_after_hours,
@@ -307,7 +330,7 @@ impl PipelineServer {
                             "event archival configured — S3 connectivity verified"
                         );
                         tokio::spawn(archive_loop(
-                            Arc::new(archiver),
+                            archiver_arc,
                             archive_store,
                             archive_after_hours,
                             archive_threshold_mb,
