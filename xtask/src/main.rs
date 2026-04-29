@@ -1,5 +1,7 @@
 //! `cargo xtask <subcommand>` — project automation.
 
+mod loadtest;
+
 use std::path::Path;
 use std::process::{Command, ExitCode};
 
@@ -20,6 +22,23 @@ fn main() -> ExitCode {
             }
             ExitCode::SUCCESS
         },
+        Some("loadtest") => {
+            let rest: Vec<String> = args.collect();
+            let parsed = match loadtest::parse_args(rest) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("xtask: loadtest: {e:#}");
+                    eprintln!();
+                    print_loadtest_help();
+                    return ExitCode::FAILURE;
+                },
+            };
+            if let Err(e) = loadtest::run(parsed) {
+                eprintln!("xtask: loadtest failed: {e:#}");
+                return ExitCode::FAILURE;
+            }
+            ExitCode::SUCCESS
+        },
         Some("--help") | Some("-h") | None => {
             println!("xtask — Keplor project automation");
             println!();
@@ -29,6 +48,9 @@ fn main() -> ExitCode {
             println!("  refresh-catalog   download + pin LiteLLM pricing catalogue");
             println!("  size-audit        report release-binary size vs. phase gate");
             println!("  mem-audit         ingest events and check RSS stays under 30 MB");
+            println!(
+                "  loadtest          drive sustained POST /v1/events traffic, report p50/p95/p99"
+            );
             ExitCode::SUCCESS
         },
         Some(unknown) => {
@@ -36,6 +58,22 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         },
     }
+}
+
+fn print_loadtest_help() {
+    eprintln!("loadtest — drive sustained POST /v1/events traffic.");
+    eprintln!();
+    eprintln!("USAGE: cargo xtask loadtest --rate <N> --duration <D> [options]");
+    eprintln!();
+    eprintln!("REQUIRED:");
+    eprintln!("  --rate <N>              aggregate requests per second");
+    eprintln!("  --duration <D>          how long to sustain (e.g. 30s, 2m, 500ms)");
+    eprintln!();
+    eprintln!("OPTIONAL:");
+    eprintln!("  --concurrency <N>       worker tasks (default 64)");
+    eprintln!("  --target <URL>          base URL (default http://127.0.0.1:8080)");
+    eprintln!("  --baseline <PATH>       compare p99 against saved JSON; >20% regression = exit 1");
+    eprintln!("  --api-key <KEY>         Authorization: Bearer <KEY>");
 }
 
 /// Download the latest LiteLLM pricing catalogue, update the bundled

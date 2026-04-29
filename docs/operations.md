@@ -270,6 +270,39 @@ Manual GC:
 keplor gc --older-than-days 30 --data-dir /var/lib/keplor
 ```
 
+## Load testing
+
+`cargo xtask loadtest` drives sustained `POST /v1/events` traffic and
+reports a percentile breakdown. Use it to establish a baseline before
+shipping a perf-sensitive change.
+
+```bash
+# 5000 req/s for 30s against a localhost server; report p50/p95/p99.
+cargo xtask loadtest \
+  --rate 5000 \
+  --duration 30s \
+  --concurrency 64 \
+  --target http://127.0.0.1:8080
+```
+
+Baseline gate (CI):
+
+```bash
+# First run: writes the baseline file if absent.
+cargo xtask loadtest --rate 5000 --duration 30s --concurrency 64 \
+  --target http://127.0.0.1:8080 \
+  --baseline xtask/baselines/loadtest.json
+
+# Subsequent runs: compare p99 against the saved baseline. The
+# command exits non-zero (CI fails) if p99 is >20% slower than the
+# saved value.
+```
+
+Achieved throughput is bounded by `concurrency × p99` for the durable
+write path. To probe sustained capacity, raise `--concurrency`; for
+back-pressure observation, exceed the steady-state rate and watch
+`queue_depth_max` in the report.
+
 ## Upgrading
 
 1. Back up the data directory (see above)

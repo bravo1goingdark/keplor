@@ -1,0 +1,4 @@
+# Saved loadtest baselines for `cargo xtask loadtest --baseline …`.
+# Each file is the JSON output of a previous run. The harness gates on
+# p99: a current run fails CI when it's >20% slower than the baseline.
+# Capture a fresh baseline after each intentional perf change.
