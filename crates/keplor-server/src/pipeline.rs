@@ -77,12 +77,6 @@ pub struct Pipeline {
     idempotency: Option<Arc<IdempotencyCache>>,
     /// Maximum DB size in bytes. 0 = unlimited.
     max_db_bytes: u64,
-    /// When `true`, ingest requests carrying `request_body` /
-    /// `response_body` are rejected with HTTP 400. Default: `false`
-    /// — those fields are dropped silently with a counter +
-    /// rate-limited warn so existing clients keep working during a
-    /// transition window.
-    strict_schema: bool,
     /// How long a single ingest request may wait for the BatchWriter
     /// flush before returning 500. Bounds worst-case latency under
     /// back-pressure.
@@ -113,7 +107,6 @@ impl Pipeline {
             catalog,
             idempotency: None,
             max_db_bytes: 0,
-            strict_schema: false,
             write_timeout: DEFAULT_WRITE_TIMEOUT,
         }
     }
@@ -134,13 +127,6 @@ impl Pipeline {
     /// Attach an idempotency cache to the pipeline.
     pub fn with_idempotency(mut self, cache: Arc<IdempotencyCache>) -> Self {
         self.idempotency = Some(cache);
-        self
-    }
-
-    /// Toggle strict-schema enforcement (reject deprecated body fields
-    /// with HTTP 400 instead of dropping them silently).
-    pub fn with_strict_schema(mut self, strict: bool) -> Self {
-        self.strict_schema = strict;
         self
     }
 
@@ -416,7 +402,7 @@ impl Pipeline {
         if let Some(key_id) = authenticated_key_id {
             event.api_key_id = Some(key_id.to_owned());
         }
-        validate::validate(&event, self.strict_schema).inspect_err(|e| {
+        validate::validate(&event).inspect_err(|e| {
             record_error("validation", e);
         })?;
 

@@ -55,8 +55,7 @@ Run through this before every production deployment.
 
 - [ ] Build with mimalloc: `--features mimalloc` (49% throughput gain)
 - [ ] Build as static musl binary: `--target x86_64-unknown-linux-musl`
-- [ ] Verify binary size: `ls -lh target/x86_64-unknown-linux-musl/release/keplor` (must be <10 MB on a default build, <12 MB with `migrate-from-sqlite`)
-- [ ] **Do not** enable `--features migrate-from-sqlite` on production builds unless you actually need to import a legacy SQLite db — it links `rusqlite` (~2 MB) and adds the `keplor migrate-from-sqlite` subcommand.
+- [ ] Verify binary size: `ls -lh target/x86_64-unknown-linux-musl/release/keplor` (must be <10 MB)
 - [ ] Run the acceptance gate: `just ci` (fmt, clippy, tests, supply-chain audit)
 
 ### Configuration
@@ -161,7 +160,6 @@ Scrape `GET /metrics` for:
 | `keplor_batch_flushes_total` | counter | Batch flush operations |
 | `keplor_batch_events_flushed_total` | counter | Events flushed to DB |
 | `keplor_batch_flush_errors_total` | counter | Failed batch flushes |
-| `keplor_dropped_field_total{field}` | counter | Ingest events that carried a deprecated, dropped field. `field=request_body` or `response_body`. |
 | `keplor_storage_bytes{tier}` | gauge | Bytes on disk across this tier's segments. Sampled every 10 s. |
 | `keplor_segments_total{tier}` | gauge | Closed segment-file count for this tier. |
 | `keplor_wal_events{tier}` | gauge | Events buffered in the active WAL, not yet rotated. |
@@ -174,7 +172,7 @@ Scrape `GET /metrics` for:
 - `keplor_batch_flush_errors_total` increasing: database write failures (check disk space)
 - `queue_utilization_pct > 80` in health check: back-pressure, ingestion exceeding write throughput
 - `keplor_auth_failures_total` spike: possible credential stuffing
-- `keplor_dropped_field_total` non-zero: clients are still sending unsupported body fields. Track until it hits zero, then flip `pipeline.strict_schema = true` to convert future violations into HTTP 400.
+- HTTP 422 spike from clients on `POST /v1/events`: the wire schema is `deny_unknown_fields`; a client started sending a field the server doesn't recognise. Check the client's payload against `IngestEvent`.
 
 ## Backup and Restore
 
@@ -315,31 +313,6 @@ back-pressure observation, exceed the steady-state rate and watch
 The server also opens the store on startup, which performs the same
 schema-id check.
 
-### Importing an old SQLite-backed store
-
-If you're upgrading from a release older than the KeplorDB cutover (the
-SQLite era), you need a binary built with `--features migrate-from-sqlite`
-to run the one-shot import:
-
-```bash
-# Build with the migration feature on (NOT for production runtime use):
-cargo build --release -p keplor-cli --features migrate-from-sqlite
-
-# Migrate the old keplor.db into a fresh KeplorDB data dir.
-# Resumable: a checkpoint is written after each batch.
-./target/release/keplor migrate-from-sqlite \
-  --source /var/lib/keplor.db \
-  --dest /var/lib/keplor_data \
-  --batch-size 10000
-
-# Point the server's storage.data_dir at the new directory and restart.
-# You can keep the source SQLite file around as a rollback for as long as
-# disk space allows; the migration is non-destructive.
-```
-
-Then deploy the **default** (non-feature) build for ongoing runtime —
-shedding the `rusqlite` dep keeps the binary under 10 MB.
-
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
@@ -348,7 +321,6 @@ shedding the `rusqlite` dep keeps the binary under 10 MB.
 | `408 Request Timeout` | Request exceeded `server.request_timeout_secs` | Increase timeout or reduce batch size |
 | Data directory growing unbounded | `retention_days = 0` (GC disabled) | Set `retention_days` to a positive value |
 | Many tiny segment files | Default `pipeline.flush_interval_ms = 50` produces ~1200 segments/min/tier at idle | Raise `pipeline.flush_interval_ms` (e.g. 250) to trade read freshness for fewer segments. See "Segment count blowing up" in the runbook below if GC can't keep up. |
-| `migrate-from-sqlite` subcommand "not found" | Default binary doesn't include it | Rebuild with `--features migrate-from-sqlite` |
 | High memory usage | Large batch writer queue | Reduce `channel_capacity` in batch config |
 
 ## Incident runbook

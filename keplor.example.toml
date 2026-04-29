@@ -13,9 +13,7 @@
 
 # ── Storage ──────────────────────────────────────────────────────────────
 # Storage is a KeplorDB data directory — one append-only Engine per
-# retention tier under {data_dir}/{tier}/. Old `db_path =` configs are
-# still accepted as an alias for `data_dir =` so deployed TOMLs keep
-# loading; the value points at a directory now, not a SQLite file.
+# retention tier under {data_dir}/{tier}/.
 [storage]
 data_dir = "/var/lib/keplor"          # KeplorDB data directory
 # retention_days = 90                  # auto-GC events older than this (0 = disabled)
@@ -104,11 +102,6 @@ days = 90
 # batch_size = 64                  # max events per batch write (use 256 for high throughput)
 # max_body_bytes = 10485760        # 10 MB max request body
 # channel_capacity = 32768         # batch writer queue depth (raise for bursty traffic)
-# strict_schema = false            # reject ingest events carrying request_body/response_body
-                                    # with HTTP 400. default false: drop silently with a counter
-                                    # (`keplor_dropped_field_total{field}`) and a rate-limited
-                                    # warn so existing clients keep working. flip on once your
-                                    # fleet has stopped sending those fields.
 # write_timeout_secs = 10          # max wait per ingest write before returning 500.
                                     # bounds worst-case latency under back-pressure (range 1-300).
 # flush_interval_ms = 50           # BatchWriter flush cadence. lower = fresher reads but more

@@ -1,6 +1,6 @@
 [package]
 name         = "keplor-cli"
-description  = "The `keplor` binary: run, stats, migrate, query."
+description  = "The `keplor` binary: run, stats, query, gc, archive."
 version      = { workspace = true }
 edition      = { workspace = true }
 rust-version = { workspace = true }
@@ -17,13 +17,9 @@ path = "src/main.rs"
 workspace = true
 
 [features]
-default              = []
-mimalloc             = ["dep:mimalloc"]
-s3                   = ["keplor-server/s3"]
-# Build the `keplor migrate-from-sqlite` subcommand and link the
-# bundled `rusqlite` dep. Off by default — only operators upgrading
-# from a pre-Phase-A SQLite store need this.
-migrate-from-sqlite  = ["keplor-store/migrate-from-sqlite"]
+default  = []
+mimalloc = ["dep:mimalloc"]
+s3       = ["keplor-server/s3"]
 
 [dependencies]
 keplor-core    = { path = "../keplor-core" }
@@ -41,8 +37,3 @@ smol_str           = { version = "0.3" }
 
 mimalloc = { version = "0.1", optional = true }
 
-[dev-dependencies]
-keplor-core = { path = "../keplor-core" }
-smol_str    = { version = "0.3" }
-http        = "1"
-tempfile    = "3"

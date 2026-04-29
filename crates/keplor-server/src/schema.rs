@@ -7,7 +7,11 @@ use serde::{Deserialize, Serialize};
 /// Any LLM gateway, SDK wrapper, or application can POST events in this
 /// format.  Keplor computes cost from usage + its pricing catalog unless
 /// the caller provides `cost_nanodollars` explicitly.
+///
+/// Unknown fields are rejected with HTTP 422 — no silently-dropped
+/// data, no schema drift.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct IngestEvent {
     // --- required --------------------------------------------------------
     /// Model name as reported by the caller (e.g. `"gpt-4o"`).
@@ -77,12 +81,6 @@ pub struct IngestEvent {
     pub client_ip: Option<String>,
     /// Client user-agent string.
     pub user_agent: Option<String>,
-
-    // --- bodies (optional, stored compressed) ----------------------------
-    /// Raw request body — preserved as-is from the HTTP payload.
-    pub request_body: Option<Box<serde_json::value::RawValue>>,
-    /// Raw response body — preserved as-is from the HTTP payload.
-    pub response_body: Option<Box<serde_json::value::RawValue>>,
 
     // --- extensibility ---------------------------------------------------
     /// Arbitrary metadata — stored but not indexed in v1.
@@ -234,7 +232,6 @@ mod tests {
             "source": "litellm",
             "user_id": "user_1",
             "flags": {"streaming": true, "cache_used": true},
-            "request_body": {"messages": [{"role": "user", "content": "hello"}]},
             "metadata": {"custom_field": "value"}
         }"#;
         let event: IngestEvent = serde_json::from_str(json).unwrap();

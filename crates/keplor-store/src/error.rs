@@ -3,12 +3,6 @@
 /// Errors produced by the local store.
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
-    /// SQLite operation failed (only present when the
-    /// `migrate-from-sqlite` feature is enabled).
-    #[cfg(feature = "migrate-from-sqlite")]
-    #[error("sqlite: {0}")]
-    Sqlite(#[from] rusqlite::Error),
-
     /// Schema migration failed.
     #[error("migration v{version} failed: {reason}")]
     Migration {

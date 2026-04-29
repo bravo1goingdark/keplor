@@ -97,15 +97,12 @@ impl Default for ListenConfig {
 
 /// Storage configuration.
 ///
-/// The on-disk layout is now a KeplorDB data directory — one segment
-/// tree per retention tier under `{data_dir}/tier={name}/`. The
-/// `db_path` name survives the cutover as a backwards-compatible alias
-/// in deployed TOMLs; it points at a directory now, not a SQLite file.
+/// The on-disk layout is a KeplorDB data directory — one segment
+/// tree per retention tier under `{data_dir}/tier={name}/`.
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct StorageConfig {
     /// Path to the KeplorDB data directory.
-    #[serde(alias = "db_path")]
     pub data_dir: PathBuf,
     /// Automatic GC: delete events older than this many days. 0 = disabled.
     pub retention_days: u64,
@@ -323,12 +320,6 @@ pub struct PipelineConfig {
     /// Higher values absorb traffic bursts at the cost of more memory
     /// and more events at risk if the process crashes before flushing.
     pub channel_capacity: usize,
-    /// Reject ingest requests carrying `request_body` / `response_body`
-    /// fields with HTTP 400. Default: `false` — those fields are
-    /// dropped silently and a counter is incremented, preserving
-    /// compatibility with clients that haven't yet migrated. Flip on
-    /// once your fleet has stopped sending them.
-    pub strict_schema: bool,
     /// Hard ceiling on how long a single ingest write may wait for
     /// the BatchWriter flush before the request returns 500.
     /// Bounds the worst-case request latency under back-pressure.
@@ -347,7 +338,6 @@ impl Default for PipelineConfig {
             batch_size: 64,
             max_body_bytes: 10 * 1024 * 1024, // 10 MB
             channel_capacity: 32_768,
-            strict_schema: false,
             write_timeout_secs: 10,
             flush_interval_ms: 50,
         }

@@ -102,15 +102,6 @@ At idle, each `BatchWriter` flush produces one segment per tier
 
 **Event archival**: Old events are archived to S3/R2 as zstd-compressed JSONL files, partitioned by (user_id, day). Daily rollup queries replay against the JSONL sidecar for archived ranges. Manifests track what was uploaded. Runs every hour by default (configurable via `archive_interval_secs`) with per-chunk error isolation.
 
-**Legacy SQLite migration**: The previous SQLite backend is retained as
-a read-only migration source under the `migrate-from-sqlite` Cargo
-feature on `keplor-store` and `keplor-cli`. Default release builds
-**omit `rusqlite` entirely** (~2 MB binary saving). The
-`keplor migrate-from-sqlite` subcommand opens both stores, walks the
-SQLite DB in chunks, converts each event via the mapping module, and
-writes to the per-tier KeplorDB engines with a resumable on-disk
-checkpoint.
-
 **Cost in nanodollars (int64)**: Avoids floating-point rounding. 1 nanodollar = 10^-9 USD. Max representable: ~$9.2 billion.
 
 **Health/metrics bypass connection limits**: The `/health` and `/metrics` endpoints are not subject to the `max_connections` concurrency limit, so observability remains accessible under full saturation.
