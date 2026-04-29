@@ -101,6 +101,11 @@ pub struct StorageConfig {
     /// Days of historical segments to replay into the rollup store on
     /// open. Default 7.
     pub rollup_replay_days: u32,
+    /// Cadence of the in-process rollup-refresh background loop.
+    /// Lower values keep daily_rollups closer to live; higher values
+    /// reduce CPU overhead from the rollup pass. Default 60 seconds.
+    /// Range: 5–3600.
+    pub rollup_loop_secs: u64,
 }
 
 impl Default for StorageConfig {
@@ -117,6 +122,7 @@ impl Default for StorageConfig {
             wal_shard_count: 4,
             mmap_cache_capacity: 256,
             rollup_replay_days: 7,
+            rollup_loop_secs: 60,
         }
     }
 }
@@ -287,6 +293,11 @@ pub struct PipelineConfig {
     /// compatibility with clients that haven't yet migrated. Flip on
     /// once your fleet has stopped sending them.
     pub strict_schema: bool,
+    /// Hard ceiling on how long a single ingest write may wait for
+    /// the BatchWriter flush before the request returns 500.
+    /// Bounds the worst-case request latency under back-pressure.
+    /// Default: 10 seconds. Range: 1–300.
+    pub write_timeout_secs: u64,
 }
 
 impl Default for PipelineConfig {
@@ -296,6 +307,7 @@ impl Default for PipelineConfig {
             max_body_bytes: 10 * 1024 * 1024, // 10 MB
             channel_capacity: 32_768,
             strict_schema: false,
+            write_timeout_secs: 10,
         }
     }
 }
@@ -420,6 +432,18 @@ impl ServerConfig {
             return Err(format!(
                 "storage.wal_shard_count = {} must be in [1, 64]",
                 self.storage.wal_shard_count
+            ));
+        }
+        if self.pipeline.write_timeout_secs == 0 || self.pipeline.write_timeout_secs > 300 {
+            return Err(format!(
+                "pipeline.write_timeout_secs = {} must be in [1, 300]",
+                self.pipeline.write_timeout_secs
+            ));
+        }
+        if self.storage.rollup_loop_secs < 5 || self.storage.rollup_loop_secs > 3600 {
+            return Err(format!(
+                "storage.rollup_loop_secs = {} must be in [5, 3600]",
+                self.storage.rollup_loop_secs
             ));
         }
         if let Some(tls) = &self.tls {

@@ -57,6 +57,11 @@ static DEFAULT_COST_OPTS: CostOpts = CostOpts {
     context_bucket: keplor_pricing::compute::ContextBucket::Standard,
 };
 
+/// Default per-event write timeout when the operator hasn't configured
+/// `pipeline.write_timeout_secs` (e.g. tests or benches that build a
+/// `Pipeline` directly via `Pipeline::new`).
+const DEFAULT_WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Shared state for the pipeline.
 #[derive(Clone)]
 pub struct Pipeline {
@@ -72,12 +77,24 @@ pub struct Pipeline {
     /// rate-limited warn so existing clients keep working during a
     /// transition window.
     strict_schema: bool,
+    /// How long a single ingest request may wait for the BatchWriter
+    /// flush before returning 500. Bounds worst-case latency under
+    /// back-pressure.
+    write_timeout: std::time::Duration,
 }
 
 impl Pipeline {
     /// Create a new pipeline with the given store, batch writer, and pricing catalog.
     pub fn new(store: Arc<Store>, writer: Arc<BatchWriter>, catalog: Arc<Catalog>) -> Self {
-        Self { store, writer, catalog, idempotency: None, max_db_bytes: 0, strict_schema: false }
+        Self {
+            store,
+            writer,
+            catalog,
+            idempotency: None,
+            max_db_bytes: 0,
+            strict_schema: false,
+            write_timeout: DEFAULT_WRITE_TIMEOUT,
+        }
     }
 
     /// Set maximum database size in megabytes. 0 = unlimited.
@@ -96,6 +113,12 @@ impl Pipeline {
     /// with HTTP 400 instead of dropping them silently).
     pub fn with_strict_schema(mut self, strict: bool) -> Self {
         self.strict_schema = strict;
+        self
+    }
+
+    /// Override the per-event write timeout (default 10 s).
+    pub fn with_write_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.write_timeout = timeout;
         self
     }
 
@@ -162,15 +185,19 @@ impl Pipeline {
         // back-pressure even when no flush has occurred recently.
         self.update_queue_metrics();
 
-        let id =
-            tokio::time::timeout(std::time::Duration::from_secs(10), self.writer.write(llm_event))
-                .await
-                .map_err(|_| ServerError::Internal("write timed out after 10s".into()))?
-                .map_err(|e| {
-                    let err = ServerError::from(e);
-                    record_error("store", &err);
-                    err
-                })?;
+        let id = tokio::time::timeout(self.write_timeout, self.writer.write(llm_event))
+            .await
+            .map_err(|_| {
+                ServerError::Internal(format!(
+                    "write timed out after {}s",
+                    self.write_timeout.as_secs()
+                ))
+            })?
+            .map_err(|e| {
+                let err = ServerError::from(e);
+                record_error("store", &err);
+                err
+            })?;
 
         let elapsed = start.elapsed();
         // Legacy histogram retained for dashboard continuity.
@@ -256,19 +283,16 @@ impl Pipeline {
         self.update_queue_metrics();
 
         // Send all valid events and await flush concurrently.
-        let write_results = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            self.writer.write_many(llm_events),
-        )
-        .await
-        .unwrap_or_else(|_| {
-            ok_indices
-                .iter()
-                .map(|_| {
-                    Err(keplor_store::StoreError::Internal("write timed out after 10s".into()))
-                })
-                .collect()
-        });
+        let write_timeout = self.write_timeout;
+        let write_results = tokio::time::timeout(write_timeout, self.writer.write_many(llm_events))
+            .await
+            .unwrap_or_else(|_| {
+                let msg = format!("write timed out after {}s", write_timeout.as_secs());
+                ok_indices
+                    .iter()
+                    .map(move |_| Err(keplor_store::StoreError::Internal(msg.clone())))
+                    .collect()
+            });
 
         // One latency sample per accepted event in the batch — keeps
         // the histogram comparable to the single-ingest path.

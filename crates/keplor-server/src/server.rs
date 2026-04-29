@@ -62,10 +62,13 @@ impl PipelineServer {
         let default_tier = SmolStr::new(&config.retention.default_tier);
         let state = AppState { pipeline, metrics_handle: Arc::new(metrics_handle), default_tier };
 
-        // Spawn background rollup task — refreshes today's daily_rollups
-        // every 60s so aggregation queries stay current.
+        // Spawn background rollup task — cadence governed by
+        // storage.rollup_loop_secs (default 60s).
         let rollup_store = state.pipeline.store_arc();
-        rollup::spawn_rollup_task(rollup_store, Duration::from_secs(60));
+        rollup::spawn_rollup_task(
+            rollup_store,
+            Duration::from_secs(config.storage.rollup_loop_secs),
+        );
 
         // Wrap the key set in an ArcSwap so SIGHUP can hot-swap it.
         // The middleware loads the current snapshot on every request.
