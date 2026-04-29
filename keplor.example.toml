@@ -36,6 +36,11 @@ data_dir = "/var/lib/keplor"          # KeplorDB data directory
 # rollup_loop_secs = 60                # cadence of the in-process rollup-refresh loop.
                                         # lower = fresher daily_rollups; higher = less CPU.
                                         # range 5-3600.
+# size_check_interval_ms = 1000        # how long the cached db-size value is reused before
+                                        # walking every per-tier engine again. consulted once
+                                        # per ingest when max_db_size_mb > 0; caching collapses
+                                        # the hot-path cost to two atomic loads. 0 = disabled
+                                        # (walk every call). range 0-60000.
 
 # ── Authentication ───────────────────────────────────────────────────────
 # When empty, all endpoints are open (no auth required).

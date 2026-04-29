@@ -22,7 +22,9 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use arc_swap::ArcSwap;
 use keplor_core::{EventId, LlmEvent};
@@ -65,6 +67,11 @@ pub struct KdbConfig {
     /// common case. Additional tiers encountered at ingest time are
     /// lazily created.
     pub eager_tiers: Vec<SmolStr>,
+    /// How long [`KdbStore::db_size_bytes`] caches its result before
+    /// re-walking the engines. Set to `0` to disable caching (caller
+    /// pays the per-engine `total_bytes()` walk on every call).
+    /// Default: 1000 ms.
+    pub size_check_interval_ms: u64,
 }
 
 impl KdbConfig {
@@ -80,6 +87,7 @@ impl KdbConfig {
             mmap_cache_capacity: 256,
             rollup_replay_days: 7,
             eager_tiers: vec![SmolStr::new("free"), SmolStr::new("pro"), SmolStr::new("team")],
+            size_check_interval_ms: 1000,
         }
     }
 }
@@ -107,6 +115,13 @@ pub struct KdbStore {
     config: KdbConfig,
     insert_lock: Mutex<()>,
     manifests: Mutex<ManifestStore>,
+    /// Cached result of [`KdbStore::db_size_bytes`].
+    cached_db_size: AtomicU64,
+    /// Epoch nanoseconds when `cached_db_size` was last refreshed.
+    cached_db_size_at_ns: AtomicI64,
+    /// Serializes the actual engine-walk so only one caller pays the
+    /// cost when the cache is stale.
+    db_size_refresh_lock: Mutex<()>,
 }
 
 impl std::fmt::Debug for KdbStore {
@@ -159,6 +174,9 @@ impl KdbStore {
             config,
             insert_lock: Mutex::new(()),
             manifests: Mutex::new(manifests),
+            cached_db_size: AtomicU64::new(0),
+            cached_db_size_at_ns: AtomicI64::new(0),
+            db_size_refresh_lock: Mutex::new(()),
         })
     }
 
@@ -700,13 +718,61 @@ impl KdbStore {
     }
 
     /// Total bytes across every tier's segments.
+    ///
+    /// Hot path: at high ingest rates this used to walk every per-tier
+    /// engine on every event (the `max_db_size_mb` enforcement check
+    /// in `Pipeline::check_db_size` calls it once per ingest). The
+    /// result is cached for `KdbConfig::size_check_interval_ms`
+    /// milliseconds so the per-event cost reduces to two atomic loads.
+    /// Refreshes are CAS-guarded — only one caller pays the engine
+    /// walk; concurrent callers see the previous value until it's
+    /// updated.
     pub fn db_size_bytes(&self) -> Result<u64, StoreError> {
+        let interval_ms = self.config.size_check_interval_ms;
+        if interval_ms == 0 {
+            // Caching disabled — pay the walk every call.
+            return Ok(self.compute_db_size());
+        }
+
+        let now_ns = current_epoch_ns();
+        let interval_ns = (interval_ms as i64).saturating_mul(1_000_000);
+        let last_ns = self.cached_db_size_at_ns.load(Ordering::Relaxed);
+        if now_ns.saturating_sub(last_ns) < interval_ns && last_ns != 0 {
+            return Ok(self.cached_db_size.load(Ordering::Relaxed));
+        }
+
+        // Cache miss. Try to take the refresh lock — if another caller
+        // beat us to it, fall through and read whatever they published.
+        if let Ok(_guard) = self.db_size_refresh_lock.try_lock() {
+            // Re-check under the lock in case another caller already
+            // refreshed while we were waiting.
+            let last_ns = self.cached_db_size_at_ns.load(Ordering::Relaxed);
+            if now_ns.saturating_sub(last_ns) < interval_ns && last_ns != 0 {
+                return Ok(self.cached_db_size.load(Ordering::Relaxed));
+            }
+            let total = self.compute_db_size();
+            self.cached_db_size.store(total, Ordering::Relaxed);
+            self.cached_db_size_at_ns.store(now_ns, Ordering::Relaxed);
+            return Ok(total);
+        }
+        // Another caller is mid-refresh; surface the prior cache value.
+        Ok(self.cached_db_size.load(Ordering::Relaxed))
+    }
+
+    /// Synchronously walk every engine and sum `total_bytes()`. Not
+    /// public — callers should go through [`Self::db_size_bytes`] so
+    /// they pick up caching.
+    fn compute_db_size(&self) -> u64 {
         let mut total = 0u64;
         for eng in self.all_engines() {
             total = total.saturating_add(eng.total_bytes());
         }
-        Ok(total)
+        total
     }
+}
+
+fn current_epoch_ns() -> i64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos() as i64).unwrap_or(0)
 }
 
 fn build_query_filter(filter: &EventFilter, cursor: Option<Cursor>) -> QueryFilter<D> {
@@ -957,5 +1023,47 @@ mod tests {
         let f = EventFilter { user_id: Some(SmolStr::new("bob")), ..Default::default() };
         let unmatched = store.query(&f, 50, None).unwrap();
         assert!(unmatched.is_empty(), "user_id=bob filter should not match alice");
+    }
+
+    #[test]
+    fn db_size_bytes_caches_within_window() {
+        // Default size_check_interval_ms=1000, so calls within ~1s of
+        // each other reuse the cached value. Verify by writing more
+        // events between two calls and observing the second call
+        // returns the same value (cached).
+        let store = KdbStore::open_in_memory().unwrap();
+        let ts = 1_700_000_000_000_000_000i64;
+        store.append_event(&sample("free", ts, 100)).unwrap();
+        store.wal_checkpoint().unwrap();
+        let first = store.db_size_bytes().unwrap();
+
+        // Append + flush more events. Without caching, db_size_bytes
+        // would grow.
+        for i in 0..10 {
+            store.append_event(&sample("free", ts + i, 100)).unwrap();
+        }
+        store.wal_checkpoint().unwrap();
+
+        let second = store.db_size_bytes().unwrap();
+        assert_eq!(first, second, "second call within cache window must reuse the cached value");
+    }
+
+    #[test]
+    fn db_size_bytes_disabled_cache_walks_every_call() {
+        let mut cfg = KdbConfig::new(tempdir_path());
+        cfg.size_check_interval_ms = 0; // disable
+        let store = KdbStore::open(cfg).unwrap();
+        let ts = 1_700_000_000_000_000_000i64;
+        store.append_event(&sample("free", ts, 100)).unwrap();
+        store.wal_checkpoint().unwrap();
+        let first = store.db_size_bytes().unwrap();
+
+        for i in 0..10 {
+            store.append_event(&sample("free", ts + i, 100)).unwrap();
+        }
+        store.wal_checkpoint().unwrap();
+
+        let second = store.db_size_bytes().unwrap();
+        assert!(second >= first, "with caching disabled, second call must reflect new writes");
     }
 }

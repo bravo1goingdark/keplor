@@ -106,6 +106,12 @@ pub struct StorageConfig {
     /// reduce CPU overhead from the rollup pass. Default 60 seconds.
     /// Range: 5–3600.
     pub rollup_loop_secs: u64,
+    /// How long the cached `db_size_bytes` result is reused before
+    /// re-walking the engines. The hot ingest path consults this on
+    /// every event when `max_db_size_mb > 0`; caching collapses the
+    /// per-event cost to a couple of atomic loads. `0` disables the
+    /// cache. Default: 1000 ms. Range: 0–60000.
+    pub size_check_interval_ms: u64,
 }
 
 impl Default for StorageConfig {
@@ -123,6 +129,7 @@ impl Default for StorageConfig {
             mmap_cache_capacity: 256,
             rollup_replay_days: 7,
             rollup_loop_secs: 60,
+            size_check_interval_ms: 1000,
         }
     }
 }
@@ -444,6 +451,12 @@ impl ServerConfig {
             return Err(format!(
                 "storage.rollup_loop_secs = {} must be in [5, 3600]",
                 self.storage.rollup_loop_secs
+            ));
+        }
+        if self.storage.size_check_interval_ms > 60_000 {
+            return Err(format!(
+                "storage.size_check_interval_ms = {} must be <= 60000 (0 = disabled)",
+                self.storage.size_check_interval_ms
             ));
         }
         if let Some(tls) = &self.tls {

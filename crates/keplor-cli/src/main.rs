@@ -184,6 +184,7 @@ fn run_server(config_path: PathBuf, json_logs: bool) -> Result<()> {
                 rollup_replay_days: config.storage.rollup_replay_days,
                 eager_tiers: keplor_store::KdbConfig::new(config.storage.data_dir.clone())
                     .eager_tiers,
+                size_check_interval_ms: config.storage.size_check_interval_ms,
             };
             let store = keplor_store::Store::open(kdb_config).with_context(|| {
                 format!("failed to open data dir at {}", config.storage.data_dir.display())
