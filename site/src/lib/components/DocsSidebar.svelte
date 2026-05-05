@@ -121,6 +121,7 @@
         { hash: 'rollups',          label: 'Rollups' },
         { hash: 'wal',              label: 'WAL' },
         { hash: 'compaction',       label: 'Compaction' },
+        { hash: 'http-tier',        label: 'HTTP tier (sharded BatchWriter)' },
         { hash: 'caveats',          label: 'Caveats' },
       ],
     },

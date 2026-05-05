@@ -166,6 +166,34 @@
   compaction is what gets you back onto the SIMD/zone-map fast path. Schedule it.
 </p>
 
+<h2 id="http-tier">HTTP tier (sharded BatchWriter)</h2>
+<p>
+  These engine numbers are the floor of the stack — what the WAL and the
+  segment scanner can do in process. Above the engine, keplor's HTTP
+  ingest tier funnels every event through a sharded
+  <code>BatchWriter</code> with <code>flush_shards</code> parallel append
+  loops + a decoupled rotator. Numbers below were measured against the
+  same 4-core/8-thread laptop, no PGO, single keplor process, with
+  <code>wal_shard_count = 8</code> and <code>flush_shards = 8</code>:
+</p>
+<table>
+  <thead><tr><th>Path</th><th>Single funnel (legacy)</th><th>Sharded (current)</th><th>Δ</th></tr></thead>
+  <tbody>
+    <tr><td>Fire-and-forget zero-error</td><td>~41 K rps</td><td><strong>~55 K rps</strong></td><td>+34 %</td></tr>
+    <tr><td>Durable peak (c=512), p99</td><td>20.2 K rps, 33.6 ms</td><td><strong>44.9 K rps, 21.4 ms</strong></td><td>+122 % rps, &minus;36 % p99</td></tr>
+    <tr><td>Batch endpoint zero-error</td><td>25.6 K events/s</td><td><strong>51.2 K events/s</strong></td><td>+100 %</td></tr>
+  </tbody>
+</table>
+<p>
+  Each append loop calls <code>append_batch_durable</code>
+  independently; keplordb's internal round-robin spreads the calls
+  across separate WAL shards, so N concurrent flushes fsync N different
+  files with no lock contention. The rotator runs once per
+  <code>flush_interval</code> and rotates WAL → segments for read
+  visibility, replacing the per-batch <code>wal_checkpoint</code> that
+  previously serialised every flush behind a tier-global lock-loop.
+</p>
+
 <h2 id="caveats">Caveats</h2>
 <p>
   These numbers are floor-of-the-stack and exclude HTTP framing, JSON deserialisation,
