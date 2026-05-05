@@ -585,7 +585,34 @@ fn error_from_ingest(e: &crate::schema::IngestError) -> ProviderError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use keplor_core::LlmEvent;
     use keplor_store::BatchConfig;
+
+    /// Poll for read-after-write visibility.
+    ///
+    /// `BatchWriter::write` returns once the WAL fsync completes; the
+    /// rotator that turns WAL → segment runs on its own tick and the
+    /// caller's synchronous `store.wal_checkpoint()` races with it on
+    /// per-shard mutexes. The rotator can claim a shard's data first
+    /// and then run `add_segment` *after* the test's wal_checkpoint
+    /// has already returned — so an immediate `get_event` may miss the
+    /// event by a few hundred microseconds. Polling closes that window
+    /// without sleeping unconditionally.
+    async fn wait_for_event(store: &Store, id: &EventId) -> LlmEvent {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            // Each iteration calls wal_checkpoint so we keep nudging
+            // pending shards to rotate even if the rotator is asleep.
+            let _ = store.wal_checkpoint();
+            if let Some(ev) = store.get_event(id).ok().flatten() {
+                return ev;
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!("event {id} not visible after 2s");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
 
     fn test_pipeline() -> Pipeline {
         let store = Arc::new(Store::open_in_memory().unwrap());
@@ -648,11 +675,8 @@ mod tests {
         .unwrap();
         let resp = pipeline.ingest(event, None, None, "free").await.unwrap();
 
-        // KeplorDB reads only see rotated segments; flush before query.
-        store.wal_checkpoint().unwrap();
-
         let id: EventId = resp.id.parse().unwrap();
-        let loaded = store.get_event(&id).unwrap().expect("event should exist");
+        let loaded = wait_for_event(&store, &id).await;
         assert_eq!(loaded.model, "gpt-4o");
         assert_eq!(loaded.source.as_deref(), Some("litellm"));
         assert_eq!(loaded.user_id.as_ref().map(|u| u.as_str()), Some("alice"));
@@ -674,9 +698,8 @@ mod tests {
         )
         .unwrap();
         let resp = pipeline.ingest(event, None, None, "free").await.unwrap();
-        pipeline.store().wal_checkpoint().unwrap();
         let id: EventId = resp.id.parse().unwrap();
-        let loaded = pipeline.store().get_event(&id).unwrap().unwrap();
+        let loaded = wait_for_event(pipeline.store(), &id).await;
         assert!(loaded.ts_ns > 1_705_000_000_000_000_000);
         assert!(loaded.ts_ns < 1_706_000_000_000_000_000);
     }
@@ -706,9 +729,8 @@ mod tests {
 
         // Simulate server-side key attribution overriding client-provided value.
         let resp = pipeline.ingest(event, Some("real-key"), None, "pro").await.unwrap();
-        store.wal_checkpoint().unwrap();
         let id: EventId = resp.id.parse().unwrap();
-        let loaded = store.get_event(&id).unwrap().expect("event should exist");
+        let loaded = wait_for_event(&store, &id).await;
         assert_eq!(
             loaded.api_key_id.as_ref().map(|k| k.as_str()),
             Some("real-key"),

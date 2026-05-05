@@ -294,11 +294,24 @@ async fn include_archived_with_no_archiver_falls_through_to_live_only() {
         .await
         .unwrap();
 
-    let resp =
-        reqwest::get(format!("{base}/v1/events?limit=10&include_archived=true")).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let json: serde_json::Value = resp.json().await.unwrap();
-    let events = json["events"].as_array().unwrap();
+    // Poll: write returns once durable, but the rotator is what makes
+    // events visible to /v1/events reads, and it may not have ticked
+    // yet at the moment we read.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let events = loop {
+        let resp =
+            reqwest::get(format!("{base}/v1/events?limit=10&include_archived=true")).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json: serde_json::Value = resp.json().await.unwrap();
+        let events = json["events"].as_array().unwrap().clone();
+        if !events.is_empty() {
+            break events;
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!("live event not visible after 2s");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
     assert!(!events.is_empty(), "live event should be returned");
 }
 
