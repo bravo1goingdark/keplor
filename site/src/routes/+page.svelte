@@ -238,6 +238,10 @@ resp = requests.post(
         </div>
       {/each}
     </div>
+    <p class="text-[13px] text-ink-muted mt-14 max-w-[640px]">
+      Storage layer ceiling: 1.2 M events/s durable ingest, 1.3 G elem/s aggregate scan,
+      10 µs post-compaction aggregate. <a href="{base}/docs/benchmarks" class="text-ink underline decoration-ink-muted/40 underline-offset-4 hover:decoration-ink">See engine benchmarks →</a>
+    </p>
   </div>
 </section>
 

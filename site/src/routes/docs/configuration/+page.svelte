@@ -32,7 +32,7 @@ size_check_interval_ms = 1000       # cache for db_size_bytes (0 = disabled)
 wal_max_events = 500000             # events per WAL shard before forced rotation
 wal_sync_interval = 64              # fsync every N batched writes
 wal_sync_bytes = 262144             # fsync after N buffered bytes
-wal_shard_count = 4                 # per-tier WAL shards (raise on >8 cores)
+wal_shard_count = 8                 # per-tier WAL shards (recommended; pair with pipeline.flush_shards)
 mmap_cache_capacity = 256           # mmap'd-segment LRU size
 rollup_replay_days = 7              # days of segments replayed on open
 rollup_loop_secs = 60               # rollup-refresh cadence
@@ -69,6 +69,7 @@ batch_size = 64
 max_body_bytes = 10485760
 channel_capacity = 32768
 flush_interval_ms = 50              # BatchWriter cadence (1-10000)
+flush_shards = 4                    # parallel BatchWriter shards (1-64)
 write_timeout_secs = 10             # max wait per durable write (1-300)
 
 [idempotency]
@@ -191,6 +192,7 @@ refresh_interval_secs = 86400       # 24h. set 0 to disable. range 60-604800.
     <tr><td><code>max_body_bytes</code></td><td>usize</td><td><code>10485760</code></td><td>1 &ndash; 100 MB</td><td>Max request body size</td></tr>
     <tr><td><code>channel_capacity</code></td><td>usize</td><td><code>32768</code></td><td>1 &ndash; &infin;</td><td>Batch writer queue depth. Raise for bursty traffic.</td></tr>
     <tr><td><code>flush_interval_ms</code></td><td>u64</td><td><code>50</code></td><td>1 &ndash; 10,000</td><td>BatchWriter flush cadence. Lower = fresher reads, more segment files. Raise to 250+ for sustained-write workloads where operators tolerate ~half-second read staleness.</td></tr>
+    <tr><td><code>flush_shards</code></td><td>usize</td><td><code>4</code></td><td>1 &ndash; 64</td><td>Number of parallel BatchWriter shards. Each shard owns an independent channel + append loop, fanning writes across the keplordb engine's WAL shards for parallel fsync. Tune up to (but not above) <code>storage.wal_shard_count</code>. Set to 1 to fall back to the single-funnel design.</td></tr>
     <tr><td><code>write_timeout_secs</code></td><td>u64</td><td><code>10</code></td><td>1 &ndash; 300</td><td>Max wait per durable ingest write before returning 500. Bounds worst-case request latency under back-pressure.</td></tr>
   </tbody>
 </table>

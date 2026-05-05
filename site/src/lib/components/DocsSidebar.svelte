@@ -110,6 +110,21 @@
         { hash: 'archive-status',  label: 'keplor archive-status' },
       ],
     },
+    {
+      href: `${base}/docs/benchmarks`,
+      label: 'Benchmarks',
+      sections: [
+        { hash: 'caveat',           label: 'What you are looking at' },
+        { hash: 'setup',            label: 'Methodology' },
+        { hash: 'writes',           label: 'Writes' },
+        { hash: 'queries',          label: 'Queries' },
+        { hash: 'rollups',          label: 'Rollups' },
+        { hash: 'wal',              label: 'WAL' },
+        { hash: 'compaction',       label: 'Compaction' },
+        { hash: 'http-tier',        label: 'HTTP tier (sharded BatchWriter)' },
+        { hash: 'caveats',          label: 'Caveats' },
+      ],
+    },
   ];
 </script>
 

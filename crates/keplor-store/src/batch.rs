@@ -1,8 +1,33 @@
-//! [`BatchWriter`] — async event writer that accumulates events and flushes
-//! them in bulk transactions for high throughput.
+//! [`BatchWriter`] — sharded async event writer.
+//!
+//! Architecture:
+//! - **N append loops**, one per shard, each owning its own bounded mpsc
+//!   channel. Producers route events round-robin across shards. Each loop
+//!   buffers up to `batch_size` and flushes via `append_batch_durable`.
+//!   The keplordb engine internally round-robins each call onto its own
+//!   WAL shard, so N concurrent flushes write N different WAL files with
+//!   no fsync contention.
+//! - **1 rotator loop** wakes every `flush_interval` and calls
+//!   `wal_checkpoint` once to rotate WAL shards into segment files. This
+//!   is what makes appended data visible to readers (queries only see
+//!   segments, not WAL contents). Decoupling the rotator from the append
+//!   path avoids an N² thundering herd of rotations.
+//!
+//! Read-visibility latency: ≤ `flush_interval` (unchanged vs the old
+//! single-loop design). Write throughput: scales with `flush_shards`
+//! up to the underlying engine's WAL-shard count.
+//!
+//! Per-event ordering across shards is not preserved. Within a single
+//! `write_many` call, the input → output order in the returned `Vec` IS
+//! preserved (each oneshot is awaited in input order), but the on-disk
+//! commit order is non-deterministic across shards.
+//!
+//! On shutdown the rotator is aborted (via `Drop`); append loops exit
+//! when their channels close, and each runs one final `wal_checkpoint`
+//! to flush any drained buffer into a segment.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::sync::mpsc;
@@ -15,35 +40,53 @@ use crate::kdb_store::KdbStore;
 /// Configuration for the [`BatchWriter`].
 #[derive(Debug, Clone)]
 pub struct BatchConfig {
-    /// Maximum events to accumulate before forcing a flush.
+    /// Maximum events to accumulate before forcing a flush, per shard.
     pub batch_size: usize,
     /// Maximum time to wait before flushing a partial batch.
     pub flush_interval: Duration,
-    /// Bounded channel capacity for back-pressure.
+    /// Total bounded channel capacity across all shards. Each shard gets
+    /// `channel_capacity / flush_shards` (rounded up). Set this to absorb
+    /// expected burst traffic without 503-level back-pressure.
     pub channel_capacity: usize,
+    /// Number of parallel append shards. Tunable via the
+    /// `pipeline.flush_shards` config field; defaults to 4 to match the
+    /// historical keplordb `wal_shard_count` default. Higher values let
+    /// more cores work in parallel; values above the engine's
+    /// `wal_shard_count` give diminishing returns.
+    pub flush_shards: usize,
 }
 
 impl Default for BatchConfig {
     fn default() -> Self {
-        Self { batch_size: 256, flush_interval: Duration::from_millis(50), channel_capacity: 8192 }
+        Self {
+            batch_size: 256,
+            flush_interval: Duration::from_millis(50),
+            channel_capacity: 8192,
+            flush_shards: 4,
+        }
     }
 }
 
 /// Async event writer that batches writes for throughput.
 ///
-/// Callers send events via [`BatchWriter::write`]. A background task
-/// accumulates them and flushes in bulk transactions, amortising
+/// Callers send events via [`BatchWriter::write`]. Per-shard background
+/// tasks accumulate them and flush in bulk transactions, amortising the
 /// `BEGIN`/`COMMIT` and prepared-statement overhead across many events.
 ///
-/// On shutdown, call [`BatchWriter::shutdown`] to drain all pending
-/// events before the process exits.
+/// On shutdown, call [`BatchWriter::shutdown`] to drain pending events
+/// before the process exits.
 pub struct BatchWriter {
-    /// Channel sender — cloneable, no mutex needed for send operations.
-    tx: mpsc::Sender<WriteRequest>,
+    /// Per-shard channel senders. Routed round-robin via `next_tx`.
+    txs: Vec<mpsc::Sender<WriteRequest>>,
+    next_tx: AtomicU64,
     /// Set to `true` after shutdown to reject new writes fast.
     shutdown: AtomicBool,
-    channel_capacity: usize,
-    flush_handle: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    total_capacity: usize,
+    /// Append-loop join handles, one per shard. Mutex is uncontended on
+    /// the hot path — only touched by `shutdown` and `Drop`.
+    flush_handles: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    /// Single rotator-loop join handle. `Drop` aborts it.
+    rotator_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 struct WriteRequest {
@@ -52,31 +95,67 @@ struct WriteRequest {
 }
 
 impl BatchWriter {
-    /// Spawn a new batch writer backed by `store`.
+    /// Spawn a new sharded batch writer backed by `store`.
     ///
-    /// The background flush task runs until [`BatchWriter::shutdown`] is
-    /// called or all senders are dropped.
+    /// Spawns `config.flush_shards` append loops + 1 rotator. All run
+    /// until [`BatchWriter::shutdown`] is called or the writer is dropped.
     pub fn new(store: Arc<KdbStore>, config: BatchConfig) -> Self {
-        let capacity = config.channel_capacity;
-        let (tx, rx) = mpsc::channel(capacity);
-        let flush_handle = tokio::spawn(flush_loop(store, rx, config));
-        Self {
-            tx,
-            shutdown: AtomicBool::new(false),
-            channel_capacity: capacity,
-            flush_handle: tokio::sync::Mutex::new(Some(flush_handle)),
+        let shards = config.flush_shards.max(1);
+        let per_shard_cap = config.channel_capacity.div_ceil(shards).max(1);
+        // Per-shard batch threshold scales with shard count so the
+        // fill-vs-interval tradeoff stays the same as the single-shard
+        // baseline. Without this, each shard sees 1/N of the producers
+        // and rarely fills `batch_size` — flushes fall through to the
+        // interval tick and durable p50 collapses to `flush_interval`.
+        // Floor at 8 to keep small batches efficient.
+        let per_shard_batch_size = (config.batch_size / shards).max(8);
+
+        let mut txs = Vec::with_capacity(shards);
+        let mut handles = Vec::with_capacity(shards);
+        for _ in 0..shards {
+            let (tx, rx) = mpsc::channel(per_shard_cap);
+            let shard_config = BatchConfig {
+                batch_size: per_shard_batch_size,
+                flush_interval: config.flush_interval,
+                channel_capacity: per_shard_cap,
+                flush_shards: 1,
+            };
+            let handle = tokio::spawn(append_loop(Arc::clone(&store), rx, shard_config));
+            txs.push(tx);
+            handles.push(handle);
         }
+
+        let rotator = tokio::spawn(rotator_loop(Arc::clone(&store), config.flush_interval));
+
+        let total_capacity = per_shard_cap * shards;
+        metrics::gauge!("keplor_batch_queue_capacity").set(total_capacity as f64);
+
+        Self {
+            txs,
+            next_tx: AtomicU64::new(0),
+            shutdown: AtomicBool::new(false),
+            total_capacity,
+            flush_handles: Mutex::new(handles),
+            rotator_handle: Mutex::new(Some(rotator)),
+        }
+    }
+
+    /// Round-robin shard selector.
+    fn pick_shard(&self) -> usize {
+        let i = self.next_tx.fetch_add(1, Ordering::Relaxed) as usize;
+        i % self.txs.len()
     }
 
     /// Submit an event for batched writing.
     ///
-    /// Returns once the event is durably flushed.
+    /// Returns once the event is durably flushed to its shard's WAL.
     pub async fn write(&self, event: LlmEvent) -> Result<EventId, StoreError> {
         if self.shutdown.load(Ordering::Relaxed) {
             return Err(StoreError::ChannelClosed);
         }
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-        self.tx
+        let shard = self.pick_shard();
+        self.txs[shard]
             .send(WriteRequest { event, result_tx: Some(result_tx) })
             .await
             .map_err(|_| StoreError::ChannelClosed)?;
@@ -85,9 +164,9 @@ impl BatchWriter {
 
     /// Submit multiple events and await all their flush confirmations.
     ///
-    /// All events are sent to the channel first, then all oneshot
-    /// receivers are awaited concurrently.  This avoids the serial-await
-    /// problem where each event waits for a separate flush cycle.
+    /// Events fan out across shards round-robin. Returned `Vec` preserves
+    /// input order. Avoids the serial-await problem where each event
+    /// would wait for a separate flush cycle.
     pub async fn write_many(&self, events: Vec<LlmEvent>) -> Vec<Result<EventId, StoreError>> {
         if self.shutdown.load(Ordering::Relaxed) {
             return events.iter().map(|_| Err(StoreError::ChannelClosed)).collect();
@@ -96,7 +175,12 @@ impl BatchWriter {
         let mut receivers = Vec::with_capacity(events.len());
         for event in events {
             let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-            if self.tx.send(WriteRequest { event, result_tx: Some(result_tx) }).await.is_err() {
+            let shard = self.pick_shard();
+            if self.txs[shard]
+                .send(WriteRequest { event, result_tx: Some(result_tx) })
+                .await
+                .is_err()
+            {
                 receivers.push(None);
             } else {
                 receivers.push(Some(result_rx));
@@ -120,50 +204,75 @@ impl BatchWriter {
         if self.shutdown.load(Ordering::Relaxed) {
             return Err(StoreError::ChannelClosed);
         }
-        self.tx.try_send(WriteRequest { event, result_tx: None }).map_err(|e| match e {
+        let shard = self.pick_shard();
+        self.txs[shard].try_send(WriteRequest { event, result_tx: None }).map_err(|e| match e {
             mpsc::error::TrySendError::Full(_) => StoreError::ChannelFull,
             mpsc::error::TrySendError::Closed(_) => StoreError::ChannelClosed,
         })
     }
 
-    /// Number of events currently queued in the channel.
-    ///
-    /// Returns 0 if the channel is closed.
+    /// Total events currently queued across all shard channels.
     pub fn queue_depth(&self) -> usize {
-        self.tx.max_capacity() - self.tx.capacity()
+        self.txs.iter().map(|tx| tx.max_capacity() - tx.capacity()).sum()
     }
 
-    /// Maximum channel capacity.
+    /// Aggregate maximum channel capacity across all shards.
     pub fn max_capacity(&self) -> usize {
-        self.channel_capacity
+        self.total_capacity
     }
 
     /// Gracefully shut down the batch writer.
     ///
-    /// Sets the shutdown flag to reject new writes, then waits for the
-    /// flush loop to drain all pending events up to `timeout`.
+    /// Sets the shutdown flag to reject new writes, then awaits each
+    /// shard's append loop. Append loops only exit once the BatchWriter
+    /// (and any cloned `Arc<BatchWriter>`) is dropped — until then
+    /// senders stay alive and channels never close. Callers should call
+    /// `shutdown()` first, then drop their `Arc<BatchWriter>`. The
+    /// rotator is aborted via `Drop`.
     ///
-    /// Returns `true` if the flush loop completed within the deadline,
-    /// `false` if the timeout expired (some events may be lost).
+    /// Returns `true` if every append loop completed within the deadline,
+    /// `false` otherwise.
     pub async fn shutdown(&self, timeout: Duration) -> bool {
-        // Signal writers to stop — new write/write_fire_and_forget calls
-        // will return ChannelClosed immediately.
         self.shutdown.store(true, Ordering::Relaxed);
 
-        // Take and await the flush handle. The channel stays open until
-        // all senders are dropped (including the one in this struct),
-        // which happens when BatchWriter is dropped. The flush loop
-        // drains remaining buffered events when it sees the channel close.
-        let handle = self.flush_handle.lock().await.take();
-        if let Some(handle) = handle {
-            tokio::time::timeout(timeout, handle).await.is_ok()
-        } else {
-            true
+        let handles: Vec<_> = match self.flush_handles.lock() {
+            Ok(mut g) => g.drain(..).collect(),
+            Err(_) => return false,
+        };
+        if handles.is_empty() {
+            return true;
+        }
+
+        let mut all_ok = true;
+        let deadline = tokio::time::Instant::now() + timeout;
+        for handle in handles {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                handle.abort();
+                all_ok = false;
+                continue;
+            }
+            if tokio::time::timeout(remaining, handle).await.is_err() {
+                all_ok = false;
+            }
+        }
+        all_ok
+    }
+}
+
+impl Drop for BatchWriter {
+    fn drop(&mut self) {
+        // Abort the rotator — it loops forever otherwise. Append loops
+        // exit on their own when senders drop with this struct.
+        if let Ok(mut g) = self.rotator_handle.lock() {
+            if let Some(h) = g.take() {
+                h.abort();
+            }
         }
     }
 }
 
-async fn flush_loop(
+async fn append_loop(
     store: Arc<KdbStore>,
     mut rx: mpsc::Receiver<WriteRequest>,
     config: BatchConfig,
@@ -171,9 +280,6 @@ async fn flush_loop(
     let mut buffer: Vec<WriteRequest> = Vec::with_capacity(config.batch_size);
     let mut interval = tokio::time::interval(config.flush_interval);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-    let capacity = config.channel_capacity as f64;
-    metrics::gauge!("keplor_batch_queue_capacity").set(capacity);
 
     loop {
         tokio::select! {
@@ -188,33 +294,37 @@ async fn flush_loop(
                                 Err(_) => break,
                             }
                         }
-                        // Sample post-dequeue: pairs with the enqueue
-                        // sample in the pipeline so the gauge reflects
-                        // both producers and the consumer.
                         let depth = rx.max_capacity() - rx.capacity();
                         metrics::gauge!("keplor_batch_queue_depth").set(depth as f64);
                         if buffer.len() >= config.batch_size {
-                            flush(&store, &mut buffer).await;
+                            append_only(&store, &mut buffer).await;
                         }
                     },
                     None => {
-                        // Channel closed — drain remaining events.
+                        // Channel closed — drain remaining events and run
+                        // a final checkpoint so the drained data is
+                        // visible to readers post-shutdown.
                         if !buffer.is_empty() {
-                            tracing::info!(events = buffer.len(), "draining batch writer on shutdown");
-                            flush(&store, &mut buffer).await;
+                            tracing::info!(
+                                events = buffer.len(),
+                                "draining batch writer shard on shutdown"
+                            );
+                            append_only(&store, &mut buffer).await;
                         }
+                        let store_for_ckpt = Arc::clone(&store);
+                        let _ = tokio::task::spawn_blocking(move || {
+                            store_for_ckpt.wal_checkpoint()
+                        }).await;
                         metrics::gauge!("keplor_batch_queue_depth").set(0.0);
-                        tracing::info!("batch writer shut down cleanly");
+                        tracing::info!("batch writer shard shut down cleanly");
                         return;
                     },
                 }
             },
             _ = interval.tick() => {
                 if !buffer.is_empty() {
-                    flush(&store, &mut buffer).await;
+                    append_only(&store, &mut buffer).await;
                 }
-                // Tick samples too — keeps the gauge fresh during quiet
-                // periods so dashboards don't see stale data.
                 let depth = rx.max_capacity() - rx.capacity();
                 metrics::gauge!("keplor_batch_queue_depth").set(depth as f64);
             },
@@ -222,18 +332,32 @@ async fn flush_loop(
     }
 }
 
-/// Flush buffered writes via `spawn_blocking` so disk I/O never
-/// blocks a tokio worker thread.
-///
-/// After the batch lands we call `wal_checkpoint` to rotate the in-WAL
-/// events into segment files — KeplorDB queries only see rotated
-/// segments, so without this step no event written through the
-/// [`BatchWriter`] would ever become visible to `POST /v1/events`
-/// follow-up reads. The cost is one segment file per flush cycle;
-/// under the default 50 ms cadence that's ~1200 tiny segments/minute
-/// at idle, which keplor's segment-level GC reclaims on the retention
-/// schedule.
-async fn flush(store: &Arc<KdbStore>, buffer: &mut Vec<WriteRequest>) {
+/// Periodic rotator: makes appended events visible to readers by
+/// rotating WAL shards into segment files. One pass per `interval`,
+/// shared across all append loops. The rotator runs alongside any
+/// caller's synchronous `KdbStore::wal_checkpoint()`; both target the
+/// same per-shard mutexes so concurrent calls serialise correctly,
+/// but only the rotator's path runs without the caller's thread.
+async fn rotator_loop(store: Arc<KdbStore>, interval: Duration) {
+    let mut tick = tokio::time::interval(interval);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // Consume the immediate first tick — there's no data to rotate at boot.
+    tick.tick().await;
+    loop {
+        tick.tick().await;
+        let store = Arc::clone(&store);
+        if let Err(e) = tokio::task::spawn_blocking(move || store.wal_checkpoint()).await {
+            tracing::error!(error = %e, "rotator wal_checkpoint task panicked");
+        }
+    }
+}
+
+/// Append a buffered batch via `spawn_blocking` so disk I/O never
+/// blocks a tokio worker thread. Does NOT rotate the WAL — that is
+/// handled by [`rotator_loop`] on its own cadence. Read-visibility for
+/// callers that need it sooner is via an explicit
+/// `KdbStore::wal_checkpoint()` call after `write().await`.
+async fn append_only(store: &Arc<KdbStore>, buffer: &mut Vec<WriteRequest>) {
     let pending = std::mem::take(buffer);
     let count = pending.len();
 
@@ -249,13 +373,10 @@ async fn flush(store: &Arc<KdbStore>, buffer: &mut Vec<WriteRequest>) {
     let store = Arc::clone(store);
     let result = tokio::task::spawn_blocking(move || {
         // append_batch_durable performs a single fsync per affected tier
-        // at the end of the batch, eliminating the wal_sync_interval
-        // data-loss window. Cost: ~10–50 µs extra per flush on NVMe.
-        // At the default 50 ms cadence that's ~20 fsyncs/sec/tier — well
-        // under what disks can sustain — and gives billing-grade durability
-        // to *every* ingest path, not just X-Keplor-Durable batches.
+        // at the end of the batch. The keplordb engine routes this call
+        // round-robin onto a WAL shard, so N parallel append_only calls
+        // from sibling shard loops fsync N different files in parallel.
         store.append_batch_durable(&batch)?;
-        store.wal_checkpoint()?;
         Ok::<_, StoreError>(batch.iter().map(|e| e.id).collect::<Vec<_>>())
     })
     .await
@@ -279,5 +400,44 @@ async fn flush(store: &Arc<KdbStore>, buffer: &mut Vec<WriteRequest>) {
                 let _ = tx.send(Err(StoreError::Internal(msg.clone())));
             }
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression guard: `pick_shard` must distribute. A naive bug like
+    /// `i % 1` or always-zero would silently funnel everything onto
+    /// shard 0 and the throughput wins evaporate without any visible
+    /// failure. Asserts that 4·N consecutive picks land on every shard
+    /// at least N/2 times — slack for the ABA case where another
+    /// thread interleaves but tight enough that always-zero fails.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pick_shard_distributes_round_robin() {
+        let store = Arc::new(KdbStore::open_in_memory().unwrap());
+        let writer = BatchWriter::new(
+            store,
+            BatchConfig {
+                batch_size: 8,
+                channel_capacity: 64,
+                flush_shards: 8,
+                flush_interval: Duration::from_millis(50),
+            },
+        );
+        let n_shards = writer.txs.len();
+        assert_eq!(n_shards, 8);
+
+        let picks_per_shard = 64usize;
+        let total = n_shards * picks_per_shard;
+        let mut counts = vec![0usize; n_shards];
+        for _ in 0..total {
+            counts[writer.pick_shard()] += 1;
+        }
+        let floor = picks_per_shard / 2;
+        for (i, &c) in counts.iter().enumerate() {
+            assert!(c >= floor, "shard {i} got {c} picks, expected ≥ {floor}");
+        }
+        assert_eq!(counts.iter().sum::<usize>(), total);
     }
 }
