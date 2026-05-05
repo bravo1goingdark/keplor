@@ -334,12 +334,14 @@ async fn append_loop(
 
 /// Periodic rotator: makes appended events visible to readers by
 /// rotating WAL shards into segment files. One pass per `interval`,
-/// shared across all append loops.
+/// shared across all append loops. The rotator runs alongside any
+/// caller's synchronous `KdbStore::wal_checkpoint()`; both target the
+/// same per-shard mutexes so concurrent calls serialise correctly,
+/// but only the rotator's path runs without the caller's thread.
 async fn rotator_loop(store: Arc<KdbStore>, interval: Duration) {
     let mut tick = tokio::time::interval(interval);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    // First tick fires immediately; skip it so we don't rotate before
-    // any events have been appended.
+    // Consume the immediate first tick — there's no data to rotate at boot.
     tick.tick().await;
     loop {
         tick.tick().await;
@@ -350,9 +352,50 @@ async fn rotator_loop(store: Arc<KdbStore>, interval: Duration) {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression guard: `pick_shard` must distribute. A naive bug like
+    /// `i % 1` or always-zero would silently funnel everything onto
+    /// shard 0 and the throughput wins evaporate without any visible
+    /// failure. Asserts that 4·N consecutive picks land on every shard
+    /// at least N/2 times — slack for the ABA case where another
+    /// thread interleaves but tight enough that always-zero fails.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pick_shard_distributes_round_robin() {
+        let store = Arc::new(KdbStore::open_in_memory().unwrap());
+        let writer = BatchWriter::new(
+            store,
+            BatchConfig {
+                batch_size: 8,
+                channel_capacity: 64,
+                flush_shards: 8,
+                flush_interval: Duration::from_millis(50),
+            },
+        );
+        let n_shards = writer.txs.len();
+        assert_eq!(n_shards, 8);
+
+        let picks_per_shard = 64usize;
+        let total = n_shards * picks_per_shard;
+        let mut counts = vec![0usize; n_shards];
+        for _ in 0..total {
+            counts[writer.pick_shard()] += 1;
+        }
+        let floor = picks_per_shard / 2;
+        for (i, &c) in counts.iter().enumerate() {
+            assert!(c >= floor, "shard {i} got {c} picks, expected ≥ {floor}");
+        }
+        assert_eq!(counts.iter().sum::<usize>(), total);
+    }
+}
+
 /// Append a buffered batch via `spawn_blocking` so disk I/O never
 /// blocks a tokio worker thread. Does NOT rotate the WAL — that is
-/// handled by [`rotator_loop`] on its own cadence.
+/// handled by [`rotator_loop`] on its own cadence. Read-visibility for
+/// callers that need it sooner is via an explicit
+/// `KdbStore::wal_checkpoint()` call after `write().await`.
 async fn append_only(store: &Arc<KdbStore>, buffer: &mut Vec<WriteRequest>) {
     let pending = std::mem::take(buffer);
     let count = pending.len();
@@ -397,4 +440,5 @@ async fn append_only(store: &Arc<KdbStore>, buffer: &mut Vec<WriteRequest>) {
             }
         },
     }
+
 }
