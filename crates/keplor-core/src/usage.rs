@@ -110,6 +110,8 @@ impl Usage {
             | Provider::Cohere
             | Provider::OpenRouter
             | Provider::Ollama
+            | Provider::OpenCode
+            | Provider::OpenCodeZen
             | Provider::OpenAICompatible { .. } => self.input_tokens,
         }
     }
