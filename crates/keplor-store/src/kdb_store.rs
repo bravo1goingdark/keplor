@@ -196,7 +196,16 @@ impl KdbStore {
             wal_sync_bytes: config.wal_sync_bytes,
             schema_id: SCHEMA_ID,
             bloom_dim: DIM_USER_ID,
-            rollup_dims: vec![mapping::DIM_USER_ID, mapping::DIM_API_KEY_ID, mapping::DIM_MODEL],
+            // Order matters — query_rollups reads dim[0..4] in this
+            // exact order to rebuild RollupKey. Adding provider as a
+            // grouping dim so /v1/rollups can return per-provider rows
+            // instead of collapsing onto provider="".
+            rollup_dims: vec![
+                mapping::DIM_USER_ID,
+                mapping::DIM_API_KEY_ID,
+                mapping::DIM_MODEL,
+                mapping::DIM_PROVIDER,
+            ],
             mmap_cache_capacity: config.mmap_cache_capacity,
             wal_shard_count: config.wal_shard_count,
             rollup_replay_days: config.rollup_replay_days,
@@ -392,7 +401,11 @@ impl KdbStore {
         limit: u32,
         offset: u32,
     ) -> Result<Vec<RollupRow>, StoreError> {
-        let dim_filters: [Option<&str>; 3] = [user_id, api_key_id, None];
+        // 4-slot filter aligns with the 4-dim rollup index
+        // (user, api_key, model, provider). Caller-side filtering is
+        // only available for user/api_key today; model + provider slots
+        // are unfiltered here and handled by the cross-engine merge.
+        let dim_filters: [Option<&str>; 4] = [user_id, api_key_id, None, None];
         let mut merged: HashMap<RollupKey, RollupAcc> = HashMap::new();
         for eng in self.all_engines() {
             let rows = eng.query_rollups(from_day, to_day, &dim_filters).map_err(kdb_err)?;
@@ -402,6 +415,7 @@ impl KdbStore {
                     user: key.dims.first().cloned().unwrap_or_default(),
                     api_key: key.dims.get(1).cloned().unwrap_or_default(),
                     model: key.dims.get(2).cloned().unwrap_or_default(),
+                    provider: key.dims.get(3).cloned().unwrap_or_default(),
                 };
                 let acc = merged.entry(k).or_default();
                 acc.event_count += val.event_count as i64;
@@ -423,7 +437,7 @@ impl KdbStore {
                 day: k.day,
                 user_id: k.user,
                 api_key_id: k.api_key,
-                provider: String::new(),
+                provider: k.provider,
                 model: k.model,
                 event_count: a.event_count,
                 error_count: a.error_count,
@@ -841,6 +855,7 @@ struct RollupKey {
     user: String,
     api_key: String,
     model: String,
+    provider: String,
 }
 
 #[derive(Default)]
