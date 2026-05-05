@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-/// The 14 provider surfaces Keplor understands.
+/// The 16 provider surfaces Keplor understands.
 ///
 /// Keep variant order stable — the [`Serialize`] impl uses variant names as
 /// stable storage keys.
@@ -47,6 +47,14 @@ pub enum Provider {
     OpenRouter,
     /// Local Ollama (`localhost:11434` by default).
     Ollama,
+    /// OpenCode Go subscription gateway (`opencode.ai/zen/go`).
+    /// Flat-rate $10/mo plan reselling curated open-source coding models
+    /// (GLM, Kimi, MiniMax, MiMo, …) over an OpenAI-compatible API.
+    OpenCode,
+    /// OpenCode Zen pay-as-you-go gateway (`opencode.ai/zen`).
+    /// Same wire format as OpenCode Go but charges per token; ships
+    /// frontier models (Claude, GPT, Gemini) alongside the Go set.
+    OpenCodeZen,
     /// Any other base URL that speaks the OpenAI Chat Completions dialect.
     OpenAICompatible {
         /// Base URL of the compatible endpoint (including scheme + host).
@@ -74,6 +82,8 @@ impl Provider {
             Self::Cohere => "api.cohere.com",
             Self::OpenRouter => "openrouter.ai",
             Self::Ollama => "localhost",
+            Self::OpenCode => "opencode.ai",
+            Self::OpenCodeZen => "opencode.ai",
             Self::OpenAICompatible { base_url } => base_url,
         }
     }
@@ -98,6 +108,8 @@ impl Provider {
             Self::Cohere => "cohere",
             Self::OpenRouter => "openrouter",
             Self::Ollama => "ollama",
+            Self::OpenCode => "opencode",
+            Self::OpenCodeZen => "opencode_zen",
             Self::OpenAICompatible { .. } => "openai_compatible",
         }
     }
@@ -138,6 +150,8 @@ impl Provider {
             "cohere" => Self::Cohere,
             "openrouter" => Self::OpenRouter,
             "ollama" => Self::Ollama,
+            "opencode" => Self::OpenCode,
+            "opencode_zen" => Self::OpenCodeZen,
             other => Self::OpenAICompatible { base_url: Arc::from(other) },
         }
     }
@@ -171,6 +185,10 @@ impl Provider {
             Self::OpenRouter
         } else if s.eq_ignore_ascii_case("ollama") {
             Self::Ollama
+        } else if s.eq_ignore_ascii_case("opencode") {
+            Self::OpenCode
+        } else if s.eq_ignore_ascii_case("opencode_zen") || s.eq_ignore_ascii_case("opencode-zen") {
+            Self::OpenCodeZen
         } else {
             Self::OpenAICompatible { base_url: Arc::from(s) }
         }
@@ -221,6 +239,17 @@ impl Provider {
         if h == "openrouter.ai" {
             return Some(Self::OpenRouter);
         }
+        // OpenCode Go and Zen share the same host. Disambiguate by path
+        // prefix — `/zen/go/...` is the Go subscription, `/zen/...` (no
+        // `/go`) is the Zen pay-as-you-go gateway.
+        if h == "opencode.ai" {
+            if path.starts_with("/zen/go") {
+                return Some(Self::OpenCode);
+            }
+            if path.starts_with("/zen") {
+                return Some(Self::OpenCodeZen);
+            }
+        }
         if h == "localhost" || h.starts_with("localhost:") || h == "127.0.0.1" {
             // Default Ollama port is 11434; also accept arbitrary local
             // ports that talk to /api/chat or /api/generate.
@@ -268,6 +297,9 @@ mod tests {
             ("api.deepseek.com", "/chat/completions", Some(Provider::DeepSeek)),
             ("api.cohere.com", "/v2/chat", Some(Provider::Cohere)),
             ("api.cohere.ai", "/v2/chat", Some(Provider::Cohere)),
+            ("opencode.ai", "/zen/go/v1/chat/completions", Some(Provider::OpenCode)),
+            ("opencode.ai", "/zen/v1/chat/completions", Some(Provider::OpenCodeZen)),
+            ("opencode.ai", "/zen/v1/messages", Some(Provider::OpenCodeZen)),
             ("localhost:11434", "/api/chat", Some(Provider::Ollama)),
             ("127.0.0.1", "/api/generate", Some(Provider::Ollama)),
             ("localhost:8080", "/other", None),
@@ -305,6 +337,8 @@ mod tests {
             Provider::DeepSeek,
             Provider::Cohere,
             Provider::Ollama,
+            Provider::OpenCode,
+            Provider::OpenCodeZen,
             Provider::OpenAICompatible { base_url: Arc::from("https://example.com") },
         ];
         let mut keys: Vec<&str> = provs.iter().map(Provider::id_key).collect();
