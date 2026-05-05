@@ -299,9 +299,8 @@ async fn include_archived_with_no_archiver_falls_through_to_live_only() {
     // yet at the moment we read.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     let events = loop {
-        let resp = reqwest::get(format!("{base}/v1/events?limit=10&include_archived=true"))
-            .await
-            .unwrap();
+        let resp =
+            reqwest::get(format!("{base}/v1/events?limit=10&include_archived=true")).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let json: serde_json::Value = resp.json().await.unwrap();
         let events = json["events"].as_array().unwrap().clone();
