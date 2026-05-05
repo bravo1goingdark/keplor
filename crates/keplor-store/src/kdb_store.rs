@@ -817,6 +817,8 @@ fn llm_to_summary(ev: LlmEvent) -> EventSummary {
         source: ev.source.map(|s| s.to_string()),
         error_type: ev.error.as_ref().map(|e| provider_error_type_key(e).to_owned()),
         metadata_json: ev.metadata.as_ref().map(|v| v.to_string()),
+        client_ip: ev.client_ip.map(|ip| ip.to_string()),
+        user_agent: ev.user_agent.map(|ua| ua.to_string()),
     }
 }
 

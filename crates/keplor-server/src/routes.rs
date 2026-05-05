@@ -224,6 +224,16 @@ pub struct EventResponse {
     pub streaming: bool,
     pub error: Option<String>,
     pub metadata: Option<serde_json::Value>,
+    /// Client source IP as a string. Surfaced for SDK / geographic
+    /// breakdowns; never None in practice — events without a recorded
+    /// IP show as `null`. Consumers should bucket to /24 for IPv4
+    /// before display rather than render raw addresses.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_ip: Option<String>,
+    /// Caller-supplied User-Agent string. Used by clients to derive
+    /// coarse SDK identification (e.g. `openai-python/1.42`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_agent: Option<String>,
 }
 
 /// Token usage in query response.
@@ -317,6 +327,8 @@ pub async fn query_events(
                 endpoint: e.endpoint,
                 streaming: e.streaming,
                 error: e.error_type,
+                client_ip: e.client_ip,
+                user_agent: e.user_agent,
                 metadata,
             }
         })
@@ -506,6 +518,8 @@ fn llm_event_to_response(ev: keplor_core::LlmEvent) -> EventResponse {
             .to_owned()
         }),
         metadata: ev.metadata,
+        client_ip: ev.client_ip.map(|ip| ip.to_string()),
+        user_agent: ev.user_agent.map(|ua| ua.to_string()),
     }
 }
 
@@ -1024,6 +1038,8 @@ pub async fn export_events(
                             .metadata_json
                             .as_deref()
                             .and_then(|s| serde_json::from_str(s).ok()),
+                        client_ip: event.client_ip,
+                        user_agent: event.user_agent,
                     };
                     if let Ok(json) = serde_json::to_string(&resp) {
                         lines.push(json);
