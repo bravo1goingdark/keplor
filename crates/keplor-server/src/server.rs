@@ -301,7 +301,7 @@ impl PipelineServer {
                     // Validate S3 connectivity at startup — fail fast on
                     // bad credentials instead of discovering errors hours
                     // later on the first archive cycle.
-                    if let Err(e) = archiver.probe() {
+                    if let Err(e) = archiver.probe().await {
                         tracing::error!(
                             error = %e,
                             "S3 connectivity check failed — archival disabled. \
