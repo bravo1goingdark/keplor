@@ -79,6 +79,14 @@ pub struct EventSummary {
     pub error_type: Option<String>,
     /// Arbitrary metadata as JSON text.
     pub metadata_json: Option<String>,
+    /// Client source IP as a string ("203.0.113.1" or "2001:db8::1").
+    /// Already accepted on ingest and stored in the label table —
+    /// surfaced here so consumers can derive geographic / network
+    /// breakdowns without re-querying the raw event row.
+    pub client_ip: Option<String>,
+    /// Caller-supplied User-Agent header. Used to derive coarse SDK
+    /// identification (e.g. "openai-python", "anthropic-sdk-typescript").
+    pub user_agent: Option<String>,
 }
 
 /// Cost + event count from a quota query.
