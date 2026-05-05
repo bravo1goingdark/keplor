@@ -38590,5 +38590,131 @@
         "tool_use_system_prompt_tokens": 346,
         "supports_native_structured_output": true,
         "supports_pdf_input": true
+    },
+    "opencode/glm-5.1": {
+        "max_tokens": 8192,
+        "max_input_tokens": 200000,
+        "max_output_tokens": 8192,
+        "input_cost_per_token": 9.5e-07,
+        "output_cost_per_token": 3.15e-06,
+        "litellm_provider": "opencode",
+        "mode": "chat"
+    },
+    "opencode/glm-5": {
+        "max_tokens": 8192,
+        "max_input_tokens": 200000,
+        "max_output_tokens": 8192,
+        "input_cost_per_token": 9.5e-07,
+        "output_cost_per_token": 3.15e-06,
+        "litellm_provider": "opencode",
+        "mode": "chat"
+    },
+    "opencode/kimi-k2.6": {
+        "max_tokens": 8192,
+        "max_input_tokens": 256000,
+        "max_output_tokens": 8192,
+        "input_cost_per_token": 6e-07,
+        "output_cost_per_token": 3.03e-06,
+        "litellm_provider": "opencode",
+        "mode": "chat"
+    },
+    "opencode/kimi-k2.5": {
+        "max_tokens": 8192,
+        "max_input_tokens": 256000,
+        "max_output_tokens": 8192,
+        "input_cost_per_token": 6e-07,
+        "output_cost_per_token": 3.03e-06,
+        "litellm_provider": "opencode",
+        "mode": "chat"
+    },
+    "opencode/minimax-m2.7": {
+        "max_tokens": 8192,
+        "max_input_tokens": 245760,
+        "max_output_tokens": 8192,
+        "input_cost_per_token": 3.6e-07,
+        "output_cost_per_token": 1.44e-06,
+        "litellm_provider": "opencode",
+        "mode": "chat"
+    },
+    "opencode/minimax-m2.5": {
+        "max_tokens": 8192,
+        "max_input_tokens": 245760,
+        "max_output_tokens": 8192,
+        "input_cost_per_token": 3.6e-07,
+        "output_cost_per_token": 1.44e-06,
+        "litellm_provider": "opencode",
+        "mode": "chat"
+    },
+    "opencode/mimo-v2-pro": {
+        "max_tokens": 8192,
+        "max_input_tokens": 200000,
+        "max_output_tokens": 8192,
+        "input_cost_per_token": 9e-08,
+        "output_cost_per_token": 2.9e-07,
+        "litellm_provider": "opencode",
+        "mode": "chat"
+    },
+    "opencode/mimo-v2-omni": {
+        "max_tokens": 8192,
+        "max_input_tokens": 200000,
+        "max_output_tokens": 8192,
+        "input_cost_per_token": 9e-08,
+        "output_cost_per_token": 2.9e-07,
+        "litellm_provider": "opencode",
+        "mode": "chat"
+    },
+    "opencode/mimo-v2.5": {
+        "max_tokens": 8192,
+        "max_input_tokens": 200000,
+        "max_output_tokens": 8192,
+        "input_cost_per_token": 9e-08,
+        "output_cost_per_token": 2.9e-07,
+        "litellm_provider": "opencode",
+        "mode": "chat"
+    },
+    "opencode/mimo-v2.5-pro": {
+        "max_tokens": 8192,
+        "max_input_tokens": 200000,
+        "max_output_tokens": 8192,
+        "input_cost_per_token": 9e-08,
+        "output_cost_per_token": 2.9e-07,
+        "litellm_provider": "opencode",
+        "mode": "chat"
+    },
+    "opencode/qwen3.5-plus": {
+        "max_tokens": 8192,
+        "max_input_tokens": 131072,
+        "max_output_tokens": 8192,
+        "input_cost_per_token": 6e-07,
+        "output_cost_per_token": 1.5e-06,
+        "litellm_provider": "opencode",
+        "mode": "chat"
+    },
+    "opencode/qwen3.6-plus": {
+        "max_tokens": 8192,
+        "max_input_tokens": 131072,
+        "max_output_tokens": 8192,
+        "input_cost_per_token": 6e-07,
+        "output_cost_per_token": 1.5e-06,
+        "litellm_provider": "opencode",
+        "mode": "chat"
+    },
+    "opencode/deepseek-v4-pro": {
+        "max_tokens": 8192,
+        "max_input_tokens": 128000,
+        "max_output_tokens": 8192,
+        "input_cost_per_token": 5.8e-07,
+        "output_cost_per_token": 1.68e-06,
+        "litellm_provider": "opencode",
+        "mode": "chat"
+    },
+    "opencode/deepseek-v4-flash": {
+        "max_tokens": 8192,
+        "max_input_tokens": 128000,
+        "max_output_tokens": 8192,
+        "input_cost_per_token": 5.8e-07,
+        "output_cost_per_token": 1.68e-06,
+        "litellm_provider": "opencode",
+        "mode": "chat"
     }
 }
