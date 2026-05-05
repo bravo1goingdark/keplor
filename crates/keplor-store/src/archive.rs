@@ -67,11 +67,11 @@ impl Archiver {
     /// Call at startup to fail fast on invalid credentials or
     /// unreachable endpoints instead of discovering errors hours
     /// later on the first archive cycle.
-    pub fn probe(&self) -> Result<(), StoreError> {
+    pub async fn probe(&self) -> Result<(), StoreError> {
         let probe_path = ObjPath::from(format!("{}/_probe", self.prefix));
         // A HEAD on a non-existent key returns 404, not an auth error.
         // An auth failure returns 403. Both are valid S3 responses.
-        match tokio::runtime::Handle::current().block_on(self.client.head(&probe_path)) {
+        match self.client.head(&probe_path).await {
             Ok(_) => Ok(()),
             Err(object_store::Error::NotFound { .. }) => Ok(()), // 404 = reachable
             Err(e) => Err(StoreError::ArchiveS3(format!("probe failed: {e}"))),
