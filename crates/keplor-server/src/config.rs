@@ -330,6 +330,11 @@ pub struct PipelineConfig {
     /// files; higher = better disk utilisation under sustained
     /// write load. Default: 50 ms. Range: 1–10000.
     pub flush_interval_ms: u64,
+    /// Number of parallel BatchWriter shards. Each shard owns an
+    /// independent channel + append loop, fanning writes across the
+    /// keplordb engine's WAL shards for parallel fsync. Default: 4.
+    /// Tune up to (but not above) `storage.wal_shard_count`. Range: 1–64.
+    pub flush_shards: usize,
 }
 
 impl Default for PipelineConfig {
@@ -340,6 +345,7 @@ impl Default for PipelineConfig {
             channel_capacity: 32_768,
             write_timeout_secs: 10,
             flush_interval_ms: 50,
+            flush_shards: 4,
         }
     }
 }
@@ -476,6 +482,12 @@ impl ServerConfig {
             return Err(format!(
                 "pipeline.flush_interval_ms = {} must be in [1, 10000]",
                 self.pipeline.flush_interval_ms
+            ));
+        }
+        if self.pipeline.flush_shards == 0 || self.pipeline.flush_shards > 64 {
+            return Err(format!(
+                "pipeline.flush_shards = {} must be in [1, 64]",
+                self.pipeline.flush_shards
             ));
         }
         if self.storage.rollup_loop_secs < 5 || self.storage.rollup_loop_secs > 3600 {
